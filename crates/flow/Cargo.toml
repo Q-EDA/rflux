@@ -1,0 +1,16 @@
+[package]
+name = "rflux-flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+rflux-place = { path = "../place" }
+rflux-route = { path = "../route" }
+rflux-sim = { path = "../sim" }
+rflux-synth = { path = "../synth" }
+rflux-tech = { path = "../tech" }
+rflux-timing = { path = "../timing" }
+serde_json.workspace = true
+thiserror.workspace = true

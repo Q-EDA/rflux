@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_external_waveform_compare:
+        description: "Run optional external JoSIM waveform compare job"
+        required: false
+        default: false
+        type: boolean
+      josim_command:
+        description: "JoSIM command/path for compare tests"
+        required: false
+        default: "josim"
+        type: string
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Sync Python dependencies
+        run: uv sync --all-groups
+
+      - name: Rust tests
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test --workspace
+
+      - name: Python tests
+        run: uv run pytest
+
+  waveform-compare-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_external_waveform_compare }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Sync Python dependencies
+        run: uv sync --all-groups
+
+      - name: Build Python extension
+        run: uv run maturin develop -m crates/py/Cargo.toml
+
+      - name: Run optional external waveform compare tests
+        env:
+          RFLOW_JOSIM_COMMAND: ${{ inputs.josim_command }}
+        run: uv run pytest python/tests/test_waveform_compare.py -rs

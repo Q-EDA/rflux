@@ -1,0 +1,9 @@
+.title k-mutual-smoke
+K1 L1 L2 coupling = 0.9
+V1 in 0 PULSE(0,1m,0,1p,1p,2p,8p)
+L1 in out 1p
+R1 out 0 1
+L2 tap 0 1p
+R2 tap 0 1
+.tran 1p 8p
+.end

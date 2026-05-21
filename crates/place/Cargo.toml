@@ -1,0 +1,9 @@
+[package]
+name = "rflux-place"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+thiserror.workspace = true

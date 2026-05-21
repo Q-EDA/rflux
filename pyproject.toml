@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.6,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rflux"
+version = "0.1.0"
+description = "Rust-first SFQ EDA toolkit bindings and scripts"
+readme = "docs/project-design.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "maturin>=1.6",
+  "pytest>=8.0",
+  "ruff>=0.5",
+]
+
+[tool.maturin]
+manifest-path = "crates/py/Cargo.toml"
+python-source = "python"
+module-name = "rflux._core"
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+pythonpath = ["python"]
+testpaths = ["python/tests"]

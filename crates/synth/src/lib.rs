@@ -1,0 +1,1804 @@
+mod bool_opt;
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use rflux_ir::{IrError, Netlist, NodeKind, PinRef};
+use rflux_sat::{solve_with_metrics as sat_solve_with_metrics, CnfFormula, Lit, SolveResult, SolveStats};
+use rflux_tech::{Pdk, SfCell, SfCellKind};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SynthError {
+    #[error("ir error: {0}")]
+    Ir(#[from] IrError),
+    #[error("could not rewire source pin {0:?} during splitter insertion")]
+    MissingExistingSink(PinRef),
+    #[error("could not locate sink for source pin {0:?} when inserting balancing dff")]
+    MissingSinkForDffInsertion(PinRef),
+    #[error("boolean optimization does not support node kind {0:?}")]
+    UnsupportedBoolOptNodeKind(NodeKind),
+    #[error("boolean optimization requires a driving source for node {0}")]
+    MissingBoolOptDriver(usize),
+    #[error("boolean optimization expected node {node} to have {expected} input(s), found {actual}")]
+    UnexpectedBoolOptInputCount {
+        node: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("could not resolve a combinational order for the netlist")]
+    CombinationalCycle,
+    #[error("boolean optimization encountered an unsupported dependency pattern")]
+    CycleOrUnsupportedDependency,
+    #[error("sat interface mismatch: {0}")]
+    SatInterfaceMismatch(String),
+    #[error("sat check does not support node {node} kind {kind:?}")]
+    SatUnsupportedNodeKind {
+        node: usize,
+        kind: NodeKind,
+    },
+    #[error("sat check expected node {node} to have {expected} input(s), found {actual}")]
+    SatUnexpectedInputCount {
+        node: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("sat encoding error: {0}")]
+    SatEncoding(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SatEquivalenceReport {
+    pub equivalent: bool,
+    pub checked_outputs: Vec<String>,
+    pub counterexample_inputs: Option<BTreeMap<String, bool>>,
+    pub counterexample_outputs: Option<BTreeMap<String, SatOutputMismatch>>,
+    pub sat_stats: SolveStats,
+    pub sat_elapsed_ns: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SatOutputMismatch {
+    pub lhs: bool,
+    pub rhs: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionSpec {
+    pub from: PinRef,
+    pub to: PinRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BalanceStrategy {
+    #[default]
+    None,
+    Explicit,
+    AllConnectedSources,
+    BySinkLevel,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompilePlan {
+    pub connections: Vec<ConnectionSpec>,
+    pub balance_strategy: BalanceStrategy,
+    pub balancing_sources: Vec<PinRef>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SynthesisConfig {
+    pub plan: CompilePlan,
+    pub bool_opt: BoolOptConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompileReport {
+    pub connections_applied: usize,
+    pub splitters_inserted: usize,
+    pub balancing_dffs_inserted: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoolOptConfig {
+    pub share_logic_flattening_limit: usize,
+    pub infer_xor_mux: bool,
+    pub infer_dffe: bool,
+}
+
+impl Default for BoolOptConfig {
+    fn default() -> Self {
+        Self {
+            share_logic_flattening_limit: 8,
+            infer_xor_mux: true,
+            infer_dffe: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoolOptReport {
+    pub gate_count_before: usize,
+    pub gate_count_after: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathBalanceNeed {
+    pub sink_node: usize,
+    pub source: PinRef,
+    pub deficit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PathBalanceReport {
+    pub node_levels: Vec<usize>,
+    pub needs: Vec<PathBalanceNeed>,
+}
+
+impl PathBalanceReport {
+    pub fn total_insertions(&self) -> usize {
+        self.needs.iter().map(|need| need.deficit).sum()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoolOptCompatibilityIssueKind {
+    UnsupportedNodeKind,
+    MissingDriver,
+    UnexpectedInputCount,
+    CycleOrUnresolvedDependency,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoolOptCompatibilityIssue {
+    pub node: usize,
+    pub kind: BoolOptCompatibilityIssueKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoolOptCompatibilityReport {
+    pub input_nodes: Vec<usize>,
+    pub output_candidates: Vec<usize>,
+    pub issues: Vec<BoolOptCompatibilityIssue>,
+}
+
+impl BoolOptCompatibilityReport {
+    pub fn is_compatible(&self) -> bool {
+        self.issues.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SynthesisReport {
+    pub compile: CompileReport,
+    pub bool_opt: BoolOptReport,
+    pub tech_map: TechMapReport,
+    pub path_balance: PathBalanceReport,
+    pub bool_opt_compatibility: BoolOptCompatibilityReport,
+    pub node_count: usize,
+    pub edge_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TechMappedNode<'a> {
+    pub node_name: &'a str,
+    pub cell: &'a SfCell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TechMapReport {
+    pub mapped_nodes: usize,
+    pub total_area_um2: f64,
+}
+
+pub struct TechMapper<'a> {
+    pdk: &'a Pdk,
+}
+
+impl<'a> TechMapper<'a> {
+    pub fn new(pdk: &'a Pdk) -> Self {
+        Self { pdk }
+    }
+
+    pub fn map_kind(kind: &NodeKind) -> SfCellKind {
+        match kind {
+            NodeKind::CellInstance => SfCellKind::GenericGate,
+            NodeKind::MacroCell => SfCellKind::Macro,
+            NodeKind::Splitter => SfCellKind::Splitter,
+            NodeKind::Dff => SfCellKind::Dff,
+            NodeKind::Jtl => SfCellKind::Jtl,
+            NodeKind::Ptl => SfCellKind::Ptl,
+            NodeKind::Port => SfCellKind::Port,
+        }
+    }
+
+    pub fn map_netlist(&self, netlist: &'a Netlist) -> Vec<TechMappedNode<'a>> {
+        netlist
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let kind = Self::map_kind(&node.kind);
+                self.pdk
+                    .cell_library
+                    .find_by_name(&node.name)
+                    .or_else(|| self.pdk.cell_library.find_by_kind(kind))
+                    .map(|cell| TechMappedNode {
+                    node_name: &node.name,
+                    cell,
+                })
+            })
+            .collect()
+    }
+
+    pub fn map_report(&self, netlist: &'a Netlist) -> TechMapReport {
+        let mapped = self.map_netlist(netlist);
+        TechMapReport {
+            mapped_nodes: mapped.len(),
+            total_area_um2: mapped.iter().map(|entry| entry.cell.area_um2).sum(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Compiler {
+    next_splitter_id: usize,
+    next_balance_dff_id: usize,
+}
+
+impl Compiler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn compile(&mut self, netlist: &mut Netlist, from: PinRef, to: PinRef) -> Result<(), SynthError> {
+        self.connect_with_splitter(netlist, from, to).map(|_| ())
+    }
+
+    pub fn compile_plan(
+        &mut self,
+        netlist: &mut Netlist,
+        plan: &CompilePlan,
+    ) -> Result<CompileReport, SynthError> {
+        let mut report = CompileReport::default();
+
+        for connection in &plan.connections {
+            let inserted_splitter = self.connect_with_splitter(netlist, connection.from, connection.to)?;
+            report.connections_applied += 1;
+            if inserted_splitter {
+                report.splitters_inserted += 1;
+            }
+        }
+
+        for source in self.collect_balancing_sources(netlist, plan) {
+            self.insert_balancing_dff(netlist, source)?;
+            report.balancing_dffs_inserted += 1;
+        }
+
+        if matches!(plan.balance_strategy, BalanceStrategy::BySinkLevel) {
+            report.balancing_dffs_inserted += self.balance_by_sink_level(netlist)?;
+        }
+
+        Ok(report)
+    }
+
+    pub fn compile_netlist(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &SynthesisConfig,
+    ) -> Result<SynthesisReport, SynthError> {
+        let compile = self.compile_plan(netlist, &config.plan)?;
+        let bool_opt = self.optimize_boolean_network(netlist, &config.bool_opt);
+        let path_balance = self.analyze_path_balancing(netlist)?;
+        let tech_map = TechMapper::new(pdk).map_report(netlist);
+        let bool_opt_compatibility = self.analyze_bool_opt_compatibility(netlist);
+
+        Ok(SynthesisReport {
+            compile,
+            bool_opt,
+            tech_map,
+            path_balance,
+            bool_opt_compatibility,
+            node_count: netlist.node_count(),
+            edge_count: netlist.edge_count(),
+        })
+    }
+
+    pub fn insert_balancing_dff(
+        &mut self,
+        netlist: &mut Netlist,
+        from: PinRef,
+    ) -> Result<PinRef, SynthError> {
+        let previous_sink = netlist
+            .disconnect(from)
+            .ok_or(SynthError::MissingSinkForDffInsertion(from))?;
+
+        let dff_name = format!("balance_dff_{}", self.next_balance_dff_id);
+        self.next_balance_dff_id += 1;
+        let dff = netlist.add_node(NodeKind::Dff, dff_name);
+
+        let dff_in = PinRef { node: dff, port: 0 };
+        let dff_out = PinRef { node: dff, port: 1 };
+
+        netlist.connect(from, dff_in)?;
+        netlist.connect(dff_out, previous_sink)?;
+
+        Ok(dff_out)
+    }
+
+    fn connect_with_splitter(
+        &mut self,
+        netlist: &mut Netlist,
+        from: PinRef,
+        to: PinRef,
+    ) -> Result<bool, SynthError> {
+        match netlist.connect(from, to) {
+            Ok(()) => Ok(false),
+            Err(IrError::DestinationAlreadyDriven) => Err(IrError::DestinationAlreadyDriven.into()),
+            Err(IrError::SourceAlreadyConnected) => {
+                let previous_sink = netlist
+                    .disconnect(from)
+                    .ok_or(SynthError::MissingExistingSink(from))?;
+
+                let splitter_name = format!("auto_splitter_{}", self.next_splitter_id);
+                self.next_splitter_id += 1;
+                let splitter = netlist.add_node(NodeKind::Splitter, splitter_name);
+
+                let splitter_in = PinRef {
+                    node: splitter,
+                    port: 0,
+                };
+                let splitter_out_a = PinRef {
+                    node: splitter,
+                    port: 1,
+                };
+                let splitter_out_b = PinRef {
+                    node: splitter,
+                    port: 2,
+                };
+
+                netlist.connect(from, splitter_in)?;
+                netlist.connect(splitter_out_a, previous_sink)?;
+                netlist.connect(splitter_out_b, to)?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn collect_balancing_sources(&self, netlist: &Netlist, plan: &CompilePlan) -> Vec<PinRef> {
+        match plan.balance_strategy {
+            BalanceStrategy::None => Vec::new(),
+            BalanceStrategy::Explicit => plan.balancing_sources.clone(),
+            BalanceStrategy::AllConnectedSources => netlist
+                .edge_pairs()
+                .into_iter()
+                .map(|(from, _)| from)
+                .collect(),
+            BalanceStrategy::BySinkLevel => Vec::new(),
+        }
+    }
+
+    fn balance_by_sink_level(&mut self, netlist: &mut Netlist) -> Result<usize, SynthError> {
+        let analysis = self.analyze_path_balancing(netlist)?;
+        let mut inserted = 0;
+        for need in analysis.needs {
+            let mut current = need.source;
+            for _ in 0..need.deficit {
+                current = self.insert_balancing_dff(netlist, current)?;
+                inserted += 1;
+            }
+        }
+
+        Ok(inserted)
+    }
+
+    pub fn analyze_path_balancing(&self, netlist: &Netlist) -> Result<PathBalanceReport, SynthError> {
+        let levels = self.compute_node_levels(netlist)?;
+        let mut incoming_by_sink: std::collections::BTreeMap<usize, Vec<(PinRef, usize)>> =
+            std::collections::BTreeMap::new();
+
+        for (from, to) in netlist.edge_pairs() {
+            incoming_by_sink
+                .entry(to.node.0)
+                .or_default()
+                .push((from, levels[from.node.0]));
+        }
+
+        let mut needs = Vec::new();
+        for (sink_node, incoming) in incoming_by_sink {
+            if incoming.len() < 2 {
+                continue;
+            }
+
+            let max_level = incoming.iter().map(|(_, level)| *level).max().unwrap_or(0);
+            for (source, level) in incoming {
+                let deficit = max_level.saturating_sub(level);
+                if deficit > 0 {
+                    needs.push(PathBalanceNeed {
+                        sink_node,
+                        source,
+                        deficit,
+                    });
+                }
+            }
+        }
+
+        Ok(PathBalanceReport {
+            node_levels: levels,
+            needs,
+        })
+    }
+
+    fn compute_node_levels(&self, netlist: &Netlist) -> Result<Vec<usize>, SynthError> {
+        let node_count = netlist.node_count();
+        let mut indegree = vec![0usize; node_count];
+        let mut adjacency = vec![Vec::<usize>::new(); node_count];
+        for (from, to) in netlist.edge_pairs() {
+            indegree[to.node.0] += 1;
+            adjacency[from.node.0].push(to.node.0);
+        }
+
+        let mut queue = std::collections::VecDeque::new();
+        for (node, degree) in indegree.iter().enumerate() {
+            if *degree == 0 {
+                queue.push_back(node);
+            }
+        }
+
+        let mut levels = vec![0usize; node_count];
+        let mut visited = 0usize;
+        while let Some(node) = queue.pop_front() {
+            visited += 1;
+            let next_level = levels[node] + 1;
+            for succ in &adjacency[node] {
+                if next_level > levels[*succ] {
+                    levels[*succ] = next_level;
+                }
+                indegree[*succ] -= 1;
+                if indegree[*succ] == 0 {
+                    queue.push_back(*succ);
+                }
+            }
+        }
+
+        if visited != node_count {
+            return Err(SynthError::CombinationalCycle);
+        }
+
+        Ok(levels)
+    }
+
+    pub fn check_boolean_equivalence_sat(
+        &self,
+        lhs: &Netlist,
+        rhs: &Netlist,
+    ) -> Result<SatEquivalenceReport, SynthError> {
+        let mut formula = CnfFormula::new(0);
+        let mut shared_input_vars = BTreeMap::<String, usize>::new();
+
+        let lhs_encoded = encode_netlist_for_sat(lhs, &mut formula, &mut shared_input_vars)?;
+        let rhs_encoded = encode_netlist_for_sat(rhs, &mut formula, &mut shared_input_vars)?;
+
+        if lhs_encoded.inputs != rhs_encoded.inputs {
+            return Err(SynthError::SatInterfaceMismatch(format!(
+                "input sets differ: lhs={:?}, rhs={:?}",
+                lhs_encoded.inputs, rhs_encoded.inputs
+            )));
+        }
+        if lhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+            != rhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+        {
+            return Err(SynthError::SatInterfaceMismatch(format!(
+                "output sets differ: lhs={:?}, rhs={:?}",
+                lhs_encoded.outputs.keys().collect::<Vec<_>>(),
+                rhs_encoded.outputs.keys().collect::<Vec<_>>()
+            )));
+        }
+        if lhs_encoded.outputs.is_empty() {
+            return Err(SynthError::SatInterfaceMismatch(
+                "no named output ports found for comparison".to_string(),
+            ));
+        }
+
+        let mut checked_outputs = Vec::new();
+        let mut diff_literals = Vec::new();
+        let mut output_vars = Vec::<(String, usize, usize)>::new();
+        for output in lhs_encoded.outputs.keys() {
+            let lhs_var = *lhs_encoded
+                .outputs
+                .get(output)
+                .expect("lhs output key must exist");
+            let rhs_var = *rhs_encoded
+                .outputs
+                .get(output)
+                .expect("rhs output key must exist");
+            let diff_var = formula.add_var();
+            encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
+            diff_literals.push(Lit::pos(diff_var));
+            checked_outputs.push(output.clone());
+            output_vars.push((output.clone(), lhs_var, rhs_var));
+        }
+        formula
+            .add_clause(diff_literals)
+            .map_err(|err| SynthError::SatEncoding(format!("{err:?}")))?;
+
+        let (solve_result, sat_metrics) = sat_solve_with_metrics(&formula);
+
+        match solve_result {
+            SolveResult::Unsatisfiable => Ok(SatEquivalenceReport {
+                equivalent: true,
+                checked_outputs,
+                counterexample_inputs: None,
+                counterexample_outputs: None,
+                sat_stats: sat_metrics.stats,
+                sat_elapsed_ns: sat_metrics.elapsed_ns,
+            }),
+            SolveResult::Satisfiable(model) => {
+                let mut assignment = BTreeMap::new();
+                for (name, var) in &shared_input_vars {
+                    assignment.insert(name.clone(), model.value(*var).unwrap_or(false));
+                }
+                let mut output_mismatch = BTreeMap::new();
+                for (name, lhs_var, rhs_var) in output_vars {
+                    output_mismatch.insert(
+                        name,
+                        SatOutputMismatch {
+                            lhs: model.value(lhs_var).unwrap_or(false),
+                            rhs: model.value(rhs_var).unwrap_or(false),
+                        },
+                    );
+                }
+                Ok(SatEquivalenceReport {
+                    equivalent: false,
+                    checked_outputs,
+                    counterexample_inputs: Some(assignment),
+                    counterexample_outputs: Some(output_mismatch),
+                    sat_stats: sat_metrics.stats,
+                    sat_elapsed_ns: sat_metrics.elapsed_ns,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SatEncodedNetlist {
+    inputs: BTreeSet<String>,
+    outputs: BTreeMap<String, usize>,
+}
+
+fn encode_netlist_for_sat(
+    netlist: &Netlist,
+    formula: &mut CnfFormula,
+    shared_input_vars: &mut BTreeMap<String, usize>,
+) -> Result<SatEncodedNetlist, SynthError> {
+    let topo = topological_order_for_sat(netlist)?;
+    let (mut incoming_by_node, outdegree) = incoming_and_outdegree_for_sat(netlist);
+    for incoming in &mut incoming_by_node {
+        incoming.sort_by_key(|(port, _)| *port);
+    }
+
+    let mut node_var = vec![None::<usize>; netlist.node_count()];
+    let mut inputs = BTreeSet::new();
+    let mut outputs = BTreeMap::new();
+
+    for node_index in topo {
+        let node = &netlist.nodes()[node_index];
+        let incoming = &incoming_by_node[node_index];
+
+        if incoming.is_empty() {
+            match node.kind {
+                NodeKind::Port => {
+                    let var = *shared_input_vars
+                        .entry(node.name.clone())
+                        .or_insert_with(|| formula.add_var());
+                    node_var[node_index] = Some(var);
+                    inputs.insert(node.name.clone());
+                }
+                _ => {
+                    return Err(SynthError::SatUnsupportedNodeKind {
+                        node: node_index,
+                        kind: node.kind.clone(),
+                    })
+                }
+            }
+            continue;
+        }
+
+        let operand_vars: Vec<usize> = incoming
+            .iter()
+            .map(|(_, source)| node_var[source.node.0].expect("topo order should resolve vars"))
+            .collect();
+
+        let produced_var = match node.kind {
+            NodeKind::Port | NodeKind::Splitter | NodeKind::Jtl | NodeKind::Ptl => {
+                if operand_vars.len() != 1 {
+                    return Err(SynthError::SatUnexpectedInputCount {
+                        node: node_index,
+                        expected: 1,
+                        actual: operand_vars.len(),
+                    });
+                }
+                operand_vars[0]
+            }
+            NodeKind::CellInstance | NodeKind::MacroCell => {
+                let op = node.logic_op.clone().unwrap_or(rflux_ir::LogicOp::And);
+                let output_var = formula.add_var();
+                encode_gate_relation(formula, output_var, &operand_vars, &op)?;
+                output_var
+            }
+            NodeKind::Dff => {
+                return Err(SynthError::SatUnsupportedNodeKind {
+                    node: node_index,
+                    kind: NodeKind::Dff,
+                })
+            }
+        };
+
+        node_var[node_index] = Some(produced_var);
+    }
+
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::Port) || outdegree[node.id.0] != 0 {
+            continue;
+        }
+        if incoming_by_node[node.id.0].is_empty() {
+            continue;
+        }
+        outputs.insert(
+            node.name.clone(),
+            node_var[node.id.0].expect("encoded output port must have variable"),
+        );
+    }
+
+    Ok(SatEncodedNetlist { inputs, outputs })
+}
+
+fn encode_gate_relation(
+    formula: &mut CnfFormula,
+    output_var: usize,
+    operands: &[usize],
+    op: &rflux_ir::LogicOp,
+) -> Result<(), SynthError> {
+    use rflux_ir::LogicOp;
+
+    match op {
+        LogicOp::Buf => {
+            if operands.len() != 1 {
+                return Err(SynthError::SatEncoding(format!(
+                    "BUF expects 1 input, got {}",
+                    operands.len()
+                )));
+            }
+            add_buf_eq(formula, output_var, operands[0])
+        }
+        LogicOp::And => encode_and_eq(formula, output_var, operands),
+        LogicOp::Or => encode_or_eq(formula, output_var, operands),
+        LogicOp::Xor => encode_xor_nary_eq(formula, output_var, operands),
+        LogicOp::Mux2 => {
+            if operands.len() != 3 {
+                return Err(SynthError::SatEncoding(format!(
+                    "MUX2 expects 3 inputs, got {}",
+                    operands.len()
+                )));
+            }
+            encode_mux2_eq(formula, output_var, operands[0], operands[1], operands[2])
+        }
+        LogicOp::DffEnable => Err(SynthError::SatEncoding(
+            "DffEnable is sequential and not supported in combinational SAT check".to_string(),
+        )),
+    }
+}
+
+fn add_clause(formula: &mut CnfFormula, clause: Vec<Lit>) -> Result<(), SynthError> {
+    formula
+        .add_clause(clause)
+        .map_err(|err| SynthError::SatEncoding(format!("{err:?}")))
+}
+
+fn add_buf_eq(formula: &mut CnfFormula, z: usize, x: usize) -> Result<(), SynthError> {
+    add_clause(formula, vec![Lit::neg(z), Lit::pos(x)])?;
+    add_clause(formula, vec![Lit::pos(z), Lit::neg(x)])
+}
+
+fn encode_and_eq(formula: &mut CnfFormula, z: usize, inputs: &[usize]) -> Result<(), SynthError> {
+    if inputs.is_empty() {
+        return Err(SynthError::SatEncoding(
+            "AND with zero inputs is unsupported".to_string(),
+        ));
+    }
+    if inputs.len() == 1 {
+        return add_buf_eq(formula, z, inputs[0]);
+    }
+
+    for x in inputs {
+        add_clause(formula, vec![Lit::neg(z), Lit::pos(*x)])?;
+    }
+    let mut reverse = vec![Lit::pos(z)];
+    reverse.extend(inputs.iter().map(|x| Lit::neg(*x)));
+    add_clause(formula, reverse)
+}
+
+fn encode_or_eq(formula: &mut CnfFormula, z: usize, inputs: &[usize]) -> Result<(), SynthError> {
+    if inputs.is_empty() {
+        return Err(SynthError::SatEncoding(
+            "OR with zero inputs is unsupported".to_string(),
+        ));
+    }
+    if inputs.len() == 1 {
+        return add_buf_eq(formula, z, inputs[0]);
+    }
+
+    for x in inputs {
+        add_clause(formula, vec![Lit::pos(z), Lit::neg(*x)])?;
+    }
+    let mut reverse = vec![Lit::neg(z)];
+    reverse.extend(inputs.iter().map(|x| Lit::pos(*x)));
+    add_clause(formula, reverse)
+}
+
+fn encode_xor_eq(formula: &mut CnfFormula, z: usize, x: usize, y: usize) -> Result<(), SynthError> {
+    add_clause(formula, vec![Lit::neg(x), Lit::neg(y), Lit::neg(z)])?;
+    add_clause(formula, vec![Lit::neg(x), Lit::pos(y), Lit::pos(z)])?;
+    add_clause(formula, vec![Lit::pos(x), Lit::neg(y), Lit::pos(z)])?;
+    add_clause(formula, vec![Lit::pos(x), Lit::pos(y), Lit::neg(z)])
+}
+
+fn encode_xor_nary_eq(
+    formula: &mut CnfFormula,
+    z: usize,
+    inputs: &[usize],
+) -> Result<(), SynthError> {
+    if inputs.is_empty() {
+        return Err(SynthError::SatEncoding(
+            "XOR with zero inputs is unsupported".to_string(),
+        ));
+    }
+    if inputs.len() == 1 {
+        return add_buf_eq(formula, z, inputs[0]);
+    }
+
+    let mut acc = inputs[0];
+    for (index, next) in inputs.iter().enumerate().skip(1) {
+        let out = if index == inputs.len() - 1 {
+            z
+        } else {
+            formula.add_var()
+        };
+        encode_xor_eq(formula, out, acc, *next)?;
+        acc = out;
+    }
+    Ok(())
+}
+
+fn encode_mux2_eq(
+    formula: &mut CnfFormula,
+    z: usize,
+    s: usize,
+    a: usize,
+    b: usize,
+) -> Result<(), SynthError> {
+    add_clause(formula, vec![Lit::neg(s), Lit::neg(a), Lit::pos(z)])?;
+    add_clause(formula, vec![Lit::pos(s), Lit::neg(b), Lit::pos(z)])?;
+    add_clause(formula, vec![Lit::neg(s), Lit::pos(a), Lit::neg(z)])?;
+    add_clause(formula, vec![Lit::pos(s), Lit::pos(b), Lit::neg(z)])
+}
+
+fn incoming_and_outdegree_for_sat(netlist: &Netlist) -> (Vec<Vec<(u16, PinRef)>>, Vec<usize>) {
+    let mut incoming_by_node = vec![Vec::<(u16, PinRef)>::new(); netlist.node_count()];
+    let mut outdegree = vec![0usize; netlist.node_count()];
+    for (from, to) in netlist.edge_pairs() {
+        incoming_by_node[to.node.0].push((to.port, from));
+        outdegree[from.node.0] += 1;
+    }
+    (incoming_by_node, outdegree)
+}
+
+fn topological_order_for_sat(netlist: &Netlist) -> Result<Vec<usize>, SynthError> {
+    let mut indegree = vec![0usize; netlist.node_count()];
+    let mut adjacency = vec![Vec::<usize>::new(); netlist.node_count()];
+    for (from, to) in netlist.edge_pairs() {
+        indegree[to.node.0] += 1;
+        adjacency[from.node.0].push(to.node.0);
+    }
+
+    let mut queue = VecDeque::new();
+    for (node, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(node);
+        }
+    }
+
+    let mut order = Vec::with_capacity(netlist.node_count());
+    while let Some(node) = queue.pop_front() {
+        order.push(node);
+        for succ in &adjacency[node] {
+            indegree[*succ] -= 1;
+            if indegree[*succ] == 0 {
+                queue.push_back(*succ);
+            }
+        }
+    }
+
+    if order.len() != netlist.node_count() {
+        return Err(SynthError::CombinationalCycle);
+    }
+    Ok(order)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rflux_ir::{LogicOp, NodeId};
+
+    #[test]
+    fn inserts_splitter_when_fanout_is_requested() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src = netlist.add_node(NodeKind::CellInstance, "src");
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+
+        let src_out = PinRef {
+            node: src,
+            port: 0,
+        };
+        let a_in = PinRef { node: a, port: 0 };
+        let b_in = PinRef { node: b, port: 0 };
+
+        compiler
+            .compile(&mut netlist, src_out, a_in)
+            .expect("first sink should connect directly");
+        compiler
+            .compile(&mut netlist, src_out, b_in)
+            .expect("second sink should trigger splitter insertion");
+
+        assert_eq!(netlist.node_count(), 4);
+        assert_eq!(netlist.edge_count(), 3);
+
+        let splitter_id = NodeId(3);
+        let splitter_in = PinRef {
+            node: splitter_id,
+            port: 0,
+        };
+        let splitter_out_a = PinRef {
+            node: splitter_id,
+            port: 1,
+        };
+        let splitter_out_b = PinRef {
+            node: splitter_id,
+            port: 2,
+        };
+
+        assert_eq!(netlist.sink_of(src_out), Some(splitter_in));
+        assert_eq!(netlist.sink_of(splitter_out_a), Some(a_in));
+        assert_eq!(netlist.sink_of(splitter_out_b), Some(b_in));
+    }
+
+    #[test]
+    fn inserts_balancing_dff_on_existing_connection() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src = netlist.add_node(NodeKind::CellInstance, "src");
+        let sink = netlist.add_node(NodeKind::CellInstance, "sink");
+
+        let src_out = PinRef { node: src, port: 0 };
+        let sink_in = PinRef {
+            node: sink,
+            port: 0,
+        };
+
+        netlist
+            .connect(src_out, sink_in)
+            .expect("initial edge should connect");
+
+        let dff_out = compiler
+            .insert_balancing_dff(&mut netlist, src_out)
+            .expect("dff insertion should succeed");
+
+        let dff_id = NodeId(2);
+        let dff_in = PinRef {
+            node: dff_id,
+            port: 0,
+        };
+
+        assert_eq!(dff_out.node, dff_id);
+        assert_eq!(netlist.sink_of(src_out), Some(dff_in));
+        assert_eq!(netlist.sink_of(dff_out), Some(sink_in));
+    }
+
+    #[test]
+    fn maps_node_kinds_to_sfq_cell_types() {
+        let pdk = Pdk::minimal("test-pdk");
+        let mapper = TechMapper::new(&pdk);
+        let mut netlist = Netlist::new();
+        netlist.add_node(NodeKind::Port, "in");
+        netlist.add_node(NodeKind::CellInstance, "gate");
+        netlist.add_node(NodeKind::Dff, "dff");
+
+        let mapped = mapper.map_netlist(&netlist);
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[0].cell.kind, SfCellKind::Port);
+        assert_eq!(mapped[1].cell.kind, SfCellKind::GenericGate);
+        assert_eq!(mapped[2].cell.kind, SfCellKind::Dff);
+    }
+
+    #[test]
+    fn produces_tech_mapping_area_report() {
+        let pdk = Pdk::minimal("test-pdk");
+        let mapper = TechMapper::new(&pdk);
+        let mut netlist = Netlist::new();
+        netlist.add_node(NodeKind::CellInstance, "gate");
+        netlist.add_node(NodeKind::Splitter, "split");
+
+        let report = mapper.map_report(&netlist);
+        assert_eq!(report.mapped_nodes, 2);
+        assert!(report.total_area_um2 > 0.0);
+    }
+
+    #[test]
+    fn runs_internal_boolean_pass_entry() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert!(report.gate_count_before >= report.gate_count_after);
+    }
+
+    #[test]
+    fn compile_plan_reports_splitter_and_dff_insertions() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src = netlist.add_node(NodeKind::CellInstance, "src");
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+
+        let src_out = PinRef { node: src, port: 0 };
+        let a_in = PinRef { node: a, port: 0 };
+        let b_in = PinRef { node: b, port: 0 };
+
+        let plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: src_out,
+                    to: a_in,
+                },
+                ConnectionSpec {
+                    from: src_out,
+                    to: b_in,
+                },
+            ],
+            balance_strategy: BalanceStrategy::Explicit,
+            balancing_sources: vec![src_out],
+        };
+
+        let report = compiler
+            .compile_plan(&mut netlist, &plan)
+            .expect("compile plan should succeed");
+
+        assert_eq!(report.connections_applied, 2);
+        assert_eq!(report.splitters_inserted, 1);
+        assert_eq!(report.balancing_dffs_inserted, 1);
+    }
+
+    #[test]
+    fn compile_plan_can_balance_all_connected_sources() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src_a = netlist.add_node(NodeKind::CellInstance, "src_a");
+        let src_b = netlist.add_node(NodeKind::CellInstance, "src_b");
+        let sink_a = netlist.add_node(NodeKind::CellInstance, "sink_a");
+        let sink_b = netlist.add_node(NodeKind::CellInstance, "sink_b");
+
+        let plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: src_a, port: 0 },
+                    to: PinRef {
+                        node: sink_a,
+                        port: 0,
+                    },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: src_b, port: 0 },
+                    to: PinRef {
+                        node: sink_b,
+                        port: 0,
+                    },
+                },
+            ],
+            balance_strategy: BalanceStrategy::AllConnectedSources,
+            balancing_sources: Vec::new(),
+        };
+
+        let report = compiler
+            .compile_plan(&mut netlist, &plan)
+            .expect("automatic balancing should succeed");
+
+        assert_eq!(report.connections_applied, 2);
+        assert_eq!(report.splitters_inserted, 0);
+        assert_eq!(report.balancing_dffs_inserted, 2);
+        assert_eq!(netlist.node_count(), 6);
+        assert_eq!(netlist.edge_count(), 4);
+    }
+
+    #[test]
+    fn analyzes_bool_opt_compatibility_for_supported_comb_netlist() {
+        let compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: gate, port: 0 })
+            .expect("port to gate should connect");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: gate, port: 1 })
+            .expect("port to gate should connect");
+
+        let report = compiler.analyze_bool_opt_compatibility(&netlist);
+        assert!(report.is_compatible());
+        assert_eq!(report.input_nodes, vec![0, 1]);
+        assert_eq!(report.output_candidates, vec![2]);
+    }
+
+    #[test]
+    fn analyzes_bool_opt_compatibility_for_unsupported_dff() {
+        let compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let src = netlist.add_node(NodeKind::Port, "src");
+        let dff = netlist.add_node(NodeKind::Dff, "dff");
+
+        netlist
+            .connect(PinRef { node: src, port: 0 }, PinRef { node: dff, port: 0 })
+            .expect("port to dff should connect");
+
+        let report = compiler.analyze_bool_opt_compatibility(&netlist);
+        assert!(!report.is_compatible());
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == BoolOptCompatibilityIssueKind::UnsupportedNodeKind));
+    }
+
+    #[test]
+    fn internal_boolean_optimization_deduplicates_equivalent_logic() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate0 = netlist.add_node(NodeKind::CellInstance, "gate0");
+        let gate1 = netlist.add_node(NodeKind::CellInstance, "gate1");
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: gate0, port: 0 })
+            .expect("port to gate should connect");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: gate0, port: 1 })
+            .expect("port to gate should connect");
+        netlist
+            .connect(PinRef { node: a, port: 1 }, PinRef { node: gate1, port: 0 })
+            .expect("port to gate should connect");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: gate1, port: 1 })
+            .expect("port to gate should connect");
+        netlist
+            .connect(PinRef { node: gate0, port: 0 }, PinRef { node: out0, port: 0 })
+            .expect("gate to output should connect");
+        netlist
+            .connect(PinRef { node: gate1, port: 0 }, PinRef { node: out1, port: 0 })
+            .expect("gate to output should connect");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind, NodeKind::CellInstance))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_deduplicates_equivalent_xor_logic() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let xor0 = netlist.add_node_with_logic(NodeKind::CellInstance, "xor0", Some(LogicOp::Xor));
+        let xor1 = netlist.add_node_with_logic(NodeKind::CellInstance, "xor1", Some(LogicOp::Xor));
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: xor0, port: 0 }).expect("a to xor0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: xor0, port: 1 }).expect("b to xor0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: xor1, port: 0 }).expect("a to xor1");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: xor1, port: 1 }).expect("b to xor1");
+        netlist.connect(PinRef { node: xor0, port: 0 }, PinRef { node: out0, port: 0 }).expect("xor0 to out0");
+        netlist.connect(PinRef { node: xor1, port: 0 }, PinRef { node: out1, port: 0 }).expect("xor1 to out1");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Xor))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_deduplicates_equivalent_mux_logic() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let sel = netlist.add_node(NodeKind::Port, "sel");
+        let d0 = netlist.add_node(NodeKind::Port, "d0");
+        let d1 = netlist.add_node(NodeKind::Port, "d1");
+        let mux0 = netlist.add_node_with_logic(NodeKind::CellInstance, "mux0", Some(LogicOp::Mux2));
+        let mux1 = netlist.add_node_with_logic(NodeKind::CellInstance, "mux1", Some(LogicOp::Mux2));
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist.connect(PinRef { node: sel, port: 0 }, PinRef { node: mux0, port: 0 }).expect("sel to mux0");
+        netlist.connect(PinRef { node: d0, port: 0 }, PinRef { node: mux0, port: 1 }).expect("d0 to mux0");
+        netlist.connect(PinRef { node: d1, port: 0 }, PinRef { node: mux0, port: 2 }).expect("d1 to mux0");
+        netlist.connect(PinRef { node: sel, port: 1 }, PinRef { node: mux1, port: 0 }).expect("sel to mux1");
+        netlist.connect(PinRef { node: d0, port: 1 }, PinRef { node: mux1, port: 1 }).expect("d0 to mux1");
+        netlist.connect(PinRef { node: d1, port: 1 }, PinRef { node: mux1, port: 2 }).expect("d1 to mux1");
+        netlist.connect(PinRef { node: mux0, port: 0 }, PinRef { node: out0, port: 0 }).expect("mux0 to out0");
+        netlist.connect(PinRef { node: mux1, port: 0 }, PinRef { node: out1, port: 0 }).expect("mux1 to out1");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_recognizes_dffe_nodes() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let data = netlist.add_node(NodeKind::Port, "data");
+        let enable = netlist.add_node(NodeKind::Port, "enable");
+        let clock = netlist.add_node(NodeKind::Port, "clock");
+        let dff0 = netlist.add_node_with_logic(NodeKind::Dff, "dff0", Some(LogicOp::DffEnable));
+        let dff1 = netlist.add_node_with_logic(NodeKind::Dff, "dff1", Some(LogicOp::DffEnable));
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: dff0, port: 0 }).expect("data to dff0");
+        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: dff0, port: 1 }).expect("enable to dff0");
+        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff0, port: 2 }).expect("clock to dff0");
+        netlist.connect(PinRef { node: data, port: 1 }, PinRef { node: dff1, port: 0 }).expect("data to dff1");
+        netlist.connect(PinRef { node: enable, port: 1 }, PinRef { node: dff1, port: 1 }).expect("enable to dff1");
+        netlist.connect(PinRef { node: clock, port: 1 }, PinRef { node: dff1, port: 2 }).expect("clock to dff1");
+        netlist.connect(PinRef { node: dff0, port: 0 }, PinRef { node: out0, port: 0 }).expect("dff0 to out0");
+        netlist.connect(PinRef { node: dff1, port: 0 }, PinRef { node: out1, port: 0 }).expect("dff1 to out1");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 0);
+        assert_eq!(report.gate_count_after, 0);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind, NodeKind::Dff) && node.logic_op == Some(LogicOp::DffEnable))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_eliminates_and_absorption_redundancy() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let or_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "or_gate", Some(LogicOp::Or));
+        let and_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "and_gate", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or_gate, port: 0 }).expect("a to or");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or_gate, port: 1 }).expect("b to or");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and_gate, port: 0 }).expect("a to and");
+        netlist.connect(PinRef { node: or_gate, port: 0 }, PinRef { node: and_gate, port: 1 }).expect("or to and");
+        netlist.connect(PinRef { node: and_gate, port: 0 }, PinRef { node: out, port: 0 }).expect("and to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 0);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind, NodeKind::CellInstance))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_eliminates_or_absorption_redundancy() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let and_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "and_gate", Some(LogicOp::And));
+        let or_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "or_gate", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and_gate, port: 0 }).expect("a to and");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and_gate, port: 1 }).expect("b to and");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or_gate, port: 0 }).expect("a to or");
+        netlist.connect(PinRef { node: and_gate, port: 0 }, PinRef { node: or_gate, port: 1 }).expect("and to or");
+        netlist.connect(PinRef { node: or_gate, port: 0 }, PinRef { node: out, port: 0 }).expect("or to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 0);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind, NodeKind::CellInstance))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_deduplicates_deep_commutative_cones() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+
+        let and_ab0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_ab0", Some(LogicOp::And));
+        let and_cd0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_cd0", Some(LogicOp::And));
+        let and_top0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_top0", Some(LogicOp::And));
+
+        let and_ab1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_ab1", Some(LogicOp::And));
+        let and_cd1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_cd1", Some(LogicOp::And));
+        let and_top1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_top1", Some(LogicOp::And));
+
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and_ab0, port: 0 }).expect("a to and_ab0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and_ab0, port: 1 }).expect("b to and_ab0");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and_cd0, port: 0 }).expect("c to and_cd0");
+        netlist.connect(PinRef { node: d, port: 0 }, PinRef { node: and_cd0, port: 1 }).expect("d to and_cd0");
+        netlist.connect(PinRef { node: and_ab0, port: 0 }, PinRef { node: and_top0, port: 0 }).expect("ab0 to top0");
+        netlist.connect(PinRef { node: and_cd0, port: 0 }, PinRef { node: and_top0, port: 1 }).expect("cd0 to top0");
+
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and_ab1, port: 0 }).expect("b to and_ab1");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and_ab1, port: 1 }).expect("a to and_ab1");
+        netlist.connect(PinRef { node: d, port: 1 }, PinRef { node: and_cd1, port: 0 }).expect("d to and_cd1");
+        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and_cd1, port: 1 }).expect("c to and_cd1");
+        netlist.connect(PinRef { node: and_cd1, port: 0 }, PinRef { node: and_top1, port: 0 }).expect("cd1 to top1");
+        netlist.connect(PinRef { node: and_ab1, port: 0 }, PinRef { node: and_top1, port: 1 }).expect("ab1 to top1");
+
+        netlist.connect(PinRef { node: and_top0, port: 0 }, PinRef { node: out0, port: 0 }).expect("top0 to out0");
+        netlist.connect(PinRef { node: and_top1, port: 0 }, PinRef { node: out1, port: 0 }).expect("top1 to out1");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 6);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_keeps_mux_data_order_semantics() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let sel = netlist.add_node(NodeKind::Port, "sel");
+        let d0 = netlist.add_node(NodeKind::Port, "d0");
+        let d1 = netlist.add_node(NodeKind::Port, "d1");
+        let mux0 = netlist.add_node_with_logic(NodeKind::CellInstance, "mux0", Some(LogicOp::Mux2));
+        let mux1 = netlist.add_node_with_logic(NodeKind::CellInstance, "mux1", Some(LogicOp::Mux2));
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist.connect(PinRef { node: sel, port: 0 }, PinRef { node: mux0, port: 0 }).expect("sel to mux0");
+        netlist.connect(PinRef { node: d0, port: 0 }, PinRef { node: mux0, port: 1 }).expect("d0 to mux0");
+        netlist.connect(PinRef { node: d1, port: 0 }, PinRef { node: mux0, port: 2 }).expect("d1 to mux0");
+
+        netlist.connect(PinRef { node: sel, port: 1 }, PinRef { node: mux1, port: 0 }).expect("sel to mux1");
+        netlist.connect(PinRef { node: d1, port: 1 }, PinRef { node: mux1, port: 1 }).expect("d1 to mux1");
+        netlist.connect(PinRef { node: d0, port: 1 }, PinRef { node: mux1, port: 2 }).expect("d0 to mux1");
+
+        netlist.connect(PinRef { node: mux0, port: 0 }, PinRef { node: out0, port: 0 }).expect("mux0 to out0");
+        netlist.connect(PinRef { node: mux1, port: 0 }, PinRef { node: out1, port: 0 }).expect("mux1 to out1");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_respects_xor_sharing_toggle() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let xor0 = netlist.add_node_with_logic(NodeKind::CellInstance, "xor0", Some(LogicOp::Xor));
+        let xor1 = netlist.add_node_with_logic(NodeKind::CellInstance, "xor1", Some(LogicOp::Xor));
+        let out0 = netlist.add_node(NodeKind::Port, "out0");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: xor0, port: 0 }).expect("a to xor0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: xor0, port: 1 }).expect("b to xor0");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: xor1, port: 0 }).expect("b to xor1");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: xor1, port: 1 }).expect("a to xor1");
+        netlist.connect(PinRef { node: xor0, port: 0 }, PinRef { node: out0, port: 0 }).expect("xor0 to out0");
+        netlist.connect(PinRef { node: xor1, port: 0 }, PinRef { node: out1, port: 0 }).expect("xor1 to out1");
+
+        let report = compiler.optimize_boolean_network(
+            &mut netlist,
+            &BoolOptConfig {
+                share_logic_flattening_limit: 8,
+                infer_xor_mux: false,
+                infer_dffe: true,
+            },
+        );
+
+        assert_eq!(report.gate_count_before, 2);
+        assert_eq!(report.gate_count_after, 2);
+    }
+
+    #[test]
+    fn internal_boolean_optimization_factors_or_of_and_common_term() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 0 }).expect("a to and0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and0, port: 1 }).expect("b to and0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and1, port: 0 }).expect("a to and1");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and1, port: 1 }).expect("c to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 3);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    #[ignore = "requires inversion-aware IR pattern representation"]
+    fn quaigh_alignment_pending_reconstructs_xor_from_and_pattern() {
+        // Acceptance gate for a future pass equivalent to Quaigh infer_xor_mux pattern matching.
+        // Target pattern (conceptual): xor(a,b) == or(and(a,!b), and(!a,b)).
+        panic!("pending: implement AND-pattern XOR reconstruction and enable this test");
+    }
+
+    #[test]
+    #[ignore = "requires inversion-aware IR pattern representation"]
+    fn quaigh_alignment_pending_reconstructs_mux_from_and_pattern() {
+        // Acceptance gate for a future pass equivalent to Quaigh infer_xor_mux pattern matching.
+        // Target pattern (conceptual): mux(s,a,b) == or(and(s,a), and(!s,b)).
+        panic!("pending: implement AND-pattern MUX reconstruction and enable this test");
+    }
+
+    #[test]
+    fn sat_equivalence_reports_equivalent_networks() {
+        let compiler = Compiler::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let b_l = lhs.add_node(NodeKind::Port, "b");
+        let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
+        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
+        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let b_r = rhs.add_node(NodeKind::Port, "b");
+        let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_and", Some(LogicOp::And));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("b->and");
+        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("a->and");
+        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("and->out");
+
+        let report = compiler
+            .check_boolean_equivalence_sat(&lhs, &rhs)
+            .expect("equivalence check should succeed");
+
+        assert!(report.equivalent);
+        assert_eq!(report.checked_outputs, vec!["out".to_string()]);
+        assert!(report.counterexample_inputs.is_none());
+        assert!(report.counterexample_outputs.is_none());
+        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_elapsed_ns > 0);
+    }
+
+    #[test]
+    fn sat_equivalence_finds_counterexample_for_non_equivalent_networks() {
+        let compiler = Compiler::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let b_l = lhs.add_node(NodeKind::Port, "b");
+        let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
+        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
+        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let b_r = rhs.add_node(NodeKind::Port, "b");
+        let xor_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_xor", Some(LogicOp::Xor));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: xor_r, port: 0 }).expect("a->xor");
+        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: xor_r, port: 1 }).expect("b->xor");
+        rhs.connect(PinRef { node: xor_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("xor->out");
+
+        let report = compiler
+            .check_boolean_equivalence_sat(&lhs, &rhs)
+            .expect("equivalence check should succeed");
+
+        assert!(!report.equivalent);
+        let counterexample = report
+            .counterexample_inputs
+            .expect("counterexample assignment should be present");
+        assert!(counterexample.contains_key("a"));
+        assert!(counterexample.contains_key("b"));
+        let output_values = report
+            .counterexample_outputs
+            .expect("counterexample output values should be present");
+        let out = output_values.get("out").expect("out mismatch should exist");
+        assert_ne!(out.lhs, out.rhs);
+        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_elapsed_ns > 0);
+    }
+
+    #[test]
+    fn sat_equivalence_reports_multi_output_mismatch_details() {
+        let compiler = Compiler::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let b_l = lhs.add_node(NodeKind::Port, "b");
+        let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
+        let xor_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_xor", Some(LogicOp::Xor));
+        let out_and_l = lhs.add_node(NodeKind::Port, "out_and");
+        let out_xor_l = lhs.add_node(NodeKind::Port, "out_xor");
+        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
+        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
+        lhs.connect(PinRef { node: a_l, port: 1 }, PinRef { node: xor_l, port: 0 }).expect("a->xor");
+        lhs.connect(PinRef { node: b_l, port: 1 }, PinRef { node: xor_l, port: 1 }).expect("b->xor");
+        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_and_l, port: 0 }).expect("and->out_and");
+        lhs.connect(PinRef { node: xor_l, port: 0 }, PinRef { node: out_xor_l, port: 0 }).expect("xor->out_xor");
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let b_r = rhs.add_node(NodeKind::Port, "b");
+        let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_and", Some(LogicOp::And));
+        let or_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_or", Some(LogicOp::Or));
+        let out_and_r = rhs.add_node(NodeKind::Port, "out_and");
+        let out_xor_r = rhs.add_node(NodeKind::Port, "out_xor");
+        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("a->and");
+        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("b->and");
+        rhs.connect(PinRef { node: a_r, port: 1 }, PinRef { node: or_r, port: 0 }).expect("a->or");
+        rhs.connect(PinRef { node: b_r, port: 1 }, PinRef { node: or_r, port: 1 }).expect("b->or");
+        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_and_r, port: 0 }).expect("and->out_and");
+        rhs.connect(PinRef { node: or_r, port: 0 }, PinRef { node: out_xor_r, port: 0 }).expect("or->out_xor");
+
+        let report = compiler
+            .check_boolean_equivalence_sat(&lhs, &rhs)
+            .expect("equivalence check should succeed");
+
+        assert!(!report.equivalent);
+        let output_values = report
+            .counterexample_outputs
+            .expect("counterexample output values should be present");
+        let and_out = output_values
+            .get("out_and")
+            .expect("out_and mismatch should be tracked");
+        let xor_out = output_values
+            .get("out_xor")
+            .expect("out_xor mismatch should be tracked");
+        assert_eq!(and_out.lhs, and_out.rhs);
+        assert_ne!(xor_out.lhs, xor_out.rhs);
+        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_elapsed_ns > 0);
+    }
+
+    #[test]
+    fn compile_netlist_rewrites_supported_boolean_subgraph() {
+        let mut compiler = Compiler::new();
+        let pdk = Pdk::minimal("test-pdk");
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+
+        let config = SynthesisConfig {
+            plan: CompilePlan {
+                connections: vec![
+                    ConnectionSpec {
+                        from: PinRef { node: a, port: 0 },
+                        to: PinRef { node: gate, port: 0 },
+                    },
+                    ConnectionSpec {
+                        from: PinRef { node: b, port: 0 },
+                        to: PinRef { node: gate, port: 1 },
+                    },
+                ],
+                balance_strategy: BalanceStrategy::None,
+                balancing_sources: Vec::new(),
+            },
+            bool_opt: BoolOptConfig {
+                share_logic_flattening_limit: 8,
+                infer_xor_mux: false,
+                infer_dffe: false,
+            },
+        };
+
+        let report = compiler
+            .compile_netlist(&mut netlist, &pdk, &config)
+            .expect("synthesis pipeline should succeed");
+
+        assert_eq!(report.bool_opt.gate_count_before, report.bool_opt.gate_count_after);
+        assert_eq!(report.node_count, 3);
+        assert_eq!(report.edge_count, 2);
+        assert!(matches!(netlist.nodes()[0].kind, NodeKind::Port));
+        assert!(matches!(netlist.nodes()[1].kind, NodeKind::Port));
+        assert!(matches!(netlist.nodes()[2].kind, NodeKind::CellInstance));
+        assert!(report.bool_opt_compatibility.is_compatible());
+    }
+
+    #[test]
+    fn compile_plan_can_balance_by_sink_level() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src_fast = netlist.add_node(NodeKind::CellInstance, "src_fast");
+        let src_slow = netlist.add_node(NodeKind::CellInstance, "src_slow");
+        let mid = netlist.add_node(NodeKind::CellInstance, "mid");
+        let sink = netlist.add_node(NodeKind::CellInstance, "sink");
+
+        let plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef {
+                        node: src_slow,
+                        port: 0,
+                    },
+                    to: PinRef { node: mid, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: mid, port: 0 },
+                    to: PinRef { node: sink, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef {
+                        node: src_fast,
+                        port: 0,
+                    },
+                    to: PinRef { node: sink, port: 1 },
+                },
+            ],
+            balance_strategy: BalanceStrategy::BySinkLevel,
+            balancing_sources: Vec::new(),
+        };
+
+        let report = compiler
+            .compile_plan(&mut netlist, &plan)
+            .expect("level-based balancing should succeed");
+
+        assert_eq!(report.connections_applied, 3);
+        assert_eq!(report.splitters_inserted, 0);
+        assert_eq!(report.balancing_dffs_inserted, 1);
+        assert_eq!(netlist.node_count(), 5);
+        assert_eq!(netlist.edge_count(), 4);
+    }
+
+    #[test]
+    fn analyzes_path_balancing_for_out_of_order_edges() {
+        let compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src_fast = netlist.add_node(NodeKind::CellInstance, "src_fast");
+        let src_slow = netlist.add_node(NodeKind::CellInstance, "src_slow");
+        let mid = netlist.add_node(NodeKind::CellInstance, "mid");
+        let sink = netlist.add_node(NodeKind::CellInstance, "sink");
+
+        netlist
+            .connect(
+                PinRef { node: mid, port: 0 },
+                PinRef { node: sink, port: 0 },
+            )
+            .expect("mid to sink should connect");
+        netlist
+            .connect(
+                PinRef {
+                    node: src_fast,
+                    port: 0,
+                },
+                PinRef { node: sink, port: 1 },
+            )
+            .expect("fast to sink should connect");
+        netlist
+            .connect(
+                PinRef {
+                    node: src_slow,
+                    port: 0,
+                },
+                PinRef { node: mid, port: 0 },
+            )
+            .expect("slow to mid should connect");
+
+        let report = compiler
+            .analyze_path_balancing(&netlist)
+            .expect("analysis should succeed");
+
+        assert_eq!(report.node_levels, vec![0, 0, 1, 2]);
+        assert_eq!(report.total_insertions(), 1);
+        assert_eq!(report.needs.len(), 1);
+        assert_eq!(report.needs[0].sink_node, 3);
+        assert_eq!(report.needs[0].source.node.0, 0);
+        assert_eq!(report.needs[0].deficit, 1);
+    }
+
+    #[test]
+    fn by_sink_level_balancing_handles_out_of_order_edges() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let src_fast = netlist.add_node(NodeKind::CellInstance, "src_fast");
+        let src_slow = netlist.add_node(NodeKind::CellInstance, "src_slow");
+        let mid = netlist.add_node(NodeKind::CellInstance, "mid");
+        let sink = netlist.add_node(NodeKind::CellInstance, "sink");
+
+        netlist
+            .connect(
+                PinRef { node: mid, port: 0 },
+                PinRef { node: sink, port: 0 },
+            )
+            .expect("mid to sink should connect");
+        netlist
+            .connect(
+                PinRef {
+                    node: src_fast,
+                    port: 0,
+                },
+                PinRef { node: sink, port: 1 },
+            )
+            .expect("fast to sink should connect");
+        netlist
+            .connect(
+                PinRef {
+                    node: src_slow,
+                    port: 0,
+                },
+                PinRef { node: mid, port: 0 },
+            )
+            .expect("slow to mid should connect");
+
+        let inserted = compiler
+            .balance_by_sink_level(&mut netlist)
+            .expect("balancing should succeed");
+
+        assert_eq!(inserted, 1);
+        assert_eq!(netlist.node_count(), 5);
+        assert_eq!(netlist.edge_count(), 4);
+    }
+
+    #[test]
+    fn compile_netlist_returns_unified_summary() {
+        let mut compiler = Compiler::new();
+        let pdk = Pdk::minimal("test-pdk");
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+
+        let config = SynthesisConfig {
+            plan: CompilePlan {
+                connections: vec![
+                    ConnectionSpec {
+                        from: PinRef { node: a, port: 0 },
+                        to: PinRef { node: gate, port: 0 },
+                    },
+                    ConnectionSpec {
+                        from: PinRef { node: b, port: 0 },
+                        to: PinRef { node: gate, port: 1 },
+                    },
+                ],
+                balance_strategy: BalanceStrategy::BySinkLevel,
+                balancing_sources: Vec::new(),
+            },
+            bool_opt: BoolOptConfig::default(),
+        };
+
+        let report = compiler
+            .compile_netlist(&mut netlist, &pdk, &config)
+            .expect("synthesis pipeline should succeed");
+
+        assert_eq!(report.compile.connections_applied, 2);
+        assert_eq!(report.compile.splitters_inserted, 0);
+        assert_eq!(report.compile.balancing_dffs_inserted, 0);
+        assert_eq!(report.tech_map.mapped_nodes, 3);
+        assert_eq!(report.node_count, 3);
+        assert_eq!(report.edge_count, 2);
+        assert!(report.bool_opt_compatibility.is_compatible());
+        assert_eq!(report.path_balance.total_insertions(), 0);
+    }
+}

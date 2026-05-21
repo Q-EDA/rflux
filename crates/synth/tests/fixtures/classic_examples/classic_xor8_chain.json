@@ -1,0 +1,37 @@
+{
+  "nodes": [
+    { "id": 0, "kind": "Port", "name": "a" },
+    { "id": 1, "kind": "Port", "name": "b" },
+    { "id": 2, "kind": "Port", "name": "c" },
+    { "id": 3, "kind": "Port", "name": "d" },
+    { "id": 4, "kind": "Port", "name": "e" },
+    { "id": 5, "kind": "Port", "name": "f" },
+    { "id": 6, "kind": "Port", "name": "g" },
+    { "id": 7, "kind": "Port", "name": "h" },
+    { "id": 8, "kind": "CellInstance", "name": "xor0", "logic_op": "Xor" },
+    { "id": 9, "kind": "CellInstance", "name": "xor1", "logic_op": "Xor" },
+    { "id": 10, "kind": "CellInstance", "name": "xor2", "logic_op": "Xor" },
+    { "id": 11, "kind": "CellInstance", "name": "xor3", "logic_op": "Xor" },
+    { "id": 12, "kind": "CellInstance", "name": "xor4", "logic_op": "Xor" },
+    { "id": 13, "kind": "CellInstance", "name": "xor5", "logic_op": "Xor" },
+    { "id": 14, "kind": "CellInstance", "name": "xor6", "logic_op": "Xor" },
+    { "id": 15, "kind": "Port", "name": "out" }
+  ],
+  "edges": [
+    [ { "node": 0, "port": 0 }, { "node": 8, "port": 0 } ],
+    [ { "node": 1, "port": 0 }, { "node": 8, "port": 1 } ],
+    [ { "node": 8, "port": 0 }, { "node": 9, "port": 0 } ],
+    [ { "node": 2, "port": 0 }, { "node": 9, "port": 1 } ],
+    [ { "node": 9, "port": 0 }, { "node": 10, "port": 0 } ],
+    [ { "node": 3, "port": 0 }, { "node": 10, "port": 1 } ],
+    [ { "node": 10, "port": 0 }, { "node": 11, "port": 0 } ],
+    [ { "node": 4, "port": 0 }, { "node": 11, "port": 1 } ],
+    [ { "node": 11, "port": 0 }, { "node": 12, "port": 0 } ],
+    [ { "node": 5, "port": 0 }, { "node": 12, "port": 1 } ],
+    [ { "node": 12, "port": 0 }, { "node": 13, "port": 0 } ],
+    [ { "node": 6, "port": 0 }, { "node": 13, "port": 1 } ],
+    [ { "node": 13, "port": 0 }, { "node": 14, "port": 0 } ],
+    [ { "node": 7, "port": 0 }, { "node": 14, "port": 1 } ],
+    [ { "node": 14, "port": 0 }, { "node": 15, "port": 0 } ]
+  ]
+}

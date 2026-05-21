@@ -1,0 +1,13 @@
+[package]
+name = "rflux-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libreda-db = "0.0.12"
+libreda-lefdef = "0.0.5"
+rflux-ir = { path = "../ir" }
+rflux-tech = { path = "../tech" }
+serde_json.workspace = true
+thiserror.workspace = true

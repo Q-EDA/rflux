@@ -1,0 +1,11 @@
+[package]
+name = "rflux-timing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+rflux-route = { path = "../route" }
+rflux-tech = { path = "../tech" }
+thiserror.workspace = true

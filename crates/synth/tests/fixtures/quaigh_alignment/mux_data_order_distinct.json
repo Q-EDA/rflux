@@ -1,0 +1,21 @@
+{
+  "nodes": [
+    { "id": 0, "kind": "Port", "name": "sel" },
+    { "id": 1, "kind": "Port", "name": "d0" },
+    { "id": 2, "kind": "Port", "name": "d1" },
+    { "id": 3, "kind": "CellInstance", "name": "mux0", "logic_op": "Mux2" },
+    { "id": 4, "kind": "CellInstance", "name": "mux1", "logic_op": "Mux2" },
+    { "id": 5, "kind": "Port", "name": "out0" },
+    { "id": 6, "kind": "Port", "name": "out1" }
+  ],
+  "edges": [
+    [ { "node": 0, "port": 0 }, { "node": 3, "port": 0 } ],
+    [ { "node": 1, "port": 0 }, { "node": 3, "port": 1 } ],
+    [ { "node": 2, "port": 0 }, { "node": 3, "port": 2 } ],
+    [ { "node": 0, "port": 1 }, { "node": 4, "port": 0 } ],
+    [ { "node": 2, "port": 1 }, { "node": 4, "port": 1 } ],
+    [ { "node": 1, "port": 1 }, { "node": 4, "port": 2 } ],
+    [ { "node": 3, "port": 0 }, { "node": 5, "port": 0 } ],
+    [ { "node": 4, "port": 0 }, { "node": 6, "port": 0 } ]
+  ]
+}

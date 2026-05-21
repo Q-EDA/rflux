@@ -1,0 +1,98 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "Port",
+      "name": "a"
+    },
+    {
+      "id": 1,
+      "kind": "Port",
+      "name": "b"
+    },
+    {
+      "id": 2,
+      "kind": "CellInstance",
+      "name": "x0",
+      "logic_op": "And"
+    },
+    {
+      "id": 3,
+      "kind": "CellInstance",
+      "name": "x1",
+      "logic_op": "And"
+    },
+    {
+      "id": 4,
+      "kind": "Port",
+      "name": "x0"
+    },
+    {
+      "id": 5,
+      "kind": "Port",
+      "name": "x1"
+    }
+  ],
+  "edges": [
+    [
+      {
+        "node": 0,
+        "port": 0
+      },
+      {
+        "node": 2,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 1,
+        "port": 0
+      },
+      {
+        "node": 2,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 0,
+        "port": 1
+      },
+      {
+        "node": 3,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 1,
+        "port": 1
+      },
+      {
+        "node": 3,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 2,
+        "port": 0
+      },
+      {
+        "node": 4,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 3,
+        "port": 0
+      },
+      {
+        "node": 5,
+        "port": 0
+      }
+    ]
+  ]
+}

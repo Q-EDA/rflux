@@ -1,0 +1,11 @@
+[package]
+name = "rflux-route"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+rflux-place = { path = "../place" }
+rflux-tech = { path = "../tech" }
+thiserror.workspace = true

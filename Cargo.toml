@@ -1,0 +1,29 @@
+[workspace]
+members = [
+	"crates/ir",
+	"crates/sat",
+	"crates/sim",
+	"crates/synth",
+	"crates/timing",
+	"crates/tech",
+	"crates/io",
+	"crates/hdl",
+	"crates/flow",
+	"crates/place",
+	"crates/route",
+	"crates/py",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["rflux contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"

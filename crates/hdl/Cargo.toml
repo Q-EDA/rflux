@@ -1,0 +1,8 @@
+[package]
+name = "rflux-hdl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }

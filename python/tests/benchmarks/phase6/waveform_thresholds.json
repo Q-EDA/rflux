@@ -1,0 +1,11 @@
+{
+  "t_delay_smoke.cir": {
+    "max_abs_threshold_v": 0.2
+  },
+  "k_mutual_smoke.cir": {
+    "max_abs_threshold_v": 0.2
+  },
+  "jj_minimal_smoke.cir": {
+    "max_abs_threshold_v": 0.3
+  }
+}

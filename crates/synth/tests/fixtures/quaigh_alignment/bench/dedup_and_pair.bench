@@ -1,0 +1,9 @@
+# Quaigh-style bench subset sample for dedup alignment
+INPUT(a)
+INPUT(b)
+
+x0 = AND(a, b)
+x1 = AND(a, b)
+
+OUTPUT(x0)
+OUTPUT(x1)

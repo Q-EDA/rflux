@@ -1,0 +1,6 @@
+.title t-delay-smoke
+V1 in 0 DC 1m
+T1 in 0 out 0 z0=50 td=3p
+R1 out 0 50
+.tran 1p 6p
+.end

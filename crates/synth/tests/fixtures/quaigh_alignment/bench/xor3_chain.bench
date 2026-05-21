@@ -1,0 +1,9 @@
+# Quaigh-style xor3 equivalence shape
+INPUT(a)
+INPUT(b)
+INPUT(c)
+
+x0 = XOR(a, b)
+x1 = XOR(x0, c)
+
+OUTPUT(x1)

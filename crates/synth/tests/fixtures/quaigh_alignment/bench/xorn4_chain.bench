@@ -1,0 +1,11 @@
+# Quaigh-style xorn equivalence shape (4-input xor chain)
+INPUT(a)
+INPUT(b)
+INPUT(c)
+INPUT(d)
+
+x0 = XOR(a, b)
+x1 = XOR(x0, c)
+x2 = XOR(x1, d)
+
+OUTPUT(x2)

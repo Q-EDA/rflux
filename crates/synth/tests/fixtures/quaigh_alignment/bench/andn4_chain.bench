@@ -1,0 +1,11 @@
+# Quaigh-style andn equivalence shape (4-input chain)
+INPUT(a)
+INPUT(b)
+INPUT(c)
+INPUT(d)
+
+x0 = AND(a, b)
+x1 = AND(x0, c)
+x2 = AND(x1, d)
+
+OUTPUT(x2)
