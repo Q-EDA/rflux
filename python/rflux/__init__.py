@@ -54,6 +54,8 @@ try:
         compile_layout as _core_compile_layout,
         compile_netlist as _core_compile_netlist,
         compile_plan as _core_compile_plan,
+        check_equivalence as _core_check_equivalence,
+        check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
         simulate_file as _core_simulate_file,
         simulate_text as _core_simulate_text,
         verify_layout as _core_verify_layout,
@@ -85,6 +87,8 @@ except ImportError:
             compile_layout as _core_compile_layout,
             compile_netlist as _core_compile_netlist,
             compile_plan as _core_compile_plan,
+            check_equivalence as _core_check_equivalence,
+            check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
             simulate_file as _core_simulate_file,
             simulate_text as _core_simulate_text,
             verify_layout as _core_verify_layout,
@@ -115,6 +119,8 @@ except ImportError:
         _core_compile_layout = None
         _core_compile_netlist = None
         _core_compile_plan = None
+        _core_check_equivalence = None
+        _core_check_single_step_sequential_equivalence = None
         _core_simulate_file = None
         _core_simulate_text = None
         _core_verify_layout = None
@@ -485,6 +491,49 @@ class VerificationReport:
 
 
 @dataclass(frozen=True)
+class OutputMismatch:
+    lhs: bool
+    rhs: bool
+
+
+@dataclass(frozen=True)
+class StateTransitionMismatch:
+    lhs_next: bool
+    rhs_next: bool
+    lhs_clock: bool
+    rhs_clock: bool
+
+
+@dataclass(frozen=True)
+class CombinationalEquivalenceReport:
+    equivalent: bool
+    checked_outputs: list[str]
+    counterexample_inputs: dict[str, bool]
+    counterexample_outputs: dict[str, OutputMismatch]
+    sat_recursive_calls: int
+    sat_decisions: int
+    sat_backtracks: int
+    sat_restarts: int
+    sat_elapsed_ns: int
+
+
+@dataclass(frozen=True)
+class SingleStepSequentialEquivalenceReport:
+    equivalent: bool
+    checked_outputs: list[str]
+    checked_states: list[str]
+    counterexample_inputs: dict[str, bool]
+    counterexample_present_states: dict[str, bool]
+    counterexample_outputs: dict[str, OutputMismatch]
+    counterexample_states: dict[str, StateTransitionMismatch]
+    sat_recursive_calls: int
+    sat_decisions: int
+    sat_backtracks: int
+    sat_restarts: int
+    sat_elapsed_ns: int
+
+
+@dataclass(frozen=True)
 class CompoundCellCharacterizationReport:
     cell_name: str
     node_count: int
@@ -563,8 +612,16 @@ class SimulationReport:
 
 
 def compile(circuit: Circuit) -> Circuit:
-    # Phase-1 placeholder API. The backend wiring will be bound to Rust later.
-    return circuit
+    raise NotImplementedError(
+        "rflux.compile(...) remains an experimental placeholder; use compile_netlist(...) or compile_layout(...) instead"
+    )
+
+
+def _require_core_extension(api_name: str, binding) -> None:
+    if binding is None:
+        raise RuntimeError(
+            f"{api_name} requires the compiled rflux._core extension; run `uv run maturin develop -m crates/py/Cargo.toml`"
+        )
 
 
 def simulate_text(
@@ -694,6 +751,67 @@ def simulate_file(
         ],
         external_status_code=report.external_status_code,
         external_result=report.external_result,
+    )
+
+
+def check_equivalence(
+    lhs: Circuit,
+    rhs: Circuit,
+) -> CombinationalEquivalenceReport:
+    if _core_check_equivalence is None:
+        raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+
+    report = _core_check_equivalence(lhs, rhs)
+    return CombinationalEquivalenceReport(
+        equivalent=report.equivalent,
+        checked_outputs=list(report.checked_outputs),
+        counterexample_inputs={entry.name: entry.value for entry in report.counterexample_inputs},
+        counterexample_outputs={
+            entry.name: OutputMismatch(lhs=entry.lhs, rhs=entry.rhs)
+            for entry in report.counterexample_outputs
+        },
+        sat_recursive_calls=report.sat_recursive_calls,
+        sat_decisions=report.sat_decisions,
+        sat_backtracks=report.sat_backtracks,
+        sat_restarts=report.sat_restarts,
+        sat_elapsed_ns=report.sat_elapsed_ns,
+    )
+
+
+def check_single_step_sequential_equivalence(
+    lhs: Circuit,
+    rhs: Circuit,
+) -> SingleStepSequentialEquivalenceReport:
+    if _core_check_single_step_sequential_equivalence is None:
+        raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+
+    report = _core_check_single_step_sequential_equivalence(lhs, rhs)
+    return SingleStepSequentialEquivalenceReport(
+        equivalent=report.equivalent,
+        checked_outputs=list(report.checked_outputs),
+        checked_states=list(report.checked_states),
+        counterexample_inputs={entry.name: entry.value for entry in report.counterexample_inputs},
+        counterexample_present_states={
+            entry.name: entry.value for entry in report.counterexample_present_states
+        },
+        counterexample_outputs={
+            entry.name: OutputMismatch(lhs=entry.lhs, rhs=entry.rhs)
+            for entry in report.counterexample_outputs
+        },
+        counterexample_states={
+            entry.name: StateTransitionMismatch(
+                lhs_next=entry.lhs_next,
+                rhs_next=entry.rhs_next,
+                lhs_clock=entry.lhs_clock,
+                rhs_clock=entry.rhs_clock,
+            )
+            for entry in report.counterexample_states
+        },
+        sat_recursive_calls=report.sat_recursive_calls,
+        sat_decisions=report.sat_decisions,
+        sat_backtracks=report.sat_backtracks,
+        sat_restarts=report.sat_restarts,
+        sat_elapsed_ns=report.sat_elapsed_ns,
     )
 
 
@@ -1061,45 +1179,14 @@ def _source_level(plan: CompilePlan, source: PinRef) -> int:
 
 
 def compile_plan_report(circuit: Circuit, plan: CompilePlan) -> CompileReport:
-    if _core_compile_plan is not None:
-        core_plan = _to_core_compile_plan(plan)
-        report = _core_compile_plan(circuit, core_plan)
-        return CompileReport(
-            connections_applied=report.connections_applied,
-            splitters_inserted=report.splitters_inserted,
-            balancing_dffs_inserted=report.balancing_dffs_inserted,
-        )
-
-    report = _fallback_compile_report(plan)
-    for connection in plan.connections:
-        circuit._node_count = max(  # type: ignore[attr-defined]
-            circuit._node_count,  # type: ignore[attr-defined]
-            connection.from_pin.node + 1,
-            connection.to_pin.node + 1,
-        )
-        circuit._edges.append(  # type: ignore[attr-defined]
-            (
-                (connection.from_pin.node, connection.from_pin.port),
-                (connection.to_pin.node, connection.to_pin.port),
-            )
-        )
-        if not any(node_id == connection.from_pin.node for node_id, _, _ in circuit._nodes):  # type: ignore[attr-defined]
-            circuit._nodes.append((connection.from_pin.node, "cell_instance", f"py_node_{connection.from_pin.node}"))  # type: ignore[attr-defined]
-        if not any(node_id == connection.to_pin.node for node_id, _, _ in circuit._nodes):  # type: ignore[attr-defined]
-            circuit._nodes.append((connection.to_pin.node, "cell_instance", f"py_node_{connection.to_pin.node}"))  # type: ignore[attr-defined]
-
-    base_node_id = circuit._node_count  # type: ignore[attr-defined]
-    for offset in range(report.splitters_inserted):
-        circuit._nodes.append((base_node_id + offset, "splitter", f"auto_splitter_{offset}"))  # type: ignore[attr-defined]
-    base_node_id += report.splitters_inserted
-    for offset in range(report.balancing_dffs_inserted):
-        circuit._nodes.append((base_node_id + offset, "dff", f"balance_dff_{offset}"))  # type: ignore[attr-defined]
-
-    circuit._edge_count += (
-        report.connections_applied + report.splitters_inserted + report.balancing_dffs_inserted
-    )  # type: ignore[attr-defined]
-    circuit._node_count += report.splitters_inserted + report.balancing_dffs_inserted  # type: ignore[attr-defined]
-    return report
+    _require_core_extension("compile_plan_report(...)", _core_compile_plan)
+    core_plan = _to_core_compile_plan(plan)
+    report = _core_compile_plan(circuit, core_plan)
+    return CompileReport(
+        connections_applied=report.connections_applied,
+        splitters_inserted=report.splitters_inserted,
+        balancing_dffs_inserted=report.balancing_dffs_inserted,
+    )
 
 
 def compile_plan(circuit: Circuit, plan: CompilePlan) -> Circuit:
@@ -1108,36 +1195,21 @@ def compile_plan(circuit: Circuit, plan: CompilePlan) -> Circuit:
 
 
 def compile_netlist(circuit: Circuit, plan: CompilePlan | None = None) -> SynthesisReport:
-    if _core_compile_netlist is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_compile_netlist(circuit, core_plan)
-        return SynthesisReport(
-            connections_applied=report.connections_applied,
-            splitters_inserted=report.splitters_inserted,
-            balancing_dffs_inserted=report.balancing_dffs_inserted,
-            bool_gate_count_before=report.bool_gate_count_before,
-            bool_gate_count_after=report.bool_gate_count_after,
-            mapped_nodes=report.mapped_nodes,
-            total_area_um2=report.total_area_um2,
-            path_balance_insertions=report.path_balance_insertions,
-            bool_opt_compatible=report.bool_opt_compatible,
-            node_count=report.node_count,
-            edge_count=report.edge_count,
-        )
-
-    compile_report = compile_plan_report(circuit, plan or CompilePlan())
+    _require_core_extension("compile_netlist(...)", _core_compile_netlist)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_compile_netlist(circuit, core_plan)
     return SynthesisReport(
-        connections_applied=compile_report.connections_applied,
-        splitters_inserted=compile_report.splitters_inserted,
-        balancing_dffs_inserted=compile_report.balancing_dffs_inserted,
-        bool_gate_count_before=circuit.edge_count(),
-        bool_gate_count_after=circuit.edge_count(),
-        mapped_nodes=circuit.node_count(),
-        total_area_um2=float(circuit.node_count()),
-        path_balance_insertions=compile_report.balancing_dffs_inserted,
-        bool_opt_compatible=True,
-        node_count=circuit.node_count(),
-        edge_count=circuit.edge_count(),
+        connections_applied=report.connections_applied,
+        splitters_inserted=report.splitters_inserted,
+        balancing_dffs_inserted=report.balancing_dffs_inserted,
+        bool_gate_count_before=report.bool_gate_count_before,
+        bool_gate_count_after=report.bool_gate_count_after,
+        mapped_nodes=report.mapped_nodes,
+        total_area_um2=report.total_area_um2,
+        path_balance_insertions=report.path_balance_insertions,
+        bool_opt_compatible=report.bool_opt_compatible,
+        node_count=report.node_count,
+        edge_count=report.edge_count,
     )
 
 
@@ -1151,101 +1223,50 @@ def compile_layout(
     clock_domains: list[ClockDomainConstraint] | None = None,
     crossing_constraints: list[CrossingConstraint] | None = None,
 ) -> LayoutReport:
-    if _core_compile_layout is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_compile_layout(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-        )
-        return LayoutReport(
-            connections_applied=report.connections_applied,
-            splitters_inserted=report.splitters_inserted,
-            balancing_dffs_inserted=report.balancing_dffs_inserted,
-            mapped_nodes=report.mapped_nodes,
-            total_area_um2=report.total_area_um2,
-            bool_opt_compatible=report.bool_opt_compatible,
-            placed_nodes=report.placed_nodes,
-            placement_width_um=report.placement_width_um,
-            placement_height_um=report.placement_height_um,
-            clock_sinks=report.clock_sinks,
-            clock_buffers=report.clock_buffers,
-            clock_phase_count=report.clock_phase_count,
-            initial_hold_violations=report.initial_hold_violations,
-            final_hold_violations=report.final_hold_violations,
-            hold_fix_applied=report.hold_fix_applied,
-            worst_setup_slack_ps=report.worst_setup_slack_ps,
-            worst_hold_slack_ps=report.worst_hold_slack_ps,
-            critical_path_delay_ps=report.critical_path_delay_ps,
-            analyzed_timing_arcs=report.analyzed_timing_arcs,
-            false_path_arcs=report.false_path_arcs,
-            setup_violations=report.setup_violations,
-            routed_nets=report.routed_nets,
-            total_route_length_um=report.total_route_length_um,
-            initial_total_detour_overhead_um=report.initial_total_detour_overhead_um,
-            total_detour_overhead_um=report.total_detour_overhead_um,
-            detoured_routes=report.detoured_routes,
-            detour_feedback_applied=report.detour_feedback_applied,
-            jtl_routes=report.jtl_routes,
-            ptl_routes=report.ptl_routes,
-            node_count=report.node_count,
-            edge_count=report.edge_count,
-        )
-
-    synth_report = compile_netlist(circuit, plan)
-    max_fixed_x_um = max((item.x_um for item in fixed_nodes or []), default=0.0)
-    max_fixed_y_um = max((item.y_um for item in fixed_nodes or []), default=0.0)
-    detour_penalty_um = 24.0 * len(blocked_regions or []) if circuit.edge_count() > 0 else 0.0
-    critical_path_delay_ps = float(circuit.edge_count() * 18)
-    worst_setup_slack_ps = _effective_required_ps(
-        timing_constraints,
-        pin_timing_constraints,
-        clock_domains,
-        crossing_constraints,
-    ) - critical_path_delay_ps
-    false_path_arcs = _fallback_false_path_arcs(
+    _require_core_extension("compile_layout(...)", _core_compile_layout)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_compile_layout(
         circuit,
-        timing_constraints,
-        pin_timing_constraints,
-        crossing_constraints,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
     )
     return LayoutReport(
-        connections_applied=synth_report.connections_applied,
-        splitters_inserted=synth_report.splitters_inserted,
-        balancing_dffs_inserted=synth_report.balancing_dffs_inserted,
-        mapped_nodes=synth_report.mapped_nodes,
-        total_area_um2=synth_report.total_area_um2,
-        bool_opt_compatible=synth_report.bool_opt_compatible,
-        placed_nodes=circuit.node_count(),
-        placement_width_um=max(float(max(circuit.node_count() - 1, 0) * 40), max_fixed_x_um + 40.0 if circuit.node_count() > 0 else max_fixed_x_um),
-        placement_height_um=max(24.0 if circuit.node_count() > 0 else 0.0, max_fixed_y_um + 24.0 if circuit.node_count() > 0 else max_fixed_y_um),
-        clock_sinks=0,
-        clock_buffers=0,
-        clock_phase_count=2,
-        initial_hold_violations=0,
-        final_hold_violations=0,
-        hold_fix_applied=False,
-        worst_setup_slack_ps=worst_setup_slack_ps,
-        worst_hold_slack_ps=0.0,
-        critical_path_delay_ps=critical_path_delay_ps,
-        analyzed_timing_arcs=circuit.edge_count(),
-        false_path_arcs=false_path_arcs,
-        setup_violations=1 if worst_setup_slack_ps < 0.0 else 0,
-        routed_nets=circuit.edge_count(),
-        total_route_length_um=float(circuit.edge_count() * 40) + detour_penalty_um,
-        initial_total_detour_overhead_um=detour_penalty_um,
-        total_detour_overhead_um=detour_penalty_um,
-        detoured_routes=len(blocked_regions or []) if circuit.edge_count() > 0 and blocked_regions else 0,
-        detour_feedback_applied=False,
-        jtl_routes=circuit.edge_count(),
-        ptl_routes=0,
-        node_count=synth_report.node_count,
-        edge_count=synth_report.edge_count,
+        connections_applied=report.connections_applied,
+        splitters_inserted=report.splitters_inserted,
+        balancing_dffs_inserted=report.balancing_dffs_inserted,
+        mapped_nodes=report.mapped_nodes,
+        total_area_um2=report.total_area_um2,
+        bool_opt_compatible=report.bool_opt_compatible,
+        placed_nodes=report.placed_nodes,
+        placement_width_um=report.placement_width_um,
+        placement_height_um=report.placement_height_um,
+        clock_sinks=report.clock_sinks,
+        clock_buffers=report.clock_buffers,
+        clock_phase_count=report.clock_phase_count,
+        initial_hold_violations=report.initial_hold_violations,
+        final_hold_violations=report.final_hold_violations,
+        hold_fix_applied=report.hold_fix_applied,
+        worst_setup_slack_ps=report.worst_setup_slack_ps,
+        worst_hold_slack_ps=report.worst_hold_slack_ps,
+        critical_path_delay_ps=report.critical_path_delay_ps,
+        analyzed_timing_arcs=report.analyzed_timing_arcs,
+        false_path_arcs=report.false_path_arcs,
+        setup_violations=report.setup_violations,
+        routed_nets=report.routed_nets,
+        total_route_length_um=report.total_route_length_um,
+        initial_total_detour_overhead_um=report.initial_total_detour_overhead_um,
+        total_detour_overhead_um=report.total_detour_overhead_um,
+        detoured_routes=report.detoured_routes,
+        detour_feedback_applied=report.detour_feedback_applied,
+        jtl_routes=report.jtl_routes,
+        ptl_routes=report.ptl_routes,
+        node_count=report.node_count,
+        edge_count=report.edge_count,
     )
 
 
@@ -1261,76 +1282,46 @@ def analyze_timing(
     characterized_library_json: str | None = None,
     characterized_library_entries: list[str] | None = None,
 ) -> TimingAnalysisReport:
-    if _core_analyze_timing is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_analyze_timing(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            characterized_library_json,
-            characterized_library_entries,
-        )
-        return TimingAnalysisReport(
-            worst_setup_slack_ps=report.worst_setup_slack_ps,
-            worst_hold_slack_ps=report.worst_hold_slack_ps,
-            critical_path_delay_ps=report.critical_path_delay_ps,
-            analyzed_timing_arcs=report.analyzed_timing_arcs,
-            false_path_arcs=report.false_path_arcs,
-            setup_violations=report.setup_violations,
-            hold_violations=report.hold_violations,
-            detour_feedback_applied=report.detour_feedback_applied,
-            hold_fix_applied=report.hold_fix_applied,
-            timing_arcs=[
-                TimingArcReport(
-                    from_pin=PinRef(node=arc.from_pin.node, port=arc.from_pin.port),
-                    to_pin=PinRef(node=arc.to_pin.node, port=arc.to_pin.port),
-                    is_false_path=arc.is_false_path,
-                    route_mode=arc.route_mode,
-                    route_length_um=arc.route_length_um,
-                    from_domain=arc.from_domain,
-                    to_domain=arc.to_domain,
-                    arrival_ps=arc.arrival_ps,
-                    required_ps=arc.required_ps,
-                    setup_slack_ps=arc.setup_slack_ps,
-                    hold_slack_ps=arc.hold_slack_ps,
-                )
-                for arc in report.timing_arcs
-            ],
-        )
-
-    layout = compile_layout(
+    _require_core_extension("analyze_timing(...)", _core_analyze_timing)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_analyze_timing(
         circuit,
-        plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-    )
-    timing_arcs = _fallback_timing_arcs(
-        circuit,
-        timing_constraints,
-        pin_timing_constraints,
-        clock_domains,
-        crossing_constraints,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        characterized_library_json,
+        characterized_library_entries,
     )
     return TimingAnalysisReport(
-        worst_setup_slack_ps=layout.worst_setup_slack_ps,
-        worst_hold_slack_ps=layout.worst_hold_slack_ps,
-        critical_path_delay_ps=layout.critical_path_delay_ps,
-        analyzed_timing_arcs=layout.analyzed_timing_arcs,
-        false_path_arcs=layout.false_path_arcs,
-        setup_violations=layout.setup_violations,
-        hold_violations=layout.final_hold_violations,
-        detour_feedback_applied=layout.detour_feedback_applied,
-        hold_fix_applied=layout.hold_fix_applied,
-        timing_arcs=timing_arcs,
+        worst_setup_slack_ps=report.worst_setup_slack_ps,
+        worst_hold_slack_ps=report.worst_hold_slack_ps,
+        critical_path_delay_ps=report.critical_path_delay_ps,
+        analyzed_timing_arcs=report.analyzed_timing_arcs,
+        false_path_arcs=report.false_path_arcs,
+        setup_violations=report.setup_violations,
+        hold_violations=report.hold_violations,
+        detour_feedback_applied=report.detour_feedback_applied,
+        hold_fix_applied=report.hold_fix_applied,
+        timing_arcs=[
+            TimingArcReport(
+                from_pin=PinRef(node=arc.from_pin.node, port=arc.from_pin.port),
+                to_pin=PinRef(node=arc.to_pin.node, port=arc.to_pin.port),
+                is_false_path=arc.is_false_path,
+                route_mode=arc.route_mode,
+                route_length_um=arc.route_length_um,
+                from_domain=arc.from_domain,
+                to_domain=arc.to_domain,
+                arrival_ps=arc.arrival_ps,
+                required_ps=arc.required_ps,
+                setup_slack_ps=arc.setup_slack_ps,
+                hold_slack_ps=arc.hold_slack_ps,
+            )
+            for arc in report.timing_arcs
+        ],
     )
 
 
@@ -1355,127 +1346,30 @@ def analyze_timing_statistical(
     multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0,
     sigma_multiplier: float = 3.0,
 ) -> StatisticalTimingAnalysisReport:
-    if _core_analyze_timing_statistical is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_analyze_timing_statistical(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            characterized_library_json,
-            characterized_library_entries,
-            cell_delay_sigma_ratio,
-            wire_delay_sigma_ratio,
-            global_cell_delay_sigma_ratio,
-            global_wire_delay_sigma_ratio,
-            clock_uncertainty_sigma_ps,
-            cross_domain_uncertainty_sigma_ps,
-            max_delay_cross_domain_uncertainty_sigma_ps,
-            multicycle_cross_domain_uncertainty_sigma_ps,
-            sigma_multiplier,
-        )
-        return _statistical_timing_report_from_core(report)
-
-    deterministic = analyze_timing(
+    _require_core_extension("analyze_timing_statistical(...)", _core_analyze_timing_statistical)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_analyze_timing_statistical(
         circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        characterized_library_json,
+        characterized_library_entries,
+        cell_delay_sigma_ratio,
+        wire_delay_sigma_ratio,
+        global_cell_delay_sigma_ratio,
+        global_wire_delay_sigma_ratio,
+        clock_uncertainty_sigma_ps,
+        cross_domain_uncertainty_sigma_ps,
+        max_delay_cross_domain_uncertainty_sigma_ps,
+        multicycle_cross_domain_uncertainty_sigma_ps,
+        sigma_multiplier,
     )
-    crossing_kind_by_domain_pair = {
-        (constraint.from_domain, constraint.to_domain): constraint.kind
-        for constraint in (crossing_constraints or [])
-    }
-
-    def crossing_sigma_ps(arc: TimingArcReport) -> float:
-        if arc.from_domain is None or arc.to_domain is None or arc.from_domain == arc.to_domain:
-            return 0.0
-        categorized_sigma_ps = 0.0
-        match crossing_kind_by_domain_pair.get((arc.from_domain, arc.to_domain)):
-            case "max_delay":
-                categorized_sigma_ps = max_delay_cross_domain_uncertainty_sigma_ps
-            case "multicycle":
-                categorized_sigma_ps = multicycle_cross_domain_uncertainty_sigma_ps
-            case _:
-                categorized_sigma_ps = 0.0
-        return (cross_domain_uncertainty_sigma_ps**2 + categorized_sigma_ps**2) ** 0.5
-
-    timing_arcs = [
-        StatisticalTimingArcReport(
-            from_pin=arc.from_pin,
-            to_pin=arc.to_pin,
-            is_false_path=arc.is_false_path,
-            route_mode=arc.route_mode,
-            route_length_um=arc.route_length_um,
-            from_domain=arc.from_domain,
-            to_domain=arc.to_domain,
-            mean_arrival_ps=arc.arrival_ps,
-            mean_required_ps=arc.required_ps,
-            setup_slack_ps=arc.setup_slack_ps,
-            hold_slack_ps=arc.hold_slack_ps,
-            setup_sigma_ps=(
-                ((cell_delay_sigma_ratio * 8.0) ** 2 + (wire_delay_sigma_ratio * 10.0) ** 2)
-                + ((global_cell_delay_sigma_ratio * 8.0) + (global_wire_delay_sigma_ratio * 10.0)) ** 2
-                + (clock_uncertainty_sigma_ps**2)
-                + (crossing_sigma_ps(arc) ** 2)
-            ) ** 0.5,
-            hold_sigma_ps=(
-                (wire_delay_sigma_ratio * 10.0) ** 2
-                + (global_wire_delay_sigma_ratio * 10.0) ** 2
-                + (clock_uncertainty_sigma_ps**2)
-                + (crossing_sigma_ps(arc) ** 2)
-            ) ** 0.5,
-            pessimistic_setup_slack_ps=(
-                float("inf")
-                if arc.is_false_path
-                else arc.setup_slack_ps
-                - sigma_multiplier
-                * (
-                    ((cell_delay_sigma_ratio * 8.0) ** 2 + (wire_delay_sigma_ratio * 10.0) ** 2)
-                    + ((global_cell_delay_sigma_ratio * 8.0) + (global_wire_delay_sigma_ratio * 10.0)) ** 2
-                    + (clock_uncertainty_sigma_ps**2)
-                    + (crossing_sigma_ps(arc) ** 2)
-                )
-                ** 0.5
-            ),
-            pessimistic_hold_slack_ps=arc.hold_slack_ps
-            - sigma_multiplier
-            * (
-                (
-                    (wire_delay_sigma_ratio * 10.0) ** 2
-                    + (global_wire_delay_sigma_ratio * 10.0) ** 2
-                    + (clock_uncertainty_sigma_ps**2)
-                    + (crossing_sigma_ps(arc) ** 2)
-                )
-                ** 0.5
-            ),
-        )
-        for arc in deterministic.timing_arcs
-    ]
-    return StatisticalTimingAnalysisReport(
-        worst_pessimistic_setup_slack_ps=min(
-            (arc.pessimistic_setup_slack_ps for arc in timing_arcs),
-            default=120.0,
-        ),
-        worst_pessimistic_hold_slack_ps=min(
-            (arc.pessimistic_hold_slack_ps for arc in timing_arcs),
-            default=0.0,
-        ),
-        analyzed_timing_arcs=deterministic.analyzed_timing_arcs,
-        false_path_arcs=deterministic.false_path_arcs,
-        setup_risk_violations=sum(arc.pessimistic_setup_slack_ps < 0.0 for arc in timing_arcs),
-        hold_risk_violations=sum(arc.pessimistic_hold_slack_ps < 0.0 for arc in timing_arcs),
-        sigma_multiplier=sigma_multiplier,
-        timing_arcs=timing_arcs,
-    )
+    return _statistical_timing_report_from_core(report)
 
 
 def analyze_ac_bias(
@@ -1673,129 +1567,76 @@ def verify_layout(
 ) -> VerificationReport:
     if simulation_mode not in {"auto", "event_only", "external_josim", "internal_transient"}:
         raise ValueError(f"unknown simulation mode: {simulation_mode}")
-
-    if _core_verify_layout is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_verify_layout(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            simulation_mode,
-            external_command,
-        )
-        return VerificationReport(
-            checked_routes=report.checked_routes,
-            checked_ptl_routes=report.checked_ptl_routes,
-            structural_violations=report.structural_violations,
-            ptl_macro_boundary_violations=report.ptl_macro_boundary_violations,
-            ptl_forbidden_length_violations=report.ptl_forbidden_length_violations,
-            simulation_backend=report.simulation_backend,
-            simulated_events=report.simulated_events,
-            generated_deck_lines=report.generated_deck_lines,
-            generated_deck_path=report.generated_deck_path,
-            waveform_path=report.waveform_path,
-            reported_violations=report.reported_violations,
-            reported_worst_delay_ps=report.reported_worst_delay_ps,
-            delay_details=[
-                SimulationDelayDetail(
-                    name=detail.name,
-                    delay_ps=detail.delay_ps,
-                    from_ref=(
-                        None
-                        if detail.from_ref is None
-                        else SimulationEndpointRef(
-                            raw=detail.from_ref.raw,
-                            node=detail.from_ref.node,
-                            port=detail.from_ref.port,
-                        )
-                    ),
-                    to_ref=(
-                        None
-                        if detail.to_ref is None
-                        else SimulationEndpointRef(
-                            raw=detail.to_ref.raw,
-                            node=detail.to_ref.node,
-                            port=detail.to_ref.port,
-                        )
-                    ),
-                )
-                for detail in report.delay_details
-            ],
-            violation_details=[
-                SimulationViolationDetail(
-                    kind=detail.kind,
-                    detail=detail.detail,
-                    at_ref=(
-                        None
-                        if detail.at_ref is None
-                        else SimulationEndpointRef(
-                            raw=detail.at_ref.raw,
-                            node=detail.at_ref.node,
-                            port=detail.at_ref.port,
-                        )
-                    ),
-                )
-                for detail in report.violation_details
-            ],
-            external_status_code=report.external_status_code,
-            external_result=report.external_result,
-        )
-
-    if simulation_mode == "internal_transient":
-        return VerificationReport(
-            checked_routes=0,
-            checked_ptl_routes=0,
-            structural_violations=0,
-            ptl_macro_boundary_violations=0,
-            ptl_forbidden_length_violations=0,
-            simulation_backend="internal_transient_unavailable",
-            simulated_events=0,
-            generated_deck_lines=0,
-            generated_deck_path=None,
-            waveform_path=None,
-            reported_violations=0,
-            reported_worst_delay_ps=None,
-            delay_details=[],
-            violation_details=[],
-            external_status_code=None,
-            external_result="internal_transient_not_implemented",
-        )
-
-    if simulation_mode == "external_josim":
-        raise RuntimeError("external_josim simulation mode requires the compiled rflux._core extension")
-
-    layout = compile_layout(
+    _require_core_extension("verify_layout(...)", _core_verify_layout)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_verify_layout(
         circuit,
-        plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        simulation_mode,
+        external_command,
     )
     return VerificationReport(
-        checked_routes=layout.routed_nets,
-        checked_ptl_routes=layout.ptl_routes,
-        structural_violations=0,
-        ptl_macro_boundary_violations=0,
-        ptl_forbidden_length_violations=0,
-        simulation_backend="event_only",
-        simulated_events=layout.analyzed_timing_arcs + layout.node_count,
-        generated_deck_lines=layout.node_count + layout.edge_count + 2,
-        generated_deck_path=None,
-        waveform_path=None,
-        reported_violations=0,
-        reported_worst_delay_ps=None,
-        delay_details=[],
-        violation_details=[],
-        external_status_code=None,
-        external_result=None,
+        checked_routes=report.checked_routes,
+        checked_ptl_routes=report.checked_ptl_routes,
+        structural_violations=report.structural_violations,
+        ptl_macro_boundary_violations=report.ptl_macro_boundary_violations,
+        ptl_forbidden_length_violations=report.ptl_forbidden_length_violations,
+        simulation_backend=report.simulation_backend,
+        simulated_events=report.simulated_events,
+        generated_deck_lines=report.generated_deck_lines,
+        generated_deck_path=report.generated_deck_path,
+        waveform_path=report.waveform_path,
+        reported_violations=report.reported_violations,
+        reported_worst_delay_ps=report.reported_worst_delay_ps,
+        delay_details=[
+            SimulationDelayDetail(
+                name=detail.name,
+                delay_ps=detail.delay_ps,
+                from_ref=(
+                    None
+                    if detail.from_ref is None
+                    else SimulationEndpointRef(
+                        raw=detail.from_ref.raw,
+                        node=detail.from_ref.node,
+                        port=detail.from_ref.port,
+                    )
+                ),
+                to_ref=(
+                    None
+                    if detail.to_ref is None
+                    else SimulationEndpointRef(
+                        raw=detail.to_ref.raw,
+                        node=detail.to_ref.node,
+                        port=detail.to_ref.port,
+                    )
+                ),
+            )
+            for detail in report.delay_details
+        ],
+        violation_details=[
+            SimulationViolationDetail(
+                kind=detail.kind,
+                detail=detail.detail,
+                at_ref=(
+                    None
+                    if detail.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=detail.at_ref.raw,
+                        node=detail.at_ref.node,
+                        port=detail.at_ref.port,
+                    )
+                ),
+            )
+            for detail in report.violation_details
+        ],
+        external_status_code=report.external_status_code,
+        external_result=report.external_result,
     )
 
 
@@ -2321,13 +2162,17 @@ __all__ = [
     "Pdk",
     "AdvancedConstraintReport",
     "AdvancedConstraintViolation",
+    "CombinationalEquivalenceReport",
     "VerificationReport",
     "CompoundCellCharacterizationReport",
+    "OutputMismatch",
     "PinRef",
     "SynthesisReport",
     "SimulationDelayDetail",
     "SimulationEndpointRef",
     "SimulationViolationDetail",
+    "SingleStepSequentialEquivalenceReport",
+    "StateTransitionMismatch",
     "analyze_timing",
     "analyze_timing_statistical",
     "analyze_ac_bias",
@@ -2342,6 +2187,8 @@ __all__ = [
     "compile_netlist",
     "compile_plan",
     "compile_plan_report",
+    "check_equivalence",
+    "check_single_step_sequential_equivalence",
     "core_version",
     "verify_layout",
 ]

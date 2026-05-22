@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    { "id": 0, "kind": "Port", "name": "a" },
+    { "id": 1, "kind": "Port", "name": "b" },
+    { "id": 2, "kind": "Port", "name": "c" },
+    { "id": 3, "kind": "CellInstance", "name": "or0", "logic_op": "Or" },
+    { "id": 4, "kind": "CellInstance", "name": "or1", "logic_op": "Or" },
+    { "id": 5, "kind": "CellInstance", "name": "and0", "logic_op": "And" },
+    { "id": 6, "kind": "Port", "name": "out" }
+  ],
+  "edges": [
+    [ { "node": 0, "port": 0 }, { "node": 3, "port": 0 } ],
+    [ { "node": 1, "port": 0 }, { "node": 3, "port": 1 } ],
+    [ { "node": 0, "port": 1 }, { "node": 4, "port": 0 } ],
+    [ { "node": 2, "port": 0 }, { "node": 4, "port": 1 } ],
+    [ { "node": 3, "port": 0 }, { "node": 5, "port": 0 } ],
+    [ { "node": 4, "port": 0 }, { "node": 5, "port": 1 } ],
+    [ { "node": 5, "port": 0 }, { "node": 6, "port": 0 } ]
+  ]
+}

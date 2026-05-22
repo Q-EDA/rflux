@@ -3,7 +3,7 @@ mod bool_opt;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rflux_ir::{IrError, Netlist, NodeKind, PinRef};
-use rflux_sat::{solve_with_metrics as sat_solve_with_metrics, CnfFormula, Lit, SolveResult, SolveStats};
+use rflux_sat::{CnfFormula, IncrementalSolver, Lit, SolveResult, SolveStats};
 use rflux_tech::{Pdk, SfCell, SfCellKind};
 use thiserror::Error;
 
@@ -57,9 +57,67 @@ pub struct SatEquivalenceReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EquivalenceCheckKind {
+    Output,
+    State,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquivalenceCheckTarget {
+    pub kind: EquivalenceCheckKind,
+    pub name: String,
+    pub assumptions: Vec<Lit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquivalenceSatProblem {
+    pub formula: CnfFormula,
+    pub checks: Vec<EquivalenceCheckTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SatOutputMismatch {
     pub lhs: bool,
     pub rhs: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialEquivalenceReport {
+    pub equivalent: bool,
+    pub checked_outputs: Vec<String>,
+    pub checked_states: Vec<String>,
+    pub counterexample_inputs: Option<BTreeMap<String, bool>>,
+    pub counterexample_present_states: Option<BTreeMap<String, bool>>,
+    pub counterexample_outputs: Option<BTreeMap<String, SatOutputMismatch>>,
+    pub counterexample_states: Option<BTreeMap<String, SatStateTransitionMismatch>>,
+    pub sat_stats: SolveStats,
+    pub sat_elapsed_ns: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SatStateTransitionMismatch {
+    pub lhs_next: bool,
+    pub rhs_next: bool,
+    pub lhs_clock: bool,
+    pub rhs_clock: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BooleanEquivalenceProblemData {
+    export: EquivalenceSatProblem,
+    shared_input_vars: BTreeMap<String, usize>,
+    output_vars: Vec<(String, usize, usize)>,
+}
+
+#[derive(Debug, Clone)]
+struct SequentialEquivalenceProblemData {
+    export: EquivalenceSatProblem,
+    shared_input_vars: BTreeMap<String, usize>,
+    shared_state_vars: BTreeMap<String, usize>,
+    lhs_outputs: BTreeMap<String, usize>,
+    rhs_outputs: BTreeMap<String, usize>,
+    lhs_states: BTreeMap<String, SequentialSatState>,
+    rhs_states: BTreeMap<String, SequentialSatState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,73 +530,114 @@ impl Compiler {
         lhs: &Netlist,
         rhs: &Netlist,
     ) -> Result<SatEquivalenceReport, SynthError> {
-        let mut formula = CnfFormula::new(0);
-        let mut shared_input_vars = BTreeMap::<String, usize>::new();
+        let problem = build_boolean_equivalence_problem_data(lhs, rhs)?;
+        let checked_outputs = problem
+            .export
+            .checks
+            .iter()
+            .map(|check| check.name.clone())
+            .collect::<Vec<_>>();
+        let incremental_solver = IncrementalSolver::from_formula(problem.export.formula.clone());
+        let mut aggregated_stats = SolveStats::default();
+        let mut aggregated_elapsed_ns = 0_u128;
 
-        let lhs_encoded = encode_netlist_for_sat(lhs, &mut formula, &mut shared_input_vars)?;
-        let rhs_encoded = encode_netlist_for_sat(rhs, &mut formula, &mut shared_input_vars)?;
+        for check in &problem.export.checks {
+            let (solve_result, sat_metrics) =
+                incremental_solver.solve_with_assumptions_and_metrics(&check.assumptions);
+            merge_solve_stats(&mut aggregated_stats, &sat_metrics.stats);
+            aggregated_elapsed_ns += sat_metrics.elapsed_ns;
 
-        if lhs_encoded.inputs != rhs_encoded.inputs {
-            return Err(SynthError::SatInterfaceMismatch(format!(
-                "input sets differ: lhs={:?}, rhs={:?}",
-                lhs_encoded.inputs, rhs_encoded.inputs
-            )));
-        }
-        if lhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
-            != rhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
-        {
-            return Err(SynthError::SatInterfaceMismatch(format!(
-                "output sets differ: lhs={:?}, rhs={:?}",
-                lhs_encoded.outputs.keys().collect::<Vec<_>>(),
-                rhs_encoded.outputs.keys().collect::<Vec<_>>()
-            )));
-        }
-        if lhs_encoded.outputs.is_empty() {
-            return Err(SynthError::SatInterfaceMismatch(
-                "no named output ports found for comparison".to_string(),
-            ));
-        }
-
-        let mut checked_outputs = Vec::new();
-        let mut diff_literals = Vec::new();
-        let mut output_vars = Vec::<(String, usize, usize)>::new();
-        for output in lhs_encoded.outputs.keys() {
-            let lhs_var = *lhs_encoded
-                .outputs
-                .get(output)
-                .expect("lhs output key must exist");
-            let rhs_var = *rhs_encoded
-                .outputs
-                .get(output)
-                .expect("rhs output key must exist");
-            let diff_var = formula.add_var();
-            encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
-            diff_literals.push(Lit::pos(diff_var));
-            checked_outputs.push(output.clone());
-            output_vars.push((output.clone(), lhs_var, rhs_var));
-        }
-        formula
-            .add_clause(diff_literals)
-            .map_err(|err| SynthError::SatEncoding(format!("{err:?}")))?;
-
-        let (solve_result, sat_metrics) = sat_solve_with_metrics(&formula);
-
-        match solve_result {
-            SolveResult::Unsatisfiable => Ok(SatEquivalenceReport {
-                equivalent: true,
-                checked_outputs,
-                counterexample_inputs: None,
-                counterexample_outputs: None,
-                sat_stats: sat_metrics.stats,
-                sat_elapsed_ns: sat_metrics.elapsed_ns,
-            }),
-            SolveResult::Satisfiable(model) => {
+            if let SolveResult::Satisfiable(model) = solve_result {
                 let mut assignment = BTreeMap::new();
-                for (name, var) in &shared_input_vars {
+                for (name, var) in &problem.shared_input_vars {
                     assignment.insert(name.clone(), model.value(*var).unwrap_or(false));
                 }
                 let mut output_mismatch = BTreeMap::new();
-                for (name, lhs_var, rhs_var) in output_vars {
+                for (name, lhs_var, rhs_var) in &problem.output_vars {
+                    output_mismatch.insert(
+                        name.clone(),
+                        SatOutputMismatch {
+                            lhs: model.value(*lhs_var).unwrap_or(false),
+                            rhs: model.value(*rhs_var).unwrap_or(false),
+                        },
+                    );
+                }
+                return Ok(SatEquivalenceReport {
+                    equivalent: false,
+                    checked_outputs,
+                    counterexample_inputs: Some(assignment),
+                    counterexample_outputs: Some(output_mismatch),
+                    sat_stats: aggregated_stats,
+                    sat_elapsed_ns: aggregated_elapsed_ns,
+                })
+            } else {
+                continue;
+            }
+        }
+
+        Ok(SatEquivalenceReport {
+            equivalent: true,
+            checked_outputs,
+            counterexample_inputs: None,
+            counterexample_outputs: None,
+            sat_stats: aggregated_stats,
+            sat_elapsed_ns: aggregated_elapsed_ns,
+        })
+    }
+
+    pub fn check_sequential_equivalence_sat(
+        &self,
+        lhs: &Netlist,
+        rhs: &Netlist,
+    ) -> Result<SequentialEquivalenceReport, SynthError> {
+        let problem = build_sequential_equivalence_problem_data(lhs, rhs)?;
+        let checked_outputs = problem
+            .export
+            .checks
+            .iter()
+            .filter(|check| matches!(check.kind, EquivalenceCheckKind::Output))
+            .map(|check| check.name.clone())
+            .collect::<Vec<_>>();
+        let checked_states = problem
+            .export
+            .checks
+            .iter()
+            .filter(|check| matches!(check.kind, EquivalenceCheckKind::State))
+            .map(|check| check.name.clone())
+            .collect::<Vec<_>>();
+        let incremental_solver = IncrementalSolver::from_formula(problem.export.formula.clone());
+        let mut aggregated_stats = SolveStats::default();
+        let mut aggregated_elapsed_ns = 0_u128;
+
+        for check in &problem.export.checks {
+            let (solve_result, sat_metrics) =
+                incremental_solver.solve_with_assumptions_and_metrics(&check.assumptions);
+            merge_solve_stats(&mut aggregated_stats, &sat_metrics.stats);
+            aggregated_elapsed_ns += sat_metrics.elapsed_ns;
+
+            if let SolveResult::Satisfiable(model) = solve_result {
+                let mut input_assignment = BTreeMap::new();
+                for (name, var) in &problem.shared_input_vars {
+                    input_assignment.insert(name.clone(), model.value(*var).unwrap_or(false));
+                }
+
+                let mut present_state_assignment = BTreeMap::new();
+                for (name, var) in &problem.shared_state_vars {
+                    present_state_assignment.insert(name.clone(), model.value(*var).unwrap_or(false));
+                }
+
+                let mut output_mismatch = BTreeMap::new();
+                for (name, lhs_var, rhs_var) in problem
+                    .lhs_outputs
+                    .iter()
+                    .map(|(name, lhs_var)| {
+                        (
+                            name.clone(),
+                            *lhs_var,
+                            *problem.rhs_outputs.get(name).expect("rhs output must exist"),
+                        )
+                    })
+                {
                     output_mismatch.insert(
                         name,
                         SatOutputMismatch {
@@ -547,23 +646,425 @@ impl Compiler {
                         },
                     );
                 }
-                Ok(SatEquivalenceReport {
+
+                let mut state_mismatch = BTreeMap::new();
+                for (name, lhs_state, rhs_state) in problem.lhs_states.iter().map(|(name, lhs_state)| {
+                    (
+                        name.clone(),
+                        lhs_state,
+                        problem.rhs_states.get(name).expect("rhs state must exist"),
+                    )
+                }) {
+                    state_mismatch.insert(
+                        name,
+                        SatStateTransitionMismatch {
+                            lhs_next: model.value(lhs_state.next_var).unwrap_or(false),
+                            rhs_next: model.value(rhs_state.next_var).unwrap_or(false),
+                            lhs_clock: model.value(lhs_state.clock_var).unwrap_or(false),
+                            rhs_clock: model.value(rhs_state.clock_var).unwrap_or(false),
+                        },
+                    );
+                }
+
+                return Ok(SequentialEquivalenceReport {
                     equivalent: false,
                     checked_outputs,
-                    counterexample_inputs: Some(assignment),
+                    checked_states,
+                    counterexample_inputs: Some(input_assignment),
+                    counterexample_present_states: Some(present_state_assignment),
                     counterexample_outputs: Some(output_mismatch),
-                    sat_stats: sat_metrics.stats,
-                    sat_elapsed_ns: sat_metrics.elapsed_ns,
-                })
+                    counterexample_states: Some(state_mismatch),
+                    sat_stats: aggregated_stats,
+                    sat_elapsed_ns: aggregated_elapsed_ns,
+                });
             }
         }
+
+        Ok(SequentialEquivalenceReport {
+            equivalent: true,
+            checked_outputs,
+            checked_states,
+            counterexample_inputs: None,
+            counterexample_present_states: None,
+            counterexample_outputs: None,
+            counterexample_states: None,
+            sat_stats: aggregated_stats,
+            sat_elapsed_ns: aggregated_elapsed_ns,
+        })
     }
+
+    pub fn build_boolean_equivalence_problem(
+        &self,
+        lhs: &Netlist,
+        rhs: &Netlist,
+    ) -> Result<EquivalenceSatProblem, SynthError> {
+        Ok(build_boolean_equivalence_problem_data(lhs, rhs)?.export)
+    }
+
+    pub fn build_sequential_equivalence_problem(
+        &self,
+        lhs: &Netlist,
+        rhs: &Netlist,
+    ) -> Result<EquivalenceSatProblem, SynthError> {
+        Ok(build_sequential_equivalence_problem_data(lhs, rhs)?.export)
+    }
+}
+
+fn merge_solve_stats(into: &mut SolveStats, other: &SolveStats) {
+    into.recursive_calls += other.recursive_calls;
+    into.decisions += other.decisions;
+    into.unit_assignments += other.unit_assignments;
+    into.pure_literal_assignments += other.pure_literal_assignments;
+    into.backtracks += other.backtracks;
+    into.restarts += other.restarts;
 }
 
 #[derive(Debug, Clone)]
 struct SatEncodedNetlist {
     inputs: BTreeSet<String>,
     outputs: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone)]
+struct SequentialSatState {
+    next_var: usize,
+    clock_var: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SequentialSatEncodedNetlist {
+    inputs: BTreeSet<String>,
+    outputs: BTreeMap<String, usize>,
+    states: BTreeMap<String, SequentialSatState>,
+}
+
+#[derive(Debug, Clone)]
+enum SequentialDiffCheck {
+    Output { diff_var: usize },
+    State { diff_var: usize },
+}
+
+impl SequentialDiffCheck {
+    fn assumptions(&self) -> Vec<Lit> {
+        match self {
+            Self::Output { diff_var, .. } => vec![Lit::pos(*diff_var)],
+            Self::State { diff_var } => vec![Lit::pos(*diff_var)],
+        }
+    }
+}
+
+fn build_boolean_equivalence_problem_data(
+    lhs: &Netlist,
+    rhs: &Netlist,
+) -> Result<BooleanEquivalenceProblemData, SynthError> {
+    let mut formula = CnfFormula::new(0);
+    let mut shared_input_vars = BTreeMap::<String, usize>::new();
+
+    let lhs_encoded = encode_netlist_for_sat(lhs, &mut formula, &mut shared_input_vars)?;
+    let rhs_encoded = encode_netlist_for_sat(rhs, &mut formula, &mut shared_input_vars)?;
+
+    if lhs_encoded.inputs != rhs_encoded.inputs {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "input sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.inputs, rhs_encoded.inputs
+        )));
+    }
+    if lhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+        != rhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+    {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "output sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.outputs.keys().collect::<Vec<_>>(),
+            rhs_encoded.outputs.keys().collect::<Vec<_>>()
+        )));
+    }
+    if lhs_encoded.outputs.is_empty() {
+        return Err(SynthError::SatInterfaceMismatch(
+            "no named output ports found for comparison".to_string(),
+        ));
+    }
+
+    let mut checks = Vec::new();
+    let mut output_vars = Vec::<(String, usize, usize)>::new();
+    for output in lhs_encoded.outputs.keys() {
+        let lhs_var = *lhs_encoded
+            .outputs
+            .get(output)
+            .expect("lhs output key must exist");
+        let rhs_var = *rhs_encoded
+            .outputs
+            .get(output)
+            .expect("rhs output key must exist");
+        let diff_var = formula.add_var();
+        encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
+        checks.push(EquivalenceCheckTarget {
+            kind: EquivalenceCheckKind::Output,
+            name: output.clone(),
+            assumptions: vec![Lit::pos(diff_var)],
+        });
+        output_vars.push((output.clone(), lhs_var, rhs_var));
+    }
+
+    Ok(BooleanEquivalenceProblemData {
+        export: EquivalenceSatProblem { formula, checks },
+        shared_input_vars,
+        output_vars,
+    })
+}
+
+fn build_sequential_equivalence_problem_data(
+    lhs: &Netlist,
+    rhs: &Netlist,
+) -> Result<SequentialEquivalenceProblemData, SynthError> {
+    let mut formula = CnfFormula::new(0);
+    let mut shared_input_vars = BTreeMap::<String, usize>::new();
+    let mut shared_state_vars = BTreeMap::<String, usize>::new();
+
+    let lhs_encoded = encode_netlist_for_sequential_sat(
+        lhs,
+        &mut formula,
+        &mut shared_input_vars,
+        &mut shared_state_vars,
+    )?;
+    let rhs_encoded = encode_netlist_for_sequential_sat(
+        rhs,
+        &mut formula,
+        &mut shared_input_vars,
+        &mut shared_state_vars,
+    )?;
+
+    if lhs_encoded.inputs != rhs_encoded.inputs {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "input sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.inputs, rhs_encoded.inputs
+        )));
+    }
+    if lhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+        != rhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+    {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "output sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.outputs.keys().collect::<Vec<_>>(),
+            rhs_encoded.outputs.keys().collect::<Vec<_>>()
+        )));
+    }
+    if lhs_encoded.states.keys().collect::<BTreeSet<_>>()
+        != rhs_encoded.states.keys().collect::<BTreeSet<_>>()
+    {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "state sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.states.keys().collect::<Vec<_>>(),
+            rhs_encoded.states.keys().collect::<Vec<_>>()
+        )));
+    }
+
+    let mut checks = Vec::<EquivalenceCheckTarget>::new();
+
+    for output in lhs_encoded.outputs.keys() {
+        let lhs_var = *lhs_encoded.outputs.get(output).expect("lhs output key must exist");
+        let rhs_var = *rhs_encoded.outputs.get(output).expect("rhs output key must exist");
+        let diff_var = formula.add_var();
+        encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
+        checks.push(EquivalenceCheckTarget {
+            kind: EquivalenceCheckKind::Output,
+            name: output.clone(),
+            assumptions: SequentialDiffCheck::Output { diff_var }.assumptions(),
+        });
+    }
+
+    for state_name in lhs_encoded.states.keys() {
+        let lhs_state = lhs_encoded.states.get(state_name).expect("lhs state must exist");
+        let rhs_state = rhs_encoded.states.get(state_name).expect("rhs state must exist");
+        let next_diff_var = formula.add_var();
+        encode_xor_eq(&mut formula, next_diff_var, lhs_state.next_var, rhs_state.next_var)?;
+        let clock_diff_var = formula.add_var();
+        encode_xor_eq(&mut formula, clock_diff_var, lhs_state.clock_var, rhs_state.clock_var)?;
+        let state_diff_var = formula.add_var();
+        encode_or_eq(&mut formula, state_diff_var, &[next_diff_var, clock_diff_var])?;
+        checks.push(EquivalenceCheckTarget {
+            kind: EquivalenceCheckKind::State,
+            name: state_name.clone(),
+            assumptions: SequentialDiffCheck::State {
+                diff_var: state_diff_var,
+            }
+            .assumptions(),
+        });
+    }
+
+    Ok(SequentialEquivalenceProblemData {
+        export: EquivalenceSatProblem { formula, checks },
+        shared_input_vars,
+        shared_state_vars,
+        lhs_outputs: lhs_encoded.outputs,
+        rhs_outputs: rhs_encoded.outputs,
+        lhs_states: lhs_encoded.states,
+        rhs_states: rhs_encoded.states,
+    })
+}
+
+fn encode_netlist_for_sequential_sat(
+    netlist: &Netlist,
+    formula: &mut CnfFormula,
+    shared_input_vars: &mut BTreeMap<String, usize>,
+    shared_state_vars: &mut BTreeMap<String, usize>,
+) -> Result<SequentialSatEncodedNetlist, SynthError> {
+    let topo = topological_order_for_sequential_sat(netlist)?;
+    let (mut incoming_by_node, outdegree) = incoming_and_outdegree_for_sat(netlist);
+    for incoming in &mut incoming_by_node {
+        incoming.sort_by_key(|(port, _)| *port);
+    }
+
+    let mut node_var = vec![None::<usize>; netlist.node_count()];
+    let mut inputs = BTreeSet::new();
+    let mut outputs = BTreeMap::new();
+
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::Dff) {
+            continue;
+        }
+
+        let present_var = *shared_state_vars
+            .entry(node.name.clone())
+            .or_insert_with(|| formula.add_var());
+        node_var[node.id.0] = Some(present_var);
+    }
+
+    for node_index in topo {
+        let node = &netlist.nodes()[node_index];
+        if matches!(node.kind, NodeKind::Dff) {
+            continue;
+        }
+
+        let incoming = &incoming_by_node[node_index];
+        if incoming.is_empty() {
+            match node.kind {
+                NodeKind::Port => {
+                    let var = *shared_input_vars
+                        .entry(node.name.clone())
+                        .or_insert_with(|| formula.add_var());
+                    node_var[node_index] = Some(var);
+                    inputs.insert(node.name.clone());
+                }
+                _ => {
+                    return Err(SynthError::SatUnsupportedNodeKind {
+                        node: node_index,
+                        kind: node.kind.clone(),
+                    })
+                }
+            }
+            continue;
+        }
+
+        let operand_vars: Vec<usize> = incoming
+            .iter()
+            .map(|(_, source)| node_var[source.node.0].expect("topo order should resolve vars"))
+            .collect();
+
+        let produced_var = match node.kind {
+            NodeKind::Port | NodeKind::Splitter | NodeKind::Jtl | NodeKind::Ptl => {
+                if operand_vars.len() != 1 {
+                    return Err(SynthError::SatUnexpectedInputCount {
+                        node: node_index,
+                        expected: 1,
+                        actual: operand_vars.len(),
+                    });
+                }
+                operand_vars[0]
+            }
+            NodeKind::CellInstance | NodeKind::MacroCell => {
+                let op = node.logic_op.clone().unwrap_or(rflux_ir::LogicOp::And);
+                if op == rflux_ir::LogicOp::DffEnable {
+                    return Err(SynthError::SatUnsupportedNodeKind {
+                        node: node_index,
+                        kind: node.kind.clone(),
+                    });
+                }
+                let output_var = formula.add_var();
+                encode_gate_relation(formula, output_var, &operand_vars, &op)?;
+                output_var
+            }
+            NodeKind::Dff => continue,
+        };
+
+        node_var[node_index] = Some(produced_var);
+    }
+
+    let mut states = BTreeMap::new();
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::Dff) {
+            continue;
+        }
+
+        let incoming = &incoming_by_node[node.id.0];
+        let present_var = node_var[node.id.0].expect("dff present state var must exist");
+        let (next_var, clock_var) = match node.logic_op {
+            Some(rflux_ir::LogicOp::DffEnable) => {
+                if incoming.len() != 3 || incoming[0].0 != 0 || incoming[1].0 != 1 || incoming[2].0 != 2 {
+                    return Err(SynthError::SatUnexpectedInputCount {
+                        node: node.id.0,
+                        expected: 3,
+                        actual: incoming.len(),
+                    });
+                }
+                let data_var = node_var[incoming[0].1.node.0]
+                    .ok_or_else(|| SynthError::SatEncoding(format!("missing DffEnable data var for node {}", node.id.0)))?;
+                let enable_var = node_var[incoming[1].1.node.0]
+                    .ok_or_else(|| SynthError::SatEncoding(format!("missing DffEnable enable var for node {}", node.id.0)))?;
+                let clock_var = node_var[incoming[2].1.node.0]
+                    .ok_or_else(|| SynthError::SatEncoding(format!("missing DffEnable clock var for node {}", node.id.0)))?;
+                let next_var = formula.add_var();
+                encode_mux2_eq(formula, next_var, enable_var, present_var, data_var)?;
+                (next_var, clock_var)
+            }
+            None => {
+                if incoming.len() != 2 || incoming[0].0 != 0 || incoming[1].0 != 1 {
+                    return Err(SynthError::SatUnexpectedInputCount {
+                        node: node.id.0,
+                        expected: 2,
+                        actual: incoming.len(),
+                    });
+                }
+                let data_var = node_var[incoming[0].1.node.0]
+                    .ok_or_else(|| SynthError::SatEncoding(format!("missing Dff data var for node {}", node.id.0)))?;
+                let clock_var = node_var[incoming[1].1.node.0]
+                    .ok_or_else(|| SynthError::SatEncoding(format!("missing Dff clock var for node {}", node.id.0)))?;
+                (data_var, clock_var)
+            }
+            Some(_) => {
+                return Err(SynthError::SatUnsupportedNodeKind {
+                    node: node.id.0,
+                    kind: NodeKind::Dff,
+                })
+            }
+        };
+
+        states.insert(
+            node.name.clone(),
+            SequentialSatState {
+                next_var,
+                clock_var,
+            },
+        );
+    }
+
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::Port) || outdegree[node.id.0] != 0 {
+            continue;
+        }
+        if incoming_by_node[node.id.0].is_empty() {
+            continue;
+        }
+        outputs.insert(
+            node.name.clone(),
+            node_var[node.id.0].expect("encoded output port must have variable"),
+        );
+    }
+
+    Ok(SequentialSatEncodedNetlist {
+        inputs,
+        outputs,
+        states,
+    })
 }
 
 fn encode_netlist_for_sat(
@@ -671,6 +1172,15 @@ fn encode_gate_relation(
             }
             add_buf_eq(formula, output_var, operands[0])
         }
+        LogicOp::Not => {
+            if operands.len() != 1 {
+                return Err(SynthError::SatEncoding(format!(
+                    "NOT expects 1 input, got {}",
+                    operands.len()
+                )));
+            }
+            add_not_eq(formula, output_var, operands[0])
+        }
         LogicOp::And => encode_and_eq(formula, output_var, operands),
         LogicOp::Or => encode_or_eq(formula, output_var, operands),
         LogicOp::Xor => encode_xor_nary_eq(formula, output_var, operands),
@@ -698,6 +1208,11 @@ fn add_clause(formula: &mut CnfFormula, clause: Vec<Lit>) -> Result<(), SynthErr
 fn add_buf_eq(formula: &mut CnfFormula, z: usize, x: usize) -> Result<(), SynthError> {
     add_clause(formula, vec![Lit::neg(z), Lit::pos(x)])?;
     add_clause(formula, vec![Lit::pos(z), Lit::neg(x)])
+}
+
+fn add_not_eq(formula: &mut CnfFormula, z: usize, x: usize) -> Result<(), SynthError> {
+    add_clause(formula, vec![Lit::neg(z), Lit::neg(x)])?;
+    add_clause(formula, vec![Lit::pos(z), Lit::pos(x)])
 }
 
 fn encode_and_eq(formula: &mut CnfFormula, z: usize, inputs: &[usize]) -> Result<(), SynthError> {
@@ -822,6 +1337,44 @@ fn topological_order_for_sat(netlist: &Netlist) -> Result<Vec<usize>, SynthError
     if order.len() != netlist.node_count() {
         return Err(SynthError::CombinationalCycle);
     }
+    Ok(order)
+}
+
+fn topological_order_for_sequential_sat(netlist: &Netlist) -> Result<Vec<usize>, SynthError> {
+    let mut indegree = vec![0usize; netlist.node_count()];
+    let mut adjacency = vec![Vec::<usize>::new(); netlist.node_count()];
+    for (from, to) in netlist.edge_pairs() {
+        if matches!(netlist.nodes()[to.node.0].kind, NodeKind::Dff) {
+            continue;
+        }
+        indegree[to.node.0] += 1;
+        adjacency[from.node.0].push(to.node.0);
+    }
+
+    let mut queue = VecDeque::new();
+    for (node, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(node);
+        }
+    }
+
+    let mut order = Vec::with_capacity(netlist.node_count());
+    while let Some(node) = queue.pop_front() {
+        order.push(node);
+        for successor in &adjacency[node] {
+            indegree[*successor] -= 1;
+            if indegree[*successor] == 0 {
+                queue.push_back(*successor);
+            }
+        }
+    }
+
+    if order.len() != netlist.node_count() {
+        return Err(SynthError::SatEncoding(
+            "could not resolve sequential SAT order".to_string(),
+        ));
+    }
+
     Ok(order)
 }
 
@@ -1212,6 +1765,142 @@ mod tests {
     }
 
     #[test]
+    fn internal_boolean_optimization_rewrites_mux_feedback_dff_to_dffe() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let data = netlist.add_node(NodeKind::Port, "data");
+        let enable = netlist.add_node(NodeKind::Port, "enable");
+        let clock = netlist.add_node(NodeKind::Port, "clock");
+        let dff = netlist.add_node(NodeKind::Dff, "state");
+        let feedback = netlist.add_node(NodeKind::Splitter, "feedback_split");
+        let mux = netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: feedback, port: 0 }).expect("dff to splitter");
+        netlist.connect(PinRef { node: feedback, port: 1 }, PinRef { node: mux, port: 1 }).expect("feedback hold arm");
+        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: mux, port: 0 }).expect("enable to mux select");
+        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: mux, port: 2 }).expect("data to mux update arm");
+        netlist.connect(PinRef { node: mux, port: 0 }, PinRef { node: dff, port: 0 }).expect("mux to dff data");
+        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff, port: 1 }).expect("clock to dff");
+        netlist.connect(PinRef { node: feedback, port: 2 }, PinRef { node: out, port: 0 }).expect("feedback to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 1);
+        assert_eq!(report.gate_count_after, 0);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::DffEnable))
+                .count(),
+            1
+        );
+        assert!(
+            !netlist
+                .nodes()
+                .iter()
+                .any(|node| node.logic_op == Some(LogicOp::Mux2))
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_rewrites_inverted_mux_feedback_dff_to_dffe() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let data = netlist.add_node(NodeKind::Port, "data");
+        let enable = netlist.add_node(NodeKind::Port, "enable");
+        let clock = netlist.add_node(NodeKind::Port, "clock");
+        let dff = netlist.add_node(NodeKind::Dff, "state");
+        let feedback = netlist.add_node(NodeKind::Splitter, "feedback_split");
+        let mux = netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: feedback, port: 0 }).expect("dff to splitter");
+        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: mux, port: 1 }).expect("data to mux arm a");
+        netlist.connect(PinRef { node: feedback, port: 1 }, PinRef { node: mux, port: 2 }).expect("feedback hold arm");
+        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: mux, port: 0 }).expect("enable to mux select");
+        netlist.connect(PinRef { node: mux, port: 0 }, PinRef { node: dff, port: 0 }).expect("mux to dff data");
+        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff, port: 1 }).expect("clock to dff");
+        netlist.connect(PinRef { node: feedback, port: 2 }, PinRef { node: out, port: 0 }).expect("feedback to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 1);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::DffEnable))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Not))
+                .count(),
+            1
+        );
+        assert!(
+            !netlist
+                .nodes()
+                .iter()
+                .any(|node| node.logic_op == Some(LogicOp::Mux2))
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_rewrites_wrapped_mux_feedback_dff_to_dffe() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let data = netlist.add_node(NodeKind::Port, "data");
+        let enable = netlist.add_node(NodeKind::Port, "enable");
+        let clock = netlist.add_node(NodeKind::Port, "clock");
+        let dff = netlist.add_node(NodeKind::Dff, "state");
+        let feedback = netlist.add_node(NodeKind::Splitter, "feedback_split");
+        let mux = netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
+        let data_pipe = netlist.add_node(NodeKind::Jtl, "data_pipe");
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: feedback, port: 0 }).expect("dff to splitter");
+        netlist.connect(PinRef { node: feedback, port: 1 }, PinRef { node: mux, port: 1 }).expect("feedback hold arm");
+        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: mux, port: 0 }).expect("enable to mux select");
+        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: mux, port: 2 }).expect("data to mux update arm");
+        netlist.connect(PinRef { node: mux, port: 0 }, PinRef { node: data_pipe, port: 0 }).expect("mux to data pipe");
+        netlist.connect(PinRef { node: data_pipe, port: 0 }, PinRef { node: dff, port: 0 }).expect("data pipe to dff");
+        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff, port: 1 }).expect("clock to dff");
+        netlist.connect(PinRef { node: feedback, port: 2 }, PinRef { node: out, port: 0 }).expect("feedback to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 1);
+        assert_eq!(report.gate_count_after, 0);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::DffEnable))
+                .count(),
+            1
+        );
+        assert!(
+            !netlist
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.kind, NodeKind::Jtl))
+        );
+        assert!(
+            !netlist
+                .nodes()
+                .iter()
+                .any(|node| node.logic_op == Some(LogicOp::Mux2))
+        );
+    }
+
+    #[test]
     fn internal_boolean_optimization_eliminates_and_absorption_redundancy() {
         let mut compiler = Compiler::new();
         let mut netlist = Netlist::new();
@@ -1269,6 +1958,473 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_eliminates_and_subset_absorption_redundancy() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 }).expect("a to or0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 }).expect("a to or1");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: or1, port: 1 }).expect("b to or1");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 2 }).expect("c to or1");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 3);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_eliminates_or_subset_absorption_redundancy() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 0 }).expect("a to and0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and0, port: 1 }).expect("b to and0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and1, port: 0 }).expect("a to and1");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and1, port: 1 }).expect("b to and1");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and1, port: 2 }).expect("c to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 3);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_reconstructs_xor_from_or_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or0, port: 0 }).expect("a to or0");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: or0, port: 1 }).expect("b to or0");
+        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: or1, port: 0 }).expect("not_a to or1");
+        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: or1, port: 1 }).expect("not_b to or1");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 5);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Xor))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_reconstructs_mux_from_or_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let s = netlist.add_node(NodeKind::Port, "s");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
+        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: or0, port: 0 }).expect("s to or0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
+        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: or1, port: 0 }).expect("not_s to or1");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or1, port: 1 }).expect("a to or1");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 4);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_factors_then_reconstructs_xor_from_and_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and0, port: 0 }).expect("c to and0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and0, port: 1 }).expect("a to and0");
+        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: and0, port: 2 }).expect("not_b to and0");
+        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and1, port: 0 }).expect("c to and1");
+        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: and1, port: 1 }).expect("not_a to and1");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and1, port: 2 }).expect("b to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 5);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Xor))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_factors_then_reconstructs_mux_from_and_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let s = netlist.add_node(NodeKind::Port, "s");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and0, port: 0 }).expect("c to and0");
+        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: and0, port: 1 }).expect("s to and0");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 2 }).expect("a to and0");
+        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and1, port: 0 }).expect("c to and1");
+        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: and1, port: 1 }).expect("not_s to and1");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and1, port: 2 }).expect("b to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 4);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_factors_then_reconstructs_xor_from_or_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or0, port: 0 }).expect("c to or0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or0, port: 1 }).expect("a to or0");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: or0, port: 2 }).expect("b to or0");
+        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: or1, port: 0 }).expect("c to or1");
+        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: or1, port: 1 }).expect("not_a to or1");
+        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: or1, port: 2 }).expect("not_b to or1");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 5);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Xor))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_factors_then_reconstructs_mux_from_or_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let s = netlist.add_node(NodeKind::Port, "s");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or0, port: 0 }).expect("c to or0");
+        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: or0, port: 1 }).expect("s to or0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 2 }).expect("b to or0");
+        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: or1, port: 0 }).expect("c to or1");
+        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: or1, port: 1 }).expect("not_s to or1");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or1, port: 2 }).expect("a to or1");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 4);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_reaches_a_fixed_point_in_one_call() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let s = netlist.add_node(NodeKind::Port, "s");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and0, port: 0 }).expect("c to and0");
+        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: and0, port: 1 }).expect("s to and0");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 2 }).expect("a to and0");
+        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and1, port: 0 }).expect("c to and1");
+        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: and1, port: 1 }).expect("not_s to and1");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and1, port: 2 }).expect("b to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let once = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+        let after_once = netlist.clone();
+        let twice = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(once.gate_count_after, 2);
+        assert_eq!(twice.gate_count_before, once.gate_count_after);
+        assert_eq!(twice.gate_count_after, once.gate_count_after);
+
+        let eq = compiler
+            .check_boolean_equivalence_sat(&after_once, &netlist)
+            .expect("fixed-point check should SAT-verify");
+        assert!(eq.equivalent);
+    }
+
+    #[test]
+    fn internal_boolean_optimization_eliminates_or_consensus_redundancy() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let x = netlist.add_node(NodeKind::Port, "x");
+        let y = netlist.add_node(NodeKind::Port, "y");
+        let z = netlist.add_node(NodeKind::Port, "z");
+        let not_x = netlist.add_node_with_logic(NodeKind::CellInstance, "not_x", Some(LogicOp::Not));
+        let and_xy = netlist.add_node_with_logic(NodeKind::CellInstance, "and_xy", Some(LogicOp::And));
+        let and_nxz = netlist.add_node_with_logic(NodeKind::CellInstance, "and_nxz", Some(LogicOp::And));
+        let and_yz = netlist.add_node_with_logic(NodeKind::CellInstance, "and_yz", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: x, port: 0 }, PinRef { node: not_x, port: 0 }).expect("x to not_x");
+        netlist.connect(PinRef { node: x, port: 1 }, PinRef { node: and_xy, port: 0 }).expect("x to and_xy");
+        netlist.connect(PinRef { node: y, port: 0 }, PinRef { node: and_xy, port: 1 }).expect("y to and_xy");
+        netlist.connect(PinRef { node: not_x, port: 0 }, PinRef { node: and_nxz, port: 0 }).expect("not_x to and_nxz");
+        netlist.connect(PinRef { node: z, port: 0 }, PinRef { node: and_nxz, port: 1 }).expect("z to and_nxz");
+        netlist.connect(PinRef { node: y, port: 1 }, PinRef { node: and_yz, port: 0 }).expect("y to and_yz");
+        netlist.connect(PinRef { node: z, port: 1 }, PinRef { node: and_yz, port: 1 }).expect("z to and_yz");
+        netlist.connect(PinRef { node: and_xy, port: 0 }, PinRef { node: or0, port: 0 }).expect("and_xy to or0");
+        netlist.connect(PinRef { node: and_nxz, port: 0 }, PinRef { node: or0, port: 1 }).expect("and_nxz to or0");
+        netlist.connect(PinRef { node: and_yz, port: 0 }, PinRef { node: or0, port: 2 }).expect("and_yz to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 5);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_eliminates_and_consensus_redundancy() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+        let x = netlist.add_node(NodeKind::Port, "x");
+        let y = netlist.add_node(NodeKind::Port, "y");
+        let z = netlist.add_node(NodeKind::Port, "z");
+        let not_x = netlist.add_node_with_logic(NodeKind::CellInstance, "not_x", Some(LogicOp::Not));
+        let or_xy = netlist.add_node_with_logic(NodeKind::CellInstance, "or_xy", Some(LogicOp::Or));
+        let or_nxz = netlist.add_node_with_logic(NodeKind::CellInstance, "or_nxz", Some(LogicOp::Or));
+        let or_yz = netlist.add_node_with_logic(NodeKind::CellInstance, "or_yz", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: x, port: 0 }, PinRef { node: not_x, port: 0 }).expect("x to not_x");
+        netlist.connect(PinRef { node: x, port: 1 }, PinRef { node: or_xy, port: 0 }).expect("x to or_xy");
+        netlist.connect(PinRef { node: y, port: 0 }, PinRef { node: or_xy, port: 1 }).expect("y to or_xy");
+        netlist.connect(PinRef { node: not_x, port: 0 }, PinRef { node: or_nxz, port: 0 }).expect("not_x to or_nxz");
+        netlist.connect(PinRef { node: z, port: 0 }, PinRef { node: or_nxz, port: 1 }).expect("z to or_nxz");
+        netlist.connect(PinRef { node: y, port: 1 }, PinRef { node: or_yz, port: 0 }).expect("y to or_yz");
+        netlist.connect(PinRef { node: z, port: 1 }, PinRef { node: or_yz, port: 1 }).expect("z to or_yz");
+        netlist.connect(PinRef { node: or_xy, port: 0 }, PinRef { node: and0, port: 0 }).expect("or_xy to and0");
+        netlist.connect(PinRef { node: or_nxz, port: 0 }, PinRef { node: and0, port: 1 }).expect("or_nxz to and0");
+        netlist.connect(PinRef { node: or_yz, port: 0 }, PinRef { node: and0, port: 2 }).expect("or_yz to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 5);
+        assert_eq!(report.gate_count_after, 1);
     }
 
     #[test]
@@ -1436,19 +2592,217 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires inversion-aware IR pattern representation"]
-    fn quaigh_alignment_pending_reconstructs_xor_from_and_pattern() {
-        // Acceptance gate for a future pass equivalent to Quaigh infer_xor_mux pattern matching.
-        // Target pattern (conceptual): xor(a,b) == or(and(a,!b), and(!a,b)).
-        panic!("pending: implement AND-pattern XOR reconstruction and enable this test");
+    fn internal_boolean_optimization_factors_or_of_three_and_terms_with_shared_input() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let and2 = netlist.add_node_with_logic(NodeKind::CellInstance, "and2", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 0 }).expect("a to and0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and0, port: 1 }).expect("b to and0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and1, port: 0 }).expect("a to and1");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and1, port: 1 }).expect("c to and1");
+        netlist.connect(PinRef { node: a, port: 2 }, PinRef { node: and2, port: 0 }).expect("a to and2");
+        netlist.connect(PinRef { node: d, port: 0 }, PinRef { node: and2, port: 1 }).expect("d to and2");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: and2, port: 0 }, PinRef { node: or0, port: 2 }).expect("and2 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 4);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
     }
 
     #[test]
-    #[ignore = "requires inversion-aware IR pattern representation"]
-    fn quaigh_alignment_pending_reconstructs_mux_from_and_pattern() {
-        // Acceptance gate for a future pass equivalent to Quaigh infer_xor_mux pattern matching.
-        // Target pattern (conceptual): mux(s,a,b) == or(and(s,a), and(!s,b)).
-        panic!("pending: implement AND-pattern MUX reconstruction and enable this test");
+    fn internal_boolean_optimization_factors_and_of_or_common_term() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 }).expect("a to or0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 }).expect("a to or1");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 1 }).expect("c to or1");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 3);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn internal_boolean_optimization_factors_and_of_three_or_terms_with_shared_input() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let c = netlist.add_node(NodeKind::Port, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
+        let or2 = netlist.add_node_with_logic(NodeKind::CellInstance, "or2", Some(LogicOp::Or));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 }).expect("a to or0");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 }).expect("a to or1");
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 1 }).expect("c to or1");
+        netlist.connect(PinRef { node: a, port: 2 }, PinRef { node: or2, port: 0 }).expect("a to or2");
+        netlist.connect(PinRef { node: d, port: 0 }, PinRef { node: or2, port: 1 }).expect("d to or2");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
+        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
+        netlist.connect(PinRef { node: or2, port: 0 }, PinRef { node: and0, port: 2 }).expect("or2 to and0");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 4);
+        assert_eq!(report.gate_count_after, 2);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::And))
+                .count(),
+            1
+        );
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Or))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_reconstructs_xor_from_and_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
+        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and0, port: 0 }).expect("a to and0");
+        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: and0, port: 1 }).expect("not_b to and0");
+        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: and1, port: 0 }).expect("not_a to and1");
+        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and1, port: 1 }).expect("b to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 5);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Xor))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quaigh_alignment_reconstructs_mux_from_and_pattern() {
+        let mut compiler = Compiler::new();
+        let mut netlist = Netlist::new();
+
+        let s = netlist.add_node(NodeKind::Port, "s");
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
+        let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
+        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: and0, port: 0 }).expect("s to and0");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 1 }).expect("a to and0");
+        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: and1, port: 0 }).expect("not_s to and1");
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and1, port: 1 }).expect("b to and1");
+        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
+        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
+        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+
+        let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
+
+        assert_eq!(report.gate_count_before, 4);
+        assert_eq!(report.gate_count_after, 1);
+        assert_eq!(
+            netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.logic_op == Some(LogicOp::Mux2))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1576,6 +2930,79 @@ mod tests {
         assert_ne!(xor_out.lhs, xor_out.rhs);
         assert!(report.sat_stats.recursive_calls >= 1);
         assert!(report.sat_elapsed_ns > 0);
+    }
+
+    #[test]
+    fn sequential_sat_equivalence_finds_transition_counterexample() {
+        let compiler = Compiler::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let _enable_l = lhs.add_node(NodeKind::Port, "enable");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
+        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
+        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let enable_r = rhs.add_node(NodeKind::Port, "enable");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node_with_logic(NodeKind::Dff, "state", Some(LogicOp::DffEnable));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dffe");
+        rhs.connect(PinRef { node: enable_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("enable->dffe");
+        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 2 }).expect("clock->dffe");
+        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dffe->out");
+
+        let report = compiler
+            .check_sequential_equivalence_sat(&lhs, &rhs)
+            .expect("sequential equivalence should run on Dff/DffEnable subset");
+
+        assert!(!report.equivalent);
+        assert!(report.counterexample_inputs.is_some());
+        assert!(report.counterexample_present_states.is_some());
+        assert!(report.counterexample_states.is_some());
+        let state = report
+            .counterexample_states
+            .as_ref()
+            .and_then(|states| states.get("state"))
+            .expect("state transition mismatch should exist");
+        assert!(state.lhs_next != state.rhs_next || state.lhs_clock != state.rhs_clock);
+        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_elapsed_ns > 0);
+    }
+
+    #[test]
+    fn sequential_sat_equivalence_reports_state_interface_mismatch() {
+        let compiler = Compiler::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "lhs_state");
+        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
+        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node(NodeKind::Dff, "rhs_state");
+        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dff");
+        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("clock->dff");
+
+        let error = compiler
+            .check_sequential_equivalence_sat(&lhs, &rhs)
+            .expect_err("state name mismatch should be reported at the interface boundary");
+
+        match error {
+            SynthError::SatInterfaceMismatch(message) => {
+                assert!(message.contains("state sets differ"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

@@ -70,6 +70,10 @@ fn dimacs_classic_examples_end_to_end() {
             expect_sat: true,
         },
         DimacsCase {
+            file_name: "sat_wrapped_multiclause.cnf",
+            expect_sat: true,
+        },
+        DimacsCase {
             file_name: "sat_exactly_one_4.cnf",
             expect_sat: true,
         },

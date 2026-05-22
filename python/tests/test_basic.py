@@ -1,6 +1,7 @@
 import os
 import stat
 
+import pytest
 import rflux
 
 
@@ -39,8 +40,64 @@ def test_core_version_callable():
 
 def test_compile_facade_returns_circuit():
     circuit = rflux.Circuit("demo")
-    compiled = rflux.compile(circuit)
-    assert compiled is circuit
+    with pytest.raises(NotImplementedError, match="experimental placeholder"):
+        rflux.compile(circuit)
+
+
+def test_compile_plan_report_requires_compiled_extension(monkeypatch):
+    circuit = rflux.Circuit("demo")
+    plan = rflux.CompilePlan()
+
+    monkeypatch.setattr(rflux, "_core_compile_plan", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.compile_plan_report(circuit, plan)
+
+
+def test_compile_netlist_requires_compiled_extension(monkeypatch):
+    circuit = rflux.Circuit("demo")
+
+    monkeypatch.setattr(rflux, "_core_compile_plan", None)
+    monkeypatch.setattr(rflux, "_core_compile_netlist", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.compile_netlist(circuit)
+
+
+def test_compile_layout_requires_compiled_extension(monkeypatch):
+    circuit = rflux.Circuit("demo")
+
+    monkeypatch.setattr(rflux, "_core_compile_layout", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.compile_layout(circuit)
+
+
+def test_analyze_timing_requires_compiled_extension(monkeypatch):
+    circuit = rflux.Circuit("demo")
+
+    monkeypatch.setattr(rflux, "_core_analyze_timing", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.analyze_timing(circuit)
+
+
+def test_verify_layout_requires_compiled_extension(monkeypatch):
+    circuit = rflux.Circuit("demo")
+
+    monkeypatch.setattr(rflux, "_core_verify_layout", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.verify_layout(circuit)
+
+
+def test_analyze_timing_statistical_requires_compiled_extension(monkeypatch):
+    circuit = rflux.Circuit("demo")
+
+    monkeypatch.setattr(rflux, "_core_analyze_timing_statistical", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.analyze_timing_statistical(circuit)
 
 
 def test_compile_plan_facade_accepts_plan_objects():
@@ -1004,6 +1061,24 @@ def test_simulate_text_internal_transient_supports_junction_with_model_token_pre
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_supports_junction_model_keyword_reference():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\n"
+        "V1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\n"
+        "R1 in n1 10\n"
+        "J1 n1 0 model=jjmod\n"
+        ".tran 1p 8p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 8
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_supports_spaced_junction_assignments():
     report = rflux.simulate_text(
         ".title demo\n"
@@ -1345,3 +1420,64 @@ def test_optimize_design_with_characterized_library_workflow():
     assert design.ac_bias.baseline.routed_nets > 0
     assert design.placement_candidates_evaluated >= 1
     assert design.statistical_candidates_evaluated >= 2
+
+
+def test_check_equivalence_reports_combinational_match():
+    lhs = rflux.Circuit("lhs")
+    lhs_a = lhs.add_node("port", "a")
+    lhs_b = lhs.add_node("port", "b")
+    lhs_and = lhs.add_node("cell", "lhs_and", logic_op="and")
+    lhs_out = lhs.add_node("port", "out")
+    lhs.connect(lhs_a, 0, lhs_and, 0)
+    lhs.connect(lhs_b, 0, lhs_and, 1)
+    lhs.connect(lhs_and, 0, lhs_out, 0)
+
+    rhs = rflux.Circuit("rhs")
+    rhs_a = rhs.add_node("port", "a")
+    rhs_b = rhs.add_node("port", "b")
+    rhs_and = rhs.add_node("cell", "rhs_and", logic_op="and")
+    rhs_out = rhs.add_node("port", "out")
+    rhs.connect(rhs_b, 0, rhs_and, 0)
+    rhs.connect(rhs_a, 0, rhs_and, 1)
+    rhs.connect(rhs_and, 0, rhs_out, 0)
+
+    report = rflux.check_equivalence(lhs, rhs)
+
+    assert report.equivalent is True
+    assert report.checked_outputs == ["out"]
+    assert report.counterexample_inputs == {}
+    assert report.counterexample_outputs == {}
+    assert report.sat_recursive_calls >= 1
+
+
+def test_check_single_step_sequential_equivalence_reports_counterexample():
+    lhs = rflux.Circuit("lhs_seq")
+    lhs_data = lhs.add_node("port", "data")
+    lhs.add_node("port", "enable")
+    lhs_clock = lhs.add_node("port", "clock")
+    lhs_state = lhs.add_node("dff", "state")
+    lhs_out = lhs.add_node("port", "out")
+    lhs.connect(lhs_data, 0, lhs_state, 0)
+    lhs.connect(lhs_clock, 0, lhs_state, 1)
+    lhs.connect(lhs_state, 0, lhs_out, 0)
+
+    rhs = rflux.Circuit("rhs_seq")
+    rhs_data = rhs.add_node("port", "data")
+    rhs_enable = rhs.add_node("port", "enable")
+    rhs_clock = rhs.add_node("port", "clock")
+    rhs_state = rhs.add_node("dff", "state", logic_op="dffe")
+    rhs_out = rhs.add_node("port", "out")
+    rhs.connect(rhs_data, 0, rhs_state, 0)
+    rhs.connect(rhs_enable, 0, rhs_state, 1)
+    rhs.connect(rhs_clock, 0, rhs_state, 2)
+    rhs.connect(rhs_state, 0, rhs_out, 0)
+
+    report = rflux.check_single_step_sequential_equivalence(lhs, rhs)
+
+    assert report.equivalent is False
+    assert report.checked_outputs == ["out"]
+    assert report.checked_states == ["state"]
+    assert "state" in report.counterexample_states
+    assert report.counterexample_states["state"].lhs_next is True
+    assert report.counterexample_states["state"].rhs_next is False
+    assert report.sat_recursive_calls >= 1

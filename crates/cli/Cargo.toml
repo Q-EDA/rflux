@@ -1,0 +1,22 @@
+[package]
+name = "rflux-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rflux"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+rflux-flow = { path = "../flow" }
+rflux-ir = { path = "../ir" }
+rflux-io = { path = "../io" }
+rflux-sim = { path = "../sim" }
+rflux-sat = { path = "../sat" }
+rflux-synth = { path = "../synth" }
+rflux-tech = { path = "../tech" }
+rflux-verify = { path = "../verify" }

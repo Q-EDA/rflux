@@ -27,6 +27,7 @@ pub enum NodeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogicOp {
     Buf,
+    Not,
     And,
     Or,
     Xor,
@@ -157,6 +158,10 @@ impl Netlist {
 
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
+    }
+
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(id.0)
     }
 
     pub fn edge_pairs(&self) -> Vec<(PinRef, PinRef)> {

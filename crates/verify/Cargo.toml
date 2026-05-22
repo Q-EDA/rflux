@@ -1,0 +1,9 @@
+[package]
+name = "rflux-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+rflux-synth = { path = "../synth" }

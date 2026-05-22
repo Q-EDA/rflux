@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_security_compliance:
+        description: "Run optional security/compliance baseline job"
+        required: false
+        default: false
+        type: boolean
       josim_command:
         description: "JoSIM command/path for compare tests"
         required: false
@@ -39,8 +44,23 @@ jobs:
           export PYO3_PYTHON="$(uv python find)"
           cargo test --workspace
 
+      - name: Generate SAT and synth metric artifacts
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test -p rflux-sat --test dimacs_end_to_end -- --nocapture
+          cargo test -p rflux-synth --test quaigh_alignment_fixtures -- --nocapture
+
       - name: Python tests
         run: uv run pytest
+
+      - name: Upload SAT and synth metric artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sat-and-synth-metrics
+          if-no-files-found: error
+          path: |
+            target/dimacs_sat_metrics.csv
+            target/quaigh_fixture_sat_metrics.csv
 
   waveform-compare-optional:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_external_waveform_compare }}
@@ -67,3 +87,50 @@ jobs:
         env:
           RFLOW_JOSIM_COMMAND: ${{ inputs.josim_command }}
         run: uv run pytest python/tests/test_waveform_compare.py -rs
+
+  security-compliance-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_security_compliance }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Sync Python dependencies
+        run: uv sync --all-groups
+
+      - name: Install compliance tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-license --locked
+
+      - name: Generate compliance artifacts
+        run: |
+          mkdir -p target/compliance
+          cargo metadata --format-version 1 > target/compliance/rust-dependency-inventory.json
+          cargo license --json > target/compliance/rust-licenses.json
+          uv run python python/scripts/export_python_dependency_inventory.py --output target/compliance/python-dependency-inventory.json
+          uv run python python/scripts/export_python_license_inventory.py --output target/compliance/python-license-inventory.json
+          set -o pipefail
+          cargo audit | tee target/compliance/cargo-audit.txt
+
+      - name: Upload compliance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-compliance-baseline
+          if-no-files-found: error
+          path: |
+            target/compliance/rust-dependency-inventory.json
+            target/compliance/rust-licenses.json
+            target/compliance/python-dependency-inventory.json
+            target/compliance/python-license-inventory.json
+            target/compliance/cargo-audit.txt
+            pyproject.toml
+            uv.lock

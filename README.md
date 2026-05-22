@@ -4,7 +4,7 @@ Rust-first SFQ EDA toolkit for superconducting single-flux-quantum circuits.
 
 `rflux` 是一个以 Rust 为核心、以 Python 为外层胶水与调用接口的 SFQ EDA 原型项目。它面向超导单磁通量子电路的建模、综合、布局布线、时序分析与验证，重点围绕 SFQ 特有的约束展开，例如显式 splitter 扇出、路径平衡、JTL/PTL 混合互连、多时钟域约束，以及面向 AC bias 的粗粒度设计评估。
 
-当前仓库状态更接近“可执行的研究型原型”而不是完整产品：核心 Rust workspace 和 Python facade 已经联通，部分设计阶段已有可运行实现与测试覆盖，CLI 入口仍是占位状态。
+当前仓库状态更接近“可执行的研究型原型”而不是完整产品：核心 Rust workspace 和 Python facade 已经联通，部分设计阶段已有可运行实现与测试覆盖，并且现在已经具备最小可用 CLI 与独立验证 crate。
 
 ## 项目目标
 
@@ -13,7 +13,7 @@ Rust-first SFQ EDA toolkit for superconducting single-flux-quantum circuits.
 - 通过 PyO3 + maturin + uv 提供 Python 接口，便于脚本、Notebook 和现有流程集成。
 - 逐步形成从 netlist 编译到 layout、STA、统计时序、验证与高阶约束分析的端到端流程。
 
-更完整的背景和长期设计见 [docs/project-design.md](docs/project-design.md) 与各阶段文档 [docs/phase-0.md](docs/phase-0.md)、[docs/phase-1.md](docs/phase-1.md)、[docs/phase-2.md](docs/phase-2.md)、[docs/phase-3.md](docs/phase-3.md)、[docs/phase-4.md](docs/phase-4.md)、[docs/phase-5.md](docs/phase-5.md)、[docs/phase-6-sim.md](docs/phase-6-sim.md)。
+更完整的背景和长期设计见 [docs/project-design.md](docs/project-design.md) 与各阶段文档 [docs/phase-0.md](docs/phase-0.md)、[docs/phase-1.md](docs/phase-1.md)、[docs/phase-2.md](docs/phase-2.md)、[docs/phase-3.md](docs/phase-3.md)、[docs/phase-4.md](docs/phase-4.md)、[docs/phase-5.md](docs/phase-5.md)、[docs/phase-6-sim.md](docs/phase-6-sim.md)。如果关注与传统数字综合工具的职责边界对比，可参考 [docs/yosys-alignment.md](docs/yosys-alignment.md)。如果关注商业化推进基线，可同时阅读 [docs/commercialization-roadmap.md](docs/commercialization-roadmap.md)、[docs/product-scope.md](docs/product-scope.md)、[docs/support-matrix.md](docs/support-matrix.md)、[docs/release-policy.md](docs/release-policy.md)、[docs/error-codes.md](docs/error-codes.md)、[docs/known-limitations.md](docs/known-limitations.md)、[docs/defect-severity-sla.md](docs/defect-severity-sla.md)、[docs/benchmark-correlation-plan.md](docs/benchmark-correlation-plan.md)、[docs/ownership-matrix.md](docs/ownership-matrix.md)、[docs/pdk-onboarding.md](docs/pdk-onboarding.md)、[docs/interface-inventory.md](docs/interface-inventory.md)、[docs/security-compliance.md](docs/security-compliance.md)、[docs/external-command-policy.md](docs/external-command-policy.md)、[docs/third-party-risk-review.md](docs/third-party-risk-review.md)、[docs/third-party-risk-register.md](docs/third-party-risk-register.md) 和 [docs/third-party-exception-template.md](docs/third-party-exception-template.md)。
 
 ## 当前已实现能力
 
@@ -39,6 +39,7 @@ Rust-first SFQ EDA toolkit for superconducting single-flux-quantum circuits.
 - `rflux-flow`：综合、布局、布线、时序、验证和 AC bias 分析的统一编排入口。
 - `rflux-tech`：最小 PDK 抽象与 PTL forbidden-length 查询。
 - `rflux-io`：JSON IR/PDK、LEF/DEF 基础读写路径。
+- `rflux-verify`：独立的等价性检查入口，当前提供组合 SAT 等价检查与 `Dff`/`DffEnable` 子集的单步顺序等价检查。
 
 ### Python 接口
 
@@ -75,14 +76,15 @@ rflux/
 │   ├── sim/       # 仿真模块骨架与外部/事件后端统一接口
 │   ├── synth/     # 综合原型
 │   ├── tech/      # PDK / 工艺抽象
-│   └── timing/    # STA / SSTA
+│   ├── timing/    # STA / SSTA
+│   └── verify/    # 独立验证入口
 ├── docs/          # 设计和阶段文档
 ├── python/rflux/  # 纯 Python facade
 ├── python/tests/  # Python 侧回归测试
 └── src/main.rs    # 根 CLI，占位状态
 ```
 
-说明：设计文档中还提到了 `device`、`verify`、`cli` 等更完整的模块拆分；其中 `sim` 现已作为独立 crate 骨架落地，但求解器能力仍在推进中，README 以下述“现有 workspace”为准。
+说明：设计文档中还提到了 `device` 等更完整的模块拆分；其中 `cli` 与 `verify` 已经以最小可用 crate 形式落地，`sim` 也已作为独立 crate 骨架落地，但求解器能力仍在推进中，README 以下述“现有 workspace”为准。
 
 ## 环境要求
 
@@ -115,6 +117,50 @@ uv run pytest
 ```
 
 说明：workspace 包含 PyO3 扩展 crate。在未显式配置 Python 解释器的环境中，直接运行 `cargo test --workspace` 可能会在 `pyo3-build-config` 阶段失败；使用 `uv run cargo test --workspace` 更稳妥。
+
+### 3.1 使用 CLI
+
+workspace 现在包含一个最小可用的 Rust CLI crate：`rflux-cli`。
+
+构建与查看帮助：
+
+```bash
+cargo run -p rflux-cli -- --help
+```
+
+生成一个最小 PDK JSON：
+
+```bash
+cargo run -p rflux-cli -- pdk-minimal --output target/minimal_pdk.json
+```
+
+对 IR JSON 运行综合、布局、时序或验证：
+
+```bash
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/classic_examples/classic_full_adder.json
+cargo run -p rflux-cli -- compile-layout --input crates/synth/tests/fixtures/classic_examples/classic_full_adder.json
+cargo run -p rflux-cli -- analyze-timing --input crates/synth/tests/fixtures/classic_examples/classic_full_adder.json
+cargo run -p rflux-cli -- verify-layout --input crates/synth/tests/fixtures/classic_examples/classic_full_adder.json --mode event_only
+```
+
+对两个 IR JSON 运行组合或单步顺序等价检查：
+
+```bash
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/classic_examples/classic_full_adder.json --rhs crates/synth/tests/fixtures/classic_examples/classic_full_adder.json
+cargo run -p rflux-cli -- check-equivalence --kind single_step_sequential --lhs crates/synth/tests/fixtures/quaigh_alignment/dffe_feedback_wrapped.json --rhs crates/synth/tests/fixtures/quaigh_alignment/dffe_feedback_wrapped.json
+```
+
+对 SPICE/JoSIM 风格 deck 文件运行直接仿真：
+
+```bash
+cargo run -p rflux-cli -- simulate-file --input python/tests/benchmarks/phase6/t_delay_smoke.cir --mode internal_transient
+```
+
+说明：
+
+- `--pdk <path>` 可加载自定义 PDK；未提供时默认使用 `Pdk::minimal("minimal-sfq")`。
+- flow 相关命令当前使用内建默认 `FlowConfig`，聚焦于把现有 Rust API 变成可执行入口。
+- `--output <path>` 会把 JSON 报告写入文件；未提供时写到 stdout。
 
 如果只想快速确认 Python facade 可用，也可以运行：
 
@@ -197,6 +243,24 @@ ac_bias = rflux.optimize_ac_bias(circuit)
 print(ac_bias.optimized.optimization_score)
 ```
 
+仓库里也提供了几条可直接执行的 Python 端到端示例，适合在完成 `uv sync` 和 `uv run maturin develop` 之后直接运行：
+
+```bash
+uv run python python/scripts/example_compile_analyze.py
+uv run python python/scripts/example_equivalence_check.py
+uv run python python/scripts/example_equivalence_cli_counterexample.py
+uv run python python/scripts/example_equivalence_cli_replay.py
+uv run python python/scripts/example_simulate_internal_transient.py
+uv run python python/scripts/example_simulate_benchmark_file.py
+```
+
+- `example_compile_analyze.py`：从电路构造一路跑到 layout、timing 和 AC bias 报告。
+- `example_equivalence_check.py`：展示一组等价电路和一组不等价电路，输出 SAT 统计与反例输入。
+- `example_equivalence_cli_counterexample.py`：从 Python 驱动 CLI 生成一个故意变异的 rhs，并通过 sidecar 回放得到 SAT 反例模型。
+- `example_equivalence_cli_replay.py`：从 Python 驱动 CLI 导出等价 DIMACS/sidecar，再按 `check_ref` 回放 SAT 求解。
+- `example_simulate_internal_transient.py`：对一个最小 RC deck 运行内部瞬态仿真并输出波形/延迟摘要。
+- `example_simulate_benchmark_file.py`：从仓库里的 benchmark deck 文件出发，演示 `simulate_file(...)` 的完整调用链。
+
 ### Rust HDL builder 示例
 
 ```rust
@@ -248,6 +312,8 @@ assert_eq!(netlist.node_count(), 4);
 - [docs/sfq.md](docs/sfq.md): SFQ 领域背景
 - [docs/phase-6-sim.md](docs/phase-6-sim.md): `rflux-sim` 推进计划与阶段出口条件
 - [docs/josim-parity.md](docs/josim-parity.md): `rflux-sim` 对标 JoSIM 的功能矩阵与进度基线
+- [docs/diagnostics.md](docs/diagnostics.md): 当前最小诊断包基线与 `collect-diagnostics` 用法
+- [docs/security-compliance.md](docs/security-compliance.md): 当前安全与合规基线、自动化执行面与已知缺口
 - [AGENTS.md](AGENTS.md): 仓库协作约定，尤其是 Python/uv 规则
 - [python/tests/test_basic.py](python/tests/test_basic.py): 当前 Python API 的实际用法参考
 

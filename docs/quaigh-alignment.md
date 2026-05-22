@@ -34,9 +34,16 @@ Legend:
 | MUX canonical non-commutative ordering | gates canonical mux checks | quaigh_alignment_keeps_mux_data_order_semantics | pass | Distinct data-order muxes are not wrongly merged. |
 | Absorption simplification | (normalization simplification family) | internal_boolean_optimization_eliminates_and_absorption_redundancy, internal_boolean_optimization_eliminates_or_absorption_redundancy | pass | Added in rflux-synth as extra simplification beyond prior baseline. |
 | Pattern-based factoring from AND/OR structures | share_logic and normalization-related rewrites | internal_boolean_optimization_factors_or_of_and_common_term | partial | rflux-synth now factors OR(AND(a,b),AND(a,c)) => AND(a, OR(b,c)) on a safe subset. |
-| Pattern-based XOR/MUX reconstruction from AND network | optim::infer_gates::infer_xor_mux | none | gap | Full Quaigh-style XOR/MUX reconstruction from complemented AND structures is still missing in current IR model. |
-| DFFE reconstruction from mux structure | optim::infer_gates::infer_dffe | none | gap | rflux-synth currently reuses explicit DffEnable nodes; no structural reconstruction pass yet. |
-| Equivalence-proof style regression corpus | equiv.rs suite | quaigh_alignment_fixture_cases + Compiler::check_boolean_equivalence_sat | partial | SAT-based combinational equivalence is now integrated for fixture before/after checks; full equiv.rs parity corpus is still pending. |
+| Pattern-based XOR/MUX reconstruction from AND network | optim::infer_gates::infer_xor_mux | quaigh_alignment_reconstructs_xor_from_and_pattern, quaigh_alignment_reconstructs_mux_from_and_pattern | pass | Complemented AND cones now reconstruct to XOR/MUX in the current IR subset. |
+| DFFE reconstruction from mux structure | optim::infer_gates::infer_dffe | internal_boolean_optimization_rewrites_mux_feedback_dff_to_dffe, internal_boolean_optimization_rewrites_inverted_mux_feedback_dff_to_dffe, internal_boolean_optimization_rewrites_wrapped_mux_feedback_dff_to_dffe, quaigh_alignment_sequential_fixture_cases | partial | rflux-synth now normalizes the standard `q_next = enable ? data : q_prev` mux-feedback form into explicit `DffEnable`, including the mirrored arm ordering that requires an inserted inverted-enable node, a single passthrough wrapper on the mux-to-DFF data path (`Splitter`/`Jtl`/`Ptl`), wrapped feedback/clock fixture variants, the combined inverted-enable plus wrapped-feedback case, and the combined inverted-enable plus wrapped-clock case. More general sequential motifs are still out of scope. |
+| Equivalence-proof style regression corpus | equiv.rs suite | quaigh_alignment_fixture_cases + Compiler::check_boolean_equivalence_sat | partial | SAT-based combinational equivalence is integrated for fixture before/after checks, and the synth-side checker now consumes `rflux-sat::IncrementalSolver` with per-output assumptions instead of cloning a fresh solve formula per query. Full equiv.rs parity corpus is still pending. |
+
+Sequential equivalence note:
+
+- `Compiler::check_sequential_equivalence_sat` now provides a single-step sequential SAT check for the current `Dff`/`DffEnable` subset.
+- The check shares same-named present-state variables across both netlists, compares observable outputs, and compares each same-named state's next-state and clock functions.
+- State matching is currently name-based by design; mismatched state-name sets are rejected up front as an interface mismatch.
+- This path is intentionally narrower than full sequential equivalence; it is designed to validate the current DFFE normalization slice without changing the existing combinational SAT interface.
 
 ## Local validation commands
 
@@ -44,6 +51,10 @@ Legend:
 - uv run cargo test -p rflux-synth internal_boolean_optimization_deduplicates_deep_commutative_cones
 - uv run cargo test -p rflux-synth quaigh_alignment_keeps_mux_data_order_semantics
 - uv run cargo test -p rflux-synth quaigh_alignment_respects_xor_sharing_toggle
+- uv run cargo test -p rflux-synth internal_boolean_optimization_rewrites_mux_feedback_dff_to_dffe
+- uv run cargo test -p rflux-synth internal_boolean_optimization_rewrites_inverted_mux_feedback_dff_to_dffe
+- uv run cargo test -p rflux-synth internal_boolean_optimization_rewrites_wrapped_mux_feedback_dff_to_dffe
+- uv run cargo test -p rflux-synth sequential_sat_equivalence_finds_transition_counterexample
 
 Fixture-driven alignment harness:
 
@@ -65,6 +76,17 @@ Fixture-driven alignment harness:
 	- mux_data_order_distinct
 	- xor_toggle_pair_enabled
 	- xor_toggle_pair (sharing disabled)
+
+Sequential fixture alignment harness:
+
+- integration test: `crates/synth/tests/sequential_alignment_fixtures.rs`
+- fixture directory: `crates/synth/tests/fixtures/quaigh_alignment/`
+- validation style: structural post-opt assertions only; these fixtures intentionally do not go through `Compiler::check_boolean_equivalence_sat` because the current SAT equivalence path is combinational-only and rejects `Dff`/`DffEnable`
+- current sequential scenarios:
+	- `dffe_feedback_wrapped.json` (feedback arm wrapped by a passthrough `Jtl` before re-entering the mux hold arm)
+	- `dffe_clock_wrapped.json` (clock input wrapped by a passthrough `Jtl` while the mux-feedback DFFE rewrite still converges)
+	- `dffe_inverted_wrapped.json` (mirrored-arm DFFE form with wrapped feedback and inserted inverted-enable normalization)
+	- `dffe_inverted_clock_wrapped.json` (mirrored-arm DFFE form with wrapped clock input and inserted inverted-enable normalization)
 
 Classic end-to-end examples:
 
@@ -152,6 +174,6 @@ These tests are intentionally `#[ignore]` until inversion-aware IR pattern repre
 ## Next increments for full parity evidence
 
 1. Add a small AND-pattern matcher pass for xor/mux reconstruction, then mirror Quaigh infer_gates examples.
-2. Add dffe-from-mux reconstruction parity tests.
-3. Add an optional equivalence-check harness (or deterministic truth-table checks for bounded input sizes) to replicate key equiv.rs scenarios.
+2. Extend DFFE-from-mux normalization beyond the current single-register feedback motif plus one-layer passthrough wrappers to broader sequential wrappers.
+3. Add an optional equivalence-check harness (or deterministic truth-table checks for bounded input sizes) to replicate more key equiv.rs scenarios.
 4. Add fixture-level benchmark import for selected ISCAS .bench examples used in Quaigh docs.

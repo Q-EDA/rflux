@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -352,18 +353,52 @@ pub fn run_generated_deck(
     #[cfg(not(target_arch = "wasm32"))]
     {
         if let Some(command) = external_command {
+            if !is_allowed_external_command(command) {
+                return SimulationReport {
+                    backend: SimulationBackend::ExternalUnavailable,
+                    simulated_events,
+                    generated_deck_lines,
+                    generated_deck_path: None,
+                    waveform_path: None,
+                    reported_violations: 0,
+                    reported_worst_delay_ps: None,
+                    delay_details: Vec::new(),
+                    violation_details: Vec::new(),
+                    external_status_code: None,
+                    external_result: Some("external_command_not_allowed".to_string()),
+                };
+            }
+
             use std::fs;
-            use std::process::Command;
             use std::time::{SystemTime, UNIX_EPOCH};
 
-            let deck_path = std::env::temp_dir().join(format!(
-                "rflux-{}-{}.sp",
+            let timestamp_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default();
+            let run_dir = match create_external_run_dir(
+                &std::env::temp_dir(),
                 std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|duration| duration.as_millis())
-                    .unwrap_or_default()
-            ));
+                timestamp_millis,
+            ) {
+                Ok(run_dir) => run_dir,
+                Err(_) => {
+                    return SimulationReport {
+                        backend: SimulationBackend::ExternalUnavailable,
+                        simulated_events,
+                        generated_deck_lines,
+                        generated_deck_path: None,
+                        waveform_path: None,
+                        reported_violations: 0,
+                        reported_worst_delay_ps: None,
+                        delay_details: Vec::new(),
+                        violation_details: Vec::new(),
+                        external_status_code: None,
+                        external_result: Some("external_run_dir_create_failed".to_string()),
+                    };
+                }
+            };
+            let deck_path = run_dir.join("input.sp");
             if fs::write(&deck_path, deck).is_err() {
                 return SimulationReport {
                     backend: SimulationBackend::ExternalUnavailable,
@@ -380,7 +415,7 @@ pub fn run_generated_deck(
                 };
             }
 
-            match Command::new(command).arg(&deck_path).output() {
+            match build_external_simulator_command(command, &deck_path).output() {
                 Ok(output) => {
                     let status = output.status.code();
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -433,6 +468,68 @@ pub fn run_generated_deck(
 
     let _ = simulation_config;
     event_only_report()
+}
+
+fn is_allowed_external_command(command: &str) -> bool {
+    let candidate = command.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+
+    let path = Path::new(candidate);
+    if path.components().count() != 1 {
+        return false;
+    }
+
+    matches_ascii_case(candidate, "josim") || matches_ascii_case(candidate, "josim.exe")
+}
+
+fn matches_ascii_case(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn build_external_simulator_command(command: &str, deck_path: &Path) -> std::process::Command {
+    let mut child = std::process::Command::new(command);
+    child.arg(deck_path);
+    let env_names = std::env::vars_os().map(|(name, _)| name);
+    let _ = apply_external_env_sanitization(&mut child, env_names);
+    child
+}
+
+fn apply_external_env_sanitization<I>(
+    command: &mut std::process::Command,
+    env_names: I,
+) -> Vec<String>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut removed = Vec::new();
+    for name in env_names {
+        if should_strip_external_env_var(&name) {
+            command.env_remove(&name);
+            removed.push(name.to_string_lossy().into_owned());
+        }
+    }
+    removed.sort();
+    removed.dedup();
+    removed
+}
+
+fn should_strip_external_env_var(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.starts_with("RFLOW_") || name.starts_with("JOSIM_")
+}
+
+fn create_external_run_dir(
+    base_temp_dir: &Path,
+    process_id: u32,
+    timestamp_millis: u128,
+) -> Result<PathBuf, std::io::Error> {
+    let run_dir = base_temp_dir.join(format!("rflux-ext-{}-{}", process_id, timestamp_millis));
+    fs::create_dir(&run_dir)?;
+    Ok(run_dir)
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -1075,10 +1172,12 @@ fn parse_internal_transient_netlist(
             .to_ascii_uppercase();
         match prefix {
             'R' => {
-                if tokens.len() != 4 {
-                    return Err(format!("internal_transient_unsupported_resistor_syntax:{line}"));
-                }
-                let resistance_ohm = evaluate_expression(tokens[3], &parsed.params)
+                let resistance_ohm = parse_two_terminal_passive_value(
+                    &tokens,
+                    &parsed.params,
+                    &["r", "res", "resistance"],
+                    "resistor",
+                )?
                     .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
                 if resistance_ohm <= 0.0 {
                     return Err(format!("internal_transient_invalid_resistance:{line}"));
@@ -1090,10 +1189,12 @@ fn parse_internal_transient_netlist(
                 });
             }
             'C' => {
-                if tokens.len() != 4 {
-                    return Err(format!("internal_transient_unsupported_capacitor_syntax:{line}"));
-                }
-                let capacitance_f = evaluate_expression(tokens[3], &parsed.params)
+                let capacitance_f = parse_two_terminal_passive_value(
+                    &tokens,
+                    &parsed.params,
+                    &["c", "cap", "capacitance"],
+                    "capacitor",
+                )?
                     .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
                 if capacitance_f < 0.0 {
                     return Err(format!("internal_transient_invalid_capacitance:{line}"));
@@ -1105,11 +1206,13 @@ fn parse_internal_transient_netlist(
                 });
             }
             'L' => {
-                if tokens.len() != 4 {
-                    return Err(format!("internal_transient_unsupported_inductor_syntax:{line}"));
-                }
                 let inductor_name = tokens[0].to_ascii_lowercase();
-                let inductance_h = evaluate_expression(tokens[3], &parsed.params)
+                let inductance_h = parse_two_terminal_passive_value(
+                    &tokens,
+                    &parsed.params,
+                    &["l", "ind", "inductance"],
+                    "inductor",
+                )?
                     .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
                 if inductance_h <= 0.0 {
                     return Err(format!("internal_transient_invalid_inductance:{line}"));
@@ -1150,11 +1253,9 @@ fn parse_internal_transient_netlist(
                 if tokens.len() < 4 {
                     return Err(format!("internal_transient_unsupported_element:{prefix}"));
                 }
-                let junction_tokens = collapse_spaced_assignments(&tokens[3..]);
-                let junction_model = junction_tokens
-                    .first()
-                    .and_then(|token| (!token.contains('=')).then(|| token.to_ascii_lowercase()))
-                    .and_then(|name| junction_models.get(&name).copied());
+                let junction_tokens = normalized_junction_assignment_tokens(&tokens[3..]);
+                let junction_model =
+                    resolve_internal_junction_model_defaults(&tokens[3..], &junction_models);
                 let has_assignment = junction_tokens.iter().any(|token| token.contains('='));
                 if junction_model.is_none() && !has_assignment {
                     return Err(format!("internal_transient_unsupported_element:{prefix}"));
@@ -1316,7 +1417,7 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
         };
         if name.eq_ignore_ascii_case("seed") {
             let value = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_seed".to_string())?;
             if !value.is_finite() || value < 0.0 {
                 return Err("internal_transient_invalid_option_seed".to_string());
             }
@@ -1346,7 +1447,7 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
             || name.eq_ignore_ascii_case("relerr")
         {
             let value = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_reltol".to_string())?;
             if !value.is_finite() || value <= 0.0 {
                 return Err("internal_transient_invalid_option_reltol".to_string());
             }
@@ -1359,7 +1460,7 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
             || name.eq_ignore_ascii_case("abserr")
         {
             let value = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_abstol".to_string())?;
             if !value.is_finite() || value <= 0.0 {
                 return Err("internal_transient_invalid_option_abstol".to_string());
             }
@@ -1374,7 +1475,7 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
             || name.eq_ignore_ascii_case("maxiters")
         {
             let value = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_max_iterations".to_string())?;
             if !value.is_finite() || value <= 0.0 {
                 return Err("internal_transient_invalid_option_max_iterations".to_string());
             }
@@ -1389,9 +1490,11 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
         if name.eq_ignore_ascii_case("tnoise")
             || name.eq_ignore_ascii_case("noise")
             || name.eq_ignore_ascii_case("noisesigma")
+            || name.eq_ignore_ascii_case("noise_sigma")
+            || name.eq_ignore_ascii_case("sigma")
         {
             let value = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_noise".to_string())?;
             if !value.is_finite() || value < 0.0 {
                 return Err("internal_transient_invalid_option_noise".to_string());
             }
@@ -1399,9 +1502,13 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
             continue;
         }
 
-        if name.eq_ignore_ascii_case("temp") {
+        if name.eq_ignore_ascii_case("temp")
+            || name.eq_ignore_ascii_case("temperature")
+            || name.eq_ignore_ascii_case("temperature_c")
+            || name.eq_ignore_ascii_case("tempc")
+        {
             let value_c = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_temp".to_string())?;
             let value_k = value_c + 273.15;
             if !value_k.is_finite() || value_k <= 0.0 {
                 return Err("internal_transient_invalid_option_temp".to_string());
@@ -1410,10 +1517,40 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
             continue;
         }
 
-        if name.eq_ignore_ascii_case("tnom") {
+        if name.eq_ignore_ascii_case("temp_k")
+            || name.eq_ignore_ascii_case("temperature_k")
+        {
+            let value_k = evaluate_expression(value_expr.trim(), &parsed.params)
+                .map_err(|_| "internal_transient_invalid_option_temp".to_string())?;
+            if !value_k.is_finite() || value_k <= 0.0 {
+                return Err("internal_transient_invalid_option_temp".to_string());
+            }
+            temperature_k = Some(value_k);
+            continue;
+        }
+
+        if name.eq_ignore_ascii_case("tnom")
+            || name.eq_ignore_ascii_case("nomtemp")
+            || name.eq_ignore_ascii_case("nominal_temperature")
+            || name.eq_ignore_ascii_case("nominal_temperature_c")
+            || name.eq_ignore_ascii_case("tnomc")
+        {
             let value_c = evaluate_expression(value_expr.trim(), &parsed.params)
-                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|_| "internal_transient_invalid_option_tnom".to_string())?;
             let value_k = value_c + 273.15;
+            if !value_k.is_finite() || value_k <= 0.0 {
+                return Err("internal_transient_invalid_option_tnom".to_string());
+            }
+            nominal_temperature_k = Some(value_k);
+            continue;
+        }
+
+        if name.eq_ignore_ascii_case("tnom_k")
+            || name.eq_ignore_ascii_case("nomtemp_k")
+            || name.eq_ignore_ascii_case("nominal_temperature_k")
+        {
+            let value_k = evaluate_expression(value_expr.trim(), &parsed.params)
+                .map_err(|_| "internal_transient_invalid_option_tnom".to_string())?;
             if !value_k.is_finite() || value_k <= 0.0 {
                 return Err("internal_transient_invalid_option_tnom".to_string());
             }
@@ -1488,7 +1625,22 @@ fn parse_node_voltage_assignments(
 }
 
 fn parse_mutual_coupling_expression(tokens: Vec<&str>) -> Result<String, String> {
-    let normalized = tokens.join("").replace(char::is_whitespace, "");
+    if tokens.is_empty() {
+        return Err("internal_transient_invalid_mutual_coupling".to_string());
+    }
+
+    let collapsed = collapse_spaced_assignments(&tokens);
+    if collapsed.len() == 2 {
+        let name = collapsed[0].trim();
+        let value = collapsed[1].trim();
+        if (name.eq_ignore_ascii_case("k") || name.eq_ignore_ascii_case("coupling"))
+            && !value.is_empty()
+        {
+            return Ok(value.to_string());
+        }
+    }
+
+    let normalized = collapsed.join("").replace(char::is_whitespace, "");
     if normalized.is_empty() {
         return Err("internal_transient_invalid_mutual_coupling".to_string());
     }
@@ -1502,6 +1654,100 @@ fn parse_mutual_coupling_expression(tokens: Vec<&str>) -> Result<String, String>
         return Ok(value.to_string());
     }
     Ok(normalized)
+}
+
+fn parse_two_terminal_passive_value(
+    tokens: &[&str],
+    params: &BTreeMap<String, f64>,
+    accepted_names: &[&str],
+    kind: &str,
+) -> Result<Result<f64, SimulationError>, String> {
+    if tokens.len() < 4 {
+        return Err(format!(
+            "internal_transient_unsupported_{kind}_syntax:{}",
+            tokens.join(" ")
+        ));
+    }
+
+    let raw_value_tokens = tokens[3..].to_vec();
+    let mut value_expr = None::<String>;
+    let mut index = 0usize;
+    while index < raw_value_tokens.len() {
+        let token = raw_value_tokens[index];
+        if let Some((name, expr)) = token.split_once('=') {
+            if !accepted_names
+                .iter()
+                .any(|accepted| name.eq_ignore_ascii_case(accepted))
+            {
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_syntax:{}",
+                    tokens.join(" ")
+                ));
+            }
+            if value_expr.replace(expr.to_string()).is_some() {
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_syntax:{}",
+                    tokens.join(" ")
+                ));
+            }
+            index += 1;
+            continue;
+        }
+
+        if index + 2 < raw_value_tokens.len()
+            && raw_value_tokens[index + 1] == "="
+            && accepted_names
+                .iter()
+                .any(|accepted| token.eq_ignore_ascii_case(accepted))
+        {
+            if value_expr
+                .replace(raw_value_tokens[index + 2].to_string())
+                .is_some()
+            {
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_syntax:{}",
+                    tokens.join(" ")
+                ));
+            }
+            index += 3;
+            continue;
+        }
+
+        if index + 1 < raw_value_tokens.len()
+            && accepted_names
+                .iter()
+                .any(|accepted| token.eq_ignore_ascii_case(accepted))
+        {
+            if value_expr
+                .replace(raw_value_tokens[index + 1].to_string())
+                .is_some()
+            {
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_syntax:{}",
+                    tokens.join(" ")
+                ));
+            }
+            index += 2;
+            continue;
+        }
+
+        if value_expr.replace(token.to_string()).is_some() {
+            return Err(format!(
+                "internal_transient_unsupported_{kind}_syntax:{}",
+                tokens.join(" ")
+            ));
+        }
+        index += 1;
+    }
+
+    let Some(value_expr) = value_expr else {
+        return Err(format!(
+            "internal_transient_unsupported_{kind}_syntax:{}",
+            tokens.join(" ")
+        ));
+    };
+
+    Ok(evaluate_expression(&value_expr, params))
 }
 
 fn parse_transmission_line_parameters(
@@ -1518,36 +1764,105 @@ fn parse_transmission_line_parameters(
     let mut td_expr = None::<String>;
     let mut loss_expr = None::<String>;
     let mut alpha_expr = None::<String>;
-    for token in collapse_spaced_assignments(&tokens[5..]) {
+    let normalized = tokens[5..].join(" ").replace(',', " ");
+    let raw_tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < raw_tokens.len() {
+        let token = raw_tokens[index];
         if let Some((name, value)) = token.split_once('=') {
-            if name.eq_ignore_ascii_case("z0") {
+            if name.eq_ignore_ascii_case("z0") || name.eq_ignore_ascii_case("zo") {
                 z0_expr = Some(value.to_string());
+                index += 1;
                 continue;
             }
-            if name.eq_ignore_ascii_case("td") || name.eq_ignore_ascii_case("delay") {
+            if name.eq_ignore_ascii_case("td")
+                || name.eq_ignore_ascii_case("delay")
+                || name.eq_ignore_ascii_case("tau")
+            {
                 td_expr = Some(value.to_string());
+                index += 1;
                 continue;
             }
             if name.eq_ignore_ascii_case("loss") || name.eq_ignore_ascii_case("atten") {
                 loss_expr = Some(value.to_string());
+                index += 1;
                 continue;
             }
             if name.eq_ignore_ascii_case("alpha") {
                 alpha_expr = Some(value.to_string());
+                index += 1;
                 continue;
             }
             return Err("internal_transient_invalid_transmission_parameter".to_string());
         }
+        if index + 2 < raw_tokens.len() && raw_tokens[index + 1] == "=" {
+            let name = token;
+            let value = raw_tokens[index + 2];
+            if name.eq_ignore_ascii_case("z0") || name.eq_ignore_ascii_case("zo") {
+                z0_expr = Some(value.to_string());
+                index += 3;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("td")
+                || name.eq_ignore_ascii_case("delay")
+                || name.eq_ignore_ascii_case("tau")
+            {
+                td_expr = Some(value.to_string());
+                index += 3;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("loss") || name.eq_ignore_ascii_case("atten") {
+                loss_expr = Some(value.to_string());
+                index += 3;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("alpha") {
+                alpha_expr = Some(value.to_string());
+                index += 3;
+                continue;
+            }
+            return Err("internal_transient_invalid_transmission_parameter".to_string());
+        }
+        if index + 1 < raw_tokens.len() {
+            let name = token;
+            let value = raw_tokens[index + 1];
+            if name.eq_ignore_ascii_case("z0") || name.eq_ignore_ascii_case("zo") {
+                z0_expr = Some(value.to_string());
+                index += 2;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("td")
+                || name.eq_ignore_ascii_case("delay")
+                || name.eq_ignore_ascii_case("tau")
+            {
+                td_expr = Some(value.to_string());
+                index += 2;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("loss") || name.eq_ignore_ascii_case("atten") {
+                loss_expr = Some(value.to_string());
+                index += 2;
+                continue;
+            }
+            if name.eq_ignore_ascii_case("alpha") {
+                alpha_expr = Some(value.to_string());
+                index += 2;
+                continue;
+            }
+        }
         if z0_expr.is_none() {
-            z0_expr = Some((*token).to_string());
+            z0_expr = Some(token.to_string());
+            index += 1;
             continue;
         }
         if td_expr.is_none() {
-            td_expr = Some((*token).to_string());
+            td_expr = Some(token.to_string());
+            index += 1;
             continue;
         }
         if loss_expr.is_none() {
-            loss_expr = Some((*token).to_string());
+            loss_expr = Some(token.to_string());
+            index += 1;
             continue;
         }
         return Err("internal_transient_unsupported_transmission_syntax".to_string());
@@ -1605,7 +1920,7 @@ fn parse_internal_junction_parameters(
     let mut junction_cap_expr = None::<String>;
     let mut pi_expr = None::<String>;
 
-    for token in collapse_spaced_assignments(tokens) {
+    for token in normalized_junction_assignment_tokens(tokens) {
         let Some((name, value)) = token.split_once('=') else {
             continue;
         };
@@ -1774,7 +2089,7 @@ fn parse_internal_junction_model_card(
 
     let normalized = argument_text.replace(',', " ");
     let argument_tokens = normalized.split_whitespace().collect::<Vec<_>>();
-    let collapsed = collapse_spaced_assignments(&argument_tokens);
+    let collapsed = normalized_name_value_tokens(&argument_tokens);
 
     let mut critical_current_a = None::<f64>;
     let mut second_harmonic_current_a = None::<f64>;
@@ -1845,6 +2160,101 @@ fn parse_internal_junction_model_card(
             pi_junction,
         },
     )))
+}
+
+fn resolve_internal_junction_model_defaults(
+    tokens: &[&str],
+    junction_models: &BTreeMap<String, InternalJunctionModelCard>,
+) -> Option<InternalJunctionModelCard> {
+    let collapsed = normalized_junction_assignment_tokens(tokens);
+
+    if let Some(first) = collapsed.first() {
+        if !first.contains('=') {
+            let model_name = first.trim().to_ascii_lowercase();
+            if let Some(model) = junction_models.get(&model_name) {
+                return Some(*model);
+            }
+        }
+    }
+
+    for token in collapsed {
+        let Some((name, value)) = token.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("model") || name.eq_ignore_ascii_case("modelname") {
+            let model_name = value.trim().to_ascii_lowercase();
+            if let Some(model) = junction_models.get(&model_name) {
+                return Some(*model);
+            }
+        }
+    }
+
+    None
+}
+
+fn normalized_name_value_tokens(tokens: &[&str]) -> Vec<String> {
+    let collapsed = collapse_spaced_assignments(tokens);
+    let mut normalized = Vec::with_capacity(collapsed.len());
+    let mut index = 0usize;
+    while index < collapsed.len() {
+        let token = collapsed[index].as_str();
+        if token.contains('=') {
+            normalized.push(token.to_string());
+            index += 1;
+            continue;
+        }
+        if index + 1 < collapsed.len() && !collapsed[index + 1].contains('=') {
+            normalized.push(format!("{}={}", token, collapsed[index + 1]));
+            index += 2;
+            continue;
+        }
+        normalized.push(token.to_string());
+        index += 1;
+    }
+    normalized
+}
+
+fn normalized_junction_assignment_tokens(tokens: &[&str]) -> Vec<String> {
+    let normalized = tokens.join(" ").replace(',', " ");
+    let raw_tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let collapsed = collapse_spaced_assignments(&raw_tokens);
+    let mut normalized_tokens = Vec::with_capacity(collapsed.len());
+    let mut index = 0usize;
+    while index < collapsed.len() {
+        let token = collapsed[index].as_str();
+        if token.contains('=') {
+            normalized_tokens.push(token.to_string());
+            index += 1;
+            continue;
+        }
+        if index == 0 && !is_junction_assignment_name(token) {
+            normalized_tokens.push(token.to_string());
+            index += 1;
+            continue;
+        }
+        if index + 1 < collapsed.len() && !collapsed[index + 1].contains('=') {
+            normalized_tokens.push(format!("{}={}", token, collapsed[index + 1]));
+            index += 2;
+            continue;
+        }
+        normalized_tokens.push(token.to_string());
+        index += 1;
+    }
+    normalized_tokens
+}
+
+fn is_junction_assignment_name(token: &str) -> bool {
+    token.eq_ignore_ascii_case("model")
+        || token.eq_ignore_ascii_case("modelname")
+        || token.eq_ignore_ascii_case("icrit")
+        || token.eq_ignore_ascii_case("ic")
+        || token.eq_ignore_ascii_case("icrit2")
+        || token.eq_ignore_ascii_case("ic2")
+        || token.eq_ignore_ascii_case("cp2")
+        || token.eq_ignore_ascii_case("rn")
+        || token.eq_ignore_ascii_case("cj")
+        || token.eq_ignore_ascii_case("cap")
+        || token.eq_ignore_ascii_case("pi")
 }
 
 fn collapse_spaced_assignments(tokens: &[&str]) -> Vec<String> {
@@ -2133,7 +2543,7 @@ fn parse_pulse_source_arguments(
                 period_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("ncycles") {
+            if name.eq_ignore_ascii_case("ncycles") || name.eq_ignore_ascii_case("cycles") {
                 cycle_count = Some(parse_pulse_cycle_count(&value, params)?);
                 continue;
             }
@@ -2234,27 +2644,45 @@ fn parse_exp_source_arguments(
             let Some((name, expr)) = value.split_once('=') else {
                 return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
             };
-            if name.eq_ignore_ascii_case("v1") || name.eq_ignore_ascii_case("initial") {
+            if name.eq_ignore_ascii_case("v1")
+                || name.eq_ignore_ascii_case("initial")
+                || name.eq_ignore_ascii_case("low")
+            {
                 initial_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("v2") || name.eq_ignore_ascii_case("pulsed") {
+            if name.eq_ignore_ascii_case("v2")
+                || name.eq_ignore_ascii_case("pulsed")
+                || name.eq_ignore_ascii_case("high")
+            {
                 pulsed_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("td1") || name.eq_ignore_ascii_case("rise_delay") {
+            if name.eq_ignore_ascii_case("td1")
+                || name.eq_ignore_ascii_case("rise_delay")
+                || name.eq_ignore_ascii_case("delay1")
+            {
                 rise_delay_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("tau1") || name.eq_ignore_ascii_case("rise_tau") {
+            if name.eq_ignore_ascii_case("tau1")
+                || name.eq_ignore_ascii_case("rise_tau")
+                || name.eq_ignore_ascii_case("tau_rise")
+            {
                 rise_tau_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("td2") || name.eq_ignore_ascii_case("fall_delay") {
+            if name.eq_ignore_ascii_case("td2")
+                || name.eq_ignore_ascii_case("fall_delay")
+                || name.eq_ignore_ascii_case("delay2")
+            {
                 fall_delay_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("tau2") || name.eq_ignore_ascii_case("fall_tau") {
+            if name.eq_ignore_ascii_case("tau2")
+                || name.eq_ignore_ascii_case("fall_tau")
+                || name.eq_ignore_ascii_case("tau_fall")
+            {
                 fall_tau_expr = Some(expr.to_string());
                 continue;
             }
@@ -2338,7 +2766,10 @@ fn parse_sin_source_arguments(
                 amplitude_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("freq") || name.eq_ignore_ascii_case("frequency") {
+            if name.eq_ignore_ascii_case("freq")
+                || name.eq_ignore_ascii_case("frequency")
+                || name.eq_ignore_ascii_case("f")
+            {
                 frequency_expr = Some(expr.to_string());
                 continue;
             }
@@ -2350,7 +2781,10 @@ fn parse_sin_source_arguments(
                 damping_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("phase") || name.eq_ignore_ascii_case("phase_deg") {
+            if name.eq_ignore_ascii_case("phase")
+                || name.eq_ignore_ascii_case("phase_deg")
+                || name.eq_ignore_ascii_case("phi")
+            {
                 phase_expr = Some(expr.to_string());
                 continue;
             }
@@ -2434,7 +2868,9 @@ fn parse_pulse_cycle_count(
     params: &BTreeMap<String, f64>,
 ) -> Result<usize, String> {
     let value_token = if let Some((name, value)) = token.split_once('=') {
-        if !name.trim().eq_ignore_ascii_case("ncycles") {
+        if !name.trim().eq_ignore_ascii_case("ncycles")
+            && !name.trim().eq_ignore_ascii_case("cycles")
+        {
             return Err("internal_transient_invalid_pulse_source".to_string());
         }
         value.trim()
@@ -2697,6 +3133,11 @@ fn substep_boundaries_with_breakpoints(
 ) -> Vec<f64> {
     let step_end_time_s = step_start_time_s + time_step_s;
     let mut breakpoints = vec![step_start_time_s, step_end_time_s];
+    breakpoints.extend(collect_transmission_breakpoints_within_step(
+        netlist,
+        step_start_time_s,
+        time_step_s,
+    ));
 
     for element in &netlist.elements {
         let source = match element {
@@ -2748,6 +3189,11 @@ fn collect_netlist_breakpoints_within_step(
 ) -> Vec<f64> {
     let step_end_time_s = step_start_time_s + time_step_s;
     let mut breakpoints = vec![step_start_time_s, step_end_time_s];
+    breakpoints.extend(collect_transmission_breakpoints_within_step(
+        netlist,
+        step_start_time_s,
+        time_step_s,
+    ));
     for element in &netlist.elements {
         let source = match element {
             InternalElement::CurrentSource { source, .. } => Some(source),
@@ -2765,6 +3211,190 @@ fn collect_netlist_breakpoints_within_step(
     }
     sort_and_dedup_breakpoints(&mut breakpoints);
     breakpoints
+}
+
+fn collect_transmission_breakpoints_within_step(
+    netlist: &InternalTransientNetlist,
+    step_start_time_s: f64,
+    time_step_s: f64,
+) -> Vec<f64> {
+    let step_end_time_s = step_start_time_s + time_step_s;
+    let mut breakpoints = Vec::new();
+    for element in &netlist.elements {
+        let InternalElement::TransmissionLineResistive {
+            pos_a,
+            neg_a,
+            pos_b,
+            neg_b,
+            delay_s,
+            ..
+        } = element else {
+            continue;
+        };
+        if *delay_s > step_start_time_s
+            && *delay_s < step_end_time_s
+            && transmission_line_has_target_endpoints(netlist, [*pos_a, *neg_a], [*pos_b, *neg_b])
+        {
+            breakpoints.push(*delay_s);
+        }
+    }
+    for source_element in &netlist.elements {
+        let (source_nodes, source) = match source_element {
+            InternalElement::CurrentSource { pos, neg, source } => ([*pos, *neg], source),
+            InternalElement::VoltageSource {
+                pos, neg, source, ..
+            } => ([*pos, *neg], source),
+            _ => continue,
+        };
+        breakpoints.extend(collect_propagated_source_breakpoints_within_step(
+            netlist,
+            source,
+            source_nodes,
+            step_start_time_s,
+            time_step_s,
+        ));
+    }
+    breakpoints
+}
+
+fn collect_propagated_source_breakpoints_within_step(
+    netlist: &InternalTransientNetlist,
+    source: &InternalSourceSpec,
+    source_nodes: [Option<usize>; 2],
+    step_start_time_s: f64,
+    time_step_s: f64,
+) -> Vec<f64> {
+    let mut breakpoints = Vec::new();
+    let source_node_pair = canonicalize_node_pair(source_nodes);
+    let mut frontier = std::collections::VecDeque::from([(
+        source_nodes,
+        0.0_f64,
+        Vec::<usize>::new(),
+        vec![source_node_pair],
+    )]);
+
+    while let Some((frontier_nodes, accumulated_delay_s, used_transmissions, visited_nodes)) =
+        frontier.pop_front()
+    {
+        for (line_index, element) in netlist.elements.iter().enumerate() {
+            let InternalElement::TransmissionLineResistive {
+                pos_a,
+                neg_a,
+                pos_b,
+                neg_b,
+                delay_s,
+                ..
+            } = element else {
+                continue;
+            };
+
+            if used_transmissions.contains(&line_index) {
+                continue;
+            }
+
+            let side_a = [*pos_a, *neg_a];
+            let side_b = [*pos_b, *neg_b];
+            let next_nodes = if node_pairs_are_adjacent(frontier_nodes, side_a) {
+                side_b
+            } else if node_pairs_are_adjacent(frontier_nodes, side_b) {
+                side_a
+            } else {
+                continue;
+            };
+
+            let propagated_delay_s = accumulated_delay_s + *delay_s;
+            let canonical_next_nodes = canonicalize_node_pair(next_nodes);
+            if visited_nodes.contains(&canonical_next_nodes) {
+                continue;
+            }
+
+            if transmission_node_pair_is_breakpoint_target(netlist, canonical_next_nodes) {
+                let shifted_step_start_s = step_start_time_s - propagated_delay_s;
+                let shifted_breakpoints = collect_source_breakpoints_within_step(
+                    source,
+                    shifted_step_start_s,
+                    time_step_s,
+                );
+                for breakpoint_s in shifted_breakpoints {
+                    let delayed_breakpoint_s = breakpoint_s + propagated_delay_s;
+                    if delayed_breakpoint_s > step_start_time_s
+                        && delayed_breakpoint_s < step_start_time_s + time_step_s
+                    {
+                        breakpoints.push(delayed_breakpoint_s);
+                    }
+                }
+            }
+
+            let mut next_used_transmissions = used_transmissions.clone();
+            next_used_transmissions.push(line_index);
+            let mut next_visited_nodes = visited_nodes.clone();
+            next_visited_nodes.push(canonical_next_nodes);
+            frontier.push_back((
+                next_nodes,
+                propagated_delay_s,
+                next_used_transmissions,
+                next_visited_nodes,
+            ));
+        }
+    }
+    breakpoints
+}
+
+fn node_pairs_share_signal_node(left: [Option<usize>; 2], right: [Option<usize>; 2]) -> bool {
+    left.iter().flatten().any(|left_node| right.iter().flatten().any(|right_node| left_node == right_node))
+}
+
+fn node_pairs_are_adjacent(left: [Option<usize>; 2], right: [Option<usize>; 2]) -> bool {
+    canonicalize_node_pair(left) == canonicalize_node_pair(right)
+        || node_pairs_share_signal_node(left, right)
+}
+
+fn canonicalize_node_pair(nodes: [Option<usize>; 2]) -> (Option<usize>, Option<usize>) {
+    let mut ordered = [nodes[0], nodes[1]];
+    ordered.sort();
+    (ordered[0], ordered[1])
+}
+
+fn transmission_node_pair_is_breakpoint_target(
+    netlist: &InternalTransientNetlist,
+    node_pair: (Option<usize>, Option<usize>),
+) -> bool {
+    let node_array = [node_pair.0, node_pair.1];
+
+    for element in &netlist.elements {
+        match element {
+            InternalElement::TransmissionLineResistive { .. } => continue,
+            InternalElement::Resistor { pos, neg, .. }
+            | InternalElement::Capacitor { pos, neg, .. }
+            | InternalElement::CurrentSource { pos, neg, .. }
+            | InternalElement::JosephsonJunction { pos, neg, .. } => {
+                if canonicalize_node_pair([*pos, *neg]) == node_pair
+                    || node_pairs_share_signal_node(node_array, [*pos, *neg])
+                {
+                    return true;
+                }
+            }
+            InternalElement::Inductor { pos, neg, .. }
+            | InternalElement::VoltageSource { pos, neg, .. } => {
+                if canonicalize_node_pair([*pos, *neg]) == node_pair
+                    || node_pairs_share_signal_node(node_array, [*pos, *neg])
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn transmission_line_has_target_endpoints(
+    netlist: &InternalTransientNetlist,
+    left_nodes: [Option<usize>; 2],
+    right_nodes: [Option<usize>; 2],
+) -> bool {
+    transmission_node_pair_is_breakpoint_target(netlist, canonicalize_node_pair(left_nodes))
+        && transmission_node_pair_is_breakpoint_target(netlist, canonicalize_node_pair(right_nodes))
 }
 
 fn solution_error_norm(coarse: &[f64], refined: &[f64]) -> f64 {
@@ -2801,6 +3431,15 @@ fn internal_substep_count(
         .any(|element| matches!(element, InternalElement::Inductor { .. }))
     {
         suggested = suggested.max(4);
+    }
+
+    for element in &netlist.elements {
+        if let InternalElement::TransmissionLineResistive { delay_s, .. } = element {
+            if *delay_s > 0.0 {
+                let delay_substeps = (time_step_s / delay_s.max(f64::EPSILON)).ceil() as usize;
+                suggested = suggested.max(delay_substeps.clamp(1, 16));
+            }
+        }
     }
 
     for element in &netlist.elements {
@@ -3761,9 +4400,6 @@ fn find_binary_operator(expr: &str, operator: char) -> Option<usize> {
             continue;
         }
         if ch == operator {
-            if index == 0 && matches!(operator, '+' | '-') {
-                continue;
-            }
             // Treat 1e-6 / 1E+3 as numeric literals rather than subtraction/addition.
             if matches!(operator, '+' | '-') {
                 let prev = expr[..index].chars().next_back();
@@ -3829,10 +4465,14 @@ fn parse_engineering_number(token: &str) -> Result<f64, SimulationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_deck, parse_deck_file, run_generated_deck, simulate_file, simulate_text,
-        ParsedDeck, SimulationBackend, SimulationConfig, SimulationMode,
+        apply_external_env_sanitization, is_allowed_external_command, parse_deck,
+        create_external_run_dir, parse_deck_file, run_generated_deck,
+        should_strip_external_env_var, simulate_file, simulate_text, ParsedDeck,
+        SimulationBackend, SimulationConfig, SimulationMode,
     };
+    use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::process::Command;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3849,6 +4489,102 @@ mod tests {
 
         assert_eq!(report.backend, SimulationBackend::EventOnly);
         assert_eq!(report.external_result, None);
+    }
+
+    #[test]
+    fn external_mode_rejects_non_allowlisted_command() {
+        let report = run_generated_deck(
+            ".tran 1p 10p\n.end\n",
+            5,
+            &SimulationConfig {
+                mode: SimulationMode::ExternalJosim,
+                external_command: Some("python".to_string()),
+            },
+        );
+
+        assert_eq!(report.backend, SimulationBackend::ExternalUnavailable);
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("external_command_not_allowed")
+        );
+    }
+
+    #[test]
+    fn auto_mode_rejects_non_allowlisted_command() {
+        let report = run_generated_deck(
+            ".tran 1p 10p\n.end\n",
+            5,
+            &SimulationConfig {
+                mode: SimulationMode::Auto,
+                external_command: Some("cmd.exe".to_string()),
+            },
+        );
+
+        assert_eq!(report.backend, SimulationBackend::ExternalUnavailable);
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("external_command_not_allowed")
+        );
+    }
+
+    #[test]
+    fn allowlist_accepts_bare_josim_commands_only() {
+        assert!(is_allowed_external_command("josim"));
+        assert!(is_allowed_external_command("josim.exe"));
+        assert!(!is_allowed_external_command(" ./josim"));
+        assert!(!is_allowed_external_command(r"C:\tools\josim.exe"));
+        assert!(!is_allowed_external_command("subdir/josim"));
+    }
+
+    #[test]
+    fn external_env_sanitization_targets_rflow_and_josim_prefixes() {
+        assert!(should_strip_external_env_var(OsStr::new("RFLOW_JOSIM_COMMAND")));
+        assert!(should_strip_external_env_var(OsStr::new("JOSIM_LICENSE_FILE")));
+        assert!(!should_strip_external_env_var(OsStr::new("PATH")));
+        assert!(!should_strip_external_env_var(OsStr::new("HOME")));
+    }
+
+    #[test]
+    fn external_env_sanitization_reports_removed_names() {
+        let mut command = Command::new("josim");
+        let removed = apply_external_env_sanitization(
+            &mut command,
+            vec![
+                OsString::from("PATH"),
+                OsString::from("RFLOW_JOSIM_COMMAND"),
+                OsString::from("JOSIM_LICENSE_FILE"),
+                OsString::from("RFLOW_JOSIM_COMMAND"),
+            ],
+        );
+
+        assert_eq!(
+            removed,
+            vec![
+                "JOSIM_LICENSE_FILE".to_string(),
+                "RFLOW_JOSIM_COMMAND".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn external_run_dir_is_created_as_dedicated_subdirectory() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "rflux-sim-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default()
+        ));
+        fs::create_dir(&base_dir).unwrap();
+
+        let run_dir = create_external_run_dir(&base_dir, 1234, 5678).unwrap();
+
+        assert!(run_dir.exists());
+        assert!(run_dir.is_dir());
+        assert_eq!(run_dir.file_name().and_then(|name| name.to_str()), Some("rflux-ext-1234-5678"));
+
+        fs::remove_dir_all(&base_dir).unwrap();
     }
 
     #[test]
@@ -4328,6 +5064,96 @@ mod tests {
     }
 
     #[test]
+    fn simulate_text_internal_transient_accepts_keyword_resistor_value() {
+        let report = simulate_text(
+            ".title demo\nV1 in 0 DC 1m\nR1 in out resistance=50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(report.reported_worst_delay_ps, Some(0.001));
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_keyword_capacitor_value() {
+        let report = simulate_text(
+            ".title demo\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 capacitance = 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(report.reported_worst_delay_ps, Some(0.001));
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_keyword_inductor_value() {
+        let report = simulate_text(
+            ".title demo\nV1 in 0 DC 1m\nL1 in out inductance = 1p\nR1 out 0 50\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert!(report.reported_worst_delay_ps.is_some());
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_space_separated_keyword_resistor_value() {
+        let report = simulate_text(
+            ".title demo\nV1 in 0 DC 1m\nR1 in out resistance 50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(report.reported_worst_delay_ps, Some(0.001));
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_space_separated_keyword_capacitor_value() {
+        let report = simulate_text(
+            ".title demo\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 capacitance 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(report.reported_worst_delay_ps, Some(0.001));
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_space_separated_keyword_inductor_value() {
+        let report = simulate_text(
+            ".title demo\nV1 in 0 DC 1m\nL1 in out inductance 1p\nR1 out 0 50\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert!(report.reported_worst_delay_ps.is_some());
+    }
+
+    #[test]
     fn simulate_text_internal_transient_reports_option_seed() {
         let report = simulate_text(
             ".title demo\n.param base_seed=123\n.option seed = {base_seed}\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
@@ -4571,6 +5397,60 @@ mod tests {
     fn simulate_text_internal_transient_accepts_option_temp_and_tnom() {
         let report = simulate_text(
             ".title demo\n.option seed=77 tnoise=1u temp=60 tnom=27\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc;seed=77")
+        );
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_option_aliases_for_noise_and_temperature() {
+        let report = simulate_text(
+            ".title demo\n.option seed=77 noise_sigma=1u temperature=60 nominal_temperature=27\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc;seed=77")
+        );
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_kelvin_option_temperature_aliases() {
+        let report = simulate_text(
+            ".title demo\n.option seed=77 sigma=1u temperature_k=333.15 nominal_temperature_k=300.15\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc;seed=77")
+        );
+    }
+
+    #[test]
+    fn simulate_text_internal_transient_accepts_celsius_option_temperature_aliases() {
+        let report = simulate_text(
+            ".title demo\n.option seed=77 sigma=1u tempc=60 tnomc=27\nV1 in 0 DC 1m\nR1 in out 50\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
             &SimulationConfig {
                 mode: SimulationMode::InternalTransient,
                 external_command: None,
@@ -4990,6 +5870,21 @@ mod tests {
     }
 
     #[test]
+    fn internal_transient_supports_keyword_pulse_with_cycles_alias() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 PULSE(low=0 high=1 delay=0 rise=1p fall=1p width=2p period=4p cycles=2)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(result.final_node_voltages[out_index] < 0.2);
+    }
+
+    #[test]
     fn internal_transient_supports_pwl_voltage_sources() {
         let result = super::run_internal_transient(
             ".title demo\nV1 in 0 PWL(0,0,2p,1,4p,0)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 5p\n.end\n",
@@ -5201,6 +6096,44 @@ mod tests {
     }
 
     #[test]
+    fn internal_transient_supports_keyword_exp_with_low_high_aliases() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 EXP(low=0,high=1,rise_delay=1p,rise_tau=0.5p,fall_delay=4p,fall_tau=0.5p)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 6p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(result.captured_samples[2].node_voltages[out_index] > 0.1);
+        assert!(
+            result.captured_samples[4].node_voltages[out_index]
+                > result.captured_samples[5].node_voltages[out_index]
+        );
+    }
+
+    #[test]
+    fn internal_transient_supports_keyword_exp_with_delay_and_tau_aliases() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 EXP(low=0,high=1,delay1=1p,tau_rise=0.5p,delay2=4p,tau_fall=0.5p)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 6p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(result.captured_samples[2].node_voltages[out_index] > 0.1);
+        assert!(
+            result.captured_samples[4].node_voltages[out_index]
+                > result.captured_samples[5].node_voltages[out_index]
+        );
+    }
+
+    #[test]
     fn internal_transient_supports_inductors() {
         let result = super::run_internal_transient(
             ".title demo\nV1 in 0 DC 1\nL1 in out 1p\nR1 out 0 1\n.tran 1p 4p\n.end\n",
@@ -5258,6 +6191,46 @@ mod tests {
     }
 
     #[test]
+    fn internal_transient_supports_space_separated_mutual_inductance_keyword() {
+        let result = super::run_internal_transient(
+            ".title demo\nK1 L1 L2 coupling 0.9\nV1 in 0 PULSE(0,1,0,1p,1p,2p,8p)\nL1 in out 1p\nR1 out 0 1\nL2 tap 0 1p\nR2 tap 0 1\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let tap_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "tap")
+            .unwrap();
+        let coupled_peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[tap_index].abs())
+            .fold(0.0_f64, f64::max);
+        assert!(coupled_peak > 0.01);
+    }
+
+    #[test]
+    fn internal_transient_supports_space_separated_mutual_inductance_k_keyword() {
+        let result = super::run_internal_transient(
+            ".title demo\nK1 L1 L2 k 0.9\nV1 in 0 PULSE(0,1,0,1p,1p,2p,8p)\nL1 in out 1p\nR1 out 0 1\nL2 tap 0 1p\nR2 tap 0 1\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let tap_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "tap")
+            .unwrap();
+        let coupled_peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[tap_index].abs())
+            .fold(0.0_f64, f64::max);
+        assert!(coupled_peak > 0.01);
+    }
+
+    #[test]
     fn internal_transient_supports_zero_delay_transmission_line_subset() {
         let result = super::run_internal_transient(
             ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 50 0\nR1 out 0 50\n.tran 1p 4p\n.end\n",
@@ -5291,6 +6264,22 @@ mod tests {
     }
 
     #[test]
+    fn internal_transient_supports_space_separated_transmission_line_keywords() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0 50 td 1p\nR1 out 0 50\n.tran 1p 4p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        let out_voltage = result.final_node_voltages[out_index];
+        assert!(out_voltage > 0.3);
+    }
+
+    #[test]
     fn internal_transient_transmission_line_loss_reduces_output_amplitude() {
         let baseline = super::run_internal_transient(
             ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=3p\nR1 out 0 50\n.tran 1p 6p\n.end\n",
@@ -5307,6 +6296,55 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(lossy.final_node_voltages[out_index] < baseline.final_node_voltages[out_index]);
+    }
+
+    #[test]
+    fn internal_transient_supports_space_separated_transmission_line_loss_keywords() {
+        let baseline = super::run_internal_transient(
+            ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0 50 td 3p\nR1 out 0 50\n.tran 1p 6p\n.end\n",
+        )
+        .unwrap();
+        let lossy = super::run_internal_transient(
+            ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0 50 td 3p loss 0.3\nR1 out 0 50\n.tran 1p 6p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = baseline
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(lossy.final_node_voltages[out_index] < baseline.final_node_voltages[out_index]);
+    }
+
+    #[test]
+    fn internal_transient_supports_comma_separated_transmission_line_keywords() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50, td=1p, loss=0.1\nR1 out 0 50\n.tran 1p 4p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(result.final_node_voltages[out_index] > 0.2);
+    }
+
+    #[test]
+    fn internal_transient_supports_transmission_line_alias_keywords() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 zo=50 tau=1p atten=0.1\nR1 out 0 50\n.tran 1p 4p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(result.final_node_voltages[out_index] > 0.2);
     }
 
     #[test]
@@ -5383,6 +6421,146 @@ mod tests {
     fn internal_transient_supports_junction_model_card_with_instance_override() {
         let result = super::run_internal_transient(
             ".title demo\n.model jjmod jj icrit=0.5m rn=20 cj=0.5p\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 jjmod rn=25\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_junction_model_keyword_reference() {
+        let result = super::run_internal_transient(
+            ".title demo\n.model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 model=jjmod\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_junction_model_keyword_reference_with_override() {
+        let result = super::run_internal_transient(
+            ".title demo\n.model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 model = jjmod rn=25\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_comma_separated_junction_instance_parameters() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 icrit=0.5m, rn=20, cj=0.5p\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_comma_separated_junction_model_override() {
+        let result = super::run_internal_transient(
+            ".title demo\n.model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 model=jjmod, rn=25\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_space_separated_junction_instance_parameters() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 icrit 0.5m rn 20 cj 0.5p\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_space_separated_junction_model_override() {
+        let result = super::run_internal_transient(
+            ".title demo\n.model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 model jjmod rn 25\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let n1_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "n1")
+            .unwrap();
+        let peak = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[n1_index])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 1.0e-4);
+    }
+
+    #[test]
+    fn internal_transient_supports_space_separated_junction_model_card_defaults() {
+        let result = super::run_internal_transient(
+            ".title demo\n.model jjmod jj icrit 0.5m rn 20 cj 0.5p\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 0 jjmod\n.tran 1p 8p\n.end\n",
         )
         .unwrap();
 
@@ -5561,6 +6739,23 @@ mod tests {
     }
 
     #[test]
+    fn internal_transient_substep_count_increases_for_finite_delay_transmission_line() {
+        let plain_deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let delayed_deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0.2p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+
+        let plain_parsed = parse_deck(plain_deck).unwrap();
+        let delayed_parsed = parse_deck(delayed_deck).unwrap();
+        let plain_netlist = super::parse_internal_transient_netlist(plain_deck, &plain_parsed).unwrap();
+        let delayed_netlist =
+            super::parse_internal_transient_netlist(delayed_deck, &delayed_parsed).unwrap();
+
+        let plain_substeps = super::internal_substep_count(&plain_netlist, 1.0e-12, 0.0);
+        let delayed_substeps = super::internal_substep_count(&delayed_netlist, 1.0e-12, 0.0);
+
+        assert!(delayed_substeps > plain_substeps);
+    }
+
+    #[test]
     fn internal_transient_substep_boundaries_align_to_pwl_breakpoint() {
         let deck = ".title demo\nV1 in 0 PWL(0,0,2p,1,4p,0)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 5p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
@@ -5569,6 +6764,40 @@ mod tests {
         let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 1.5e-12, 1.0e-12, 4);
 
         assert!(boundaries.iter().any(|time_s| (*time_s - 2.0e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_substep_boundaries_align_to_transmission_delay_breakpoint() {
+        let deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0.2p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
+
+        assert!(boundaries.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_skips_intermediate_transmission_delay_breakpoints() {
+        let deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 mid 0 z0=50 td=0.2p\nT2 mid 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_transmission_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_skips_dangling_transmission_delay_breakpoint() {
+        let deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0.2p\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_transmission_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -5600,6 +6829,104 @@ mod tests {
         assert!(breakpoints.iter().any(|time_s| (*time_s - 2.0e-12).abs() < 1.0e-18));
         assert!((breakpoints.first().copied().unwrap_or_default() - 1.5e-12).abs() < 1.0e-18);
         assert!((breakpoints.last().copied().unwrap_or_default() - 2.5e-12).abs() < 1.0e-18);
+    }
+
+    #[test]
+    fn internal_transient_collects_delayed_transmission_source_breakpoint_within_step() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 out 0 z0=50 td=0.2p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.7e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_substep_boundaries_align_to_delayed_transmission_source_breakpoint() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 out 0 z0=50 td=0.2p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
+
+        assert!(boundaries.iter().any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
+        assert!(boundaries.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_collects_multi_hop_transmission_source_breakpoint_within_step() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 mid 0 z0=50 td=0.2p\nT2 mid 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_substep_boundaries_align_to_multi_hop_transmission_source_breakpoint() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 mid 0 z0=50 td=0.2p\nT2 mid 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
+
+        assert!(boundaries.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(boundaries.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_does_not_collect_intermediate_chain_arrival_breakpoint() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 mid 0 z0=50 td=0.2p\nT2 mid 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.7e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_skips_unobserved_intermediate_transmission_breakpoint() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.11p,0.11p,0.29p,2p)\nT1 in 0 mid 0 z0=50 td=0.23p\nT2 mid 0 out 0 z0=50 td=0.31p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.54e-12).abs() < 1.0e-18));
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.65e-12).abs() < 1.0e-18));
+        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.34e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_collects_parallel_path_transmission_source_breakpoint_within_step() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 out 0 z0=50 td=0.2p\nT2 in 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+
+        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.4e-12).abs() < 1.0e-18));
+    }
+
+    #[test]
+    fn internal_transient_substep_boundaries_align_to_parallel_path_transmission_source_breakpoint() {
+        let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 out 0 z0=50 td=0.2p\nT2 in 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let parsed = parse_deck(deck).unwrap();
+        let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
+
+        let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
+
+        assert!(boundaries.iter().any(|time_s| (*time_s - 0.4e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -5758,6 +7085,21 @@ mod tests {
         let last = result.captured_samples.last().unwrap().node_voltages[out_index].abs();
         assert!(first > 0.2);
         assert!(last < first);
+    }
+
+    #[test]
+    fn internal_transient_supports_keyword_sin_with_frequency_and_phase_aliases() {
+        let result = super::run_internal_transient(
+            ".title demo\nV1 in 0 SIN(offset=0 amplitude=1 f=100g delay=0 phi=90)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 3p\n.end\n",
+        )
+        .unwrap();
+
+        let out_index = result
+            .node_names
+            .iter()
+            .position(|name| name == "out")
+            .unwrap();
+        assert!(result.captured_samples[1].node_voltages[out_index] > 0.5);
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {

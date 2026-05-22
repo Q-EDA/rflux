@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
+use rflux_ir::{LogicOp, Netlist, NodeId, NodeKind, PinRef};
 
 use crate::{
     BoolOptCompatibilityIssue, BoolOptCompatibilityIssueKind, BoolOptCompatibilityReport,
@@ -10,6 +10,7 @@ use crate::{
 #[derive(Debug, Clone)]
 enum LogicExprKind {
     Input,
+    Not(usize),
     And(Vec<usize>),
     Or(Vec<usize>),
     Xor(Vec<usize>),
@@ -19,6 +20,7 @@ enum LogicExprKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum LogicExprKey {
+    Not(usize),
     And(Vec<usize>),
     Or(Vec<usize>),
     Xor(Vec<usize>),
@@ -40,8 +42,13 @@ impl Compiler {
         netlist: &mut Netlist,
         config: &BoolOptConfig,
     ) -> BoolOptReport {
-        let compatibility = self.analyze_bool_opt_compatibility(netlist);
         let gate_count_before = count_logic_gates(netlist);
+
+        if let Ok(Some(normalized)) = normalize_mux_feedback_dffe(netlist) {
+            *netlist = normalized;
+        }
+
+        let compatibility = self.analyze_bool_opt_compatibility(netlist);
 
         if !compatibility.is_compatible() {
             return BoolOptReport {
@@ -245,15 +252,16 @@ impl Compiler {
         let mut driver_by_expr = vec![None::<PinRef>; exprs.len()];
 
         for (expr_id, expr) in exprs.iter().enumerate() {
-            if !live_exprs[expr_id] {
-                continue;
-            }
             if matches!(expr.kind, LogicExprKind::Input) {
                 let input_node = rewritten.add_node(NodeKind::Port, expr.name.clone());
                 driver_by_expr[expr_id] = Some(PinRef {
                     node: input_node,
                     port: 0,
                 });
+                continue;
+            }
+            if !live_exprs[expr_id] {
+                continue;
             }
         }
 
@@ -465,16 +473,150 @@ fn remove_absorbed_operands(
 
 fn operand_absorbed_in_and(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
     if let LogicExprKind::Or(children) = &exprs[candidate].kind {
-        return children.iter().any(|child| operands.binary_search(child).is_ok());
+        return operands.iter().copied().any(|other| {
+            other != candidate && operand_is_or_subset(exprs, other, children)
+        }) || operand_absorbed_by_and_consensus(exprs, candidate, operands);
     }
     false
 }
 
 fn operand_absorbed_in_or(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
     if let LogicExprKind::And(children) = &exprs[candidate].kind {
-        return children.iter().any(|child| operands.binary_search(child).is_ok());
+        return operands.iter().copied().any(|other| {
+            other != candidate && operand_is_and_subset(exprs, other, children)
+        }) || operand_absorbed_by_or_consensus(exprs, candidate, operands);
     }
     false
+}
+
+fn operand_is_or_subset(exprs: &[LogicExpr], operand: usize, superset_children: &[usize]) -> bool {
+    if superset_children.binary_search(&operand).is_ok() {
+        return true;
+    }
+
+    match &exprs[operand].kind {
+        LogicExprKind::Or(children) => children
+            .iter()
+            .all(|child| superset_children.binary_search(child).is_ok()),
+        _ => false,
+    }
+}
+
+fn operand_is_and_subset(exprs: &[LogicExpr], operand: usize, superset_children: &[usize]) -> bool {
+    if superset_children.binary_search(&operand).is_ok() {
+        return true;
+    }
+
+    match &exprs[operand].kind {
+        LogicExprKind::And(children) => children
+            .iter()
+            .all(|child| superset_children.binary_search(child).is_ok()),
+        _ => false,
+    }
+}
+
+fn operand_absorbed_by_or_consensus(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
+    let LogicExprKind::And(candidate_children) = &exprs[candidate].kind else {
+        return false;
+    };
+    let candidate_literals = normalized_child_literals(exprs, candidate_children);
+
+    for (index, left) in operands.iter().copied().enumerate() {
+        if left == candidate {
+            continue;
+        }
+        for right in operands.iter().copied().skip(index + 1) {
+            if right == candidate {
+                continue;
+            }
+            if consensus_union_matches(exprs, left, right, &candidate_literals, true) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn operand_absorbed_by_and_consensus(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
+    let LogicExprKind::Or(candidate_children) = &exprs[candidate].kind else {
+        return false;
+    };
+    let candidate_literals = normalized_child_literals(exprs, candidate_children);
+
+    for (index, left) in operands.iter().copied().enumerate() {
+        if left == candidate {
+            continue;
+        }
+        for right in operands.iter().copied().skip(index + 1) {
+            if right == candidate {
+                continue;
+            }
+            if consensus_union_matches(exprs, left, right, &candidate_literals, false) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn consensus_union_matches(
+    exprs: &[LogicExpr],
+    left: usize,
+    right: usize,
+    candidate_literals: &[(usize, bool)],
+    require_and_terms: bool,
+) -> bool {
+    let (left_children, right_children) = match (&exprs[left].kind, &exprs[right].kind, require_and_terms) {
+        (LogicExprKind::And(left_children), LogicExprKind::And(right_children), true) => {
+            (left_children.as_slice(), right_children.as_slice())
+        }
+        (LogicExprKind::Or(left_children), LogicExprKind::Or(right_children), false) => {
+            (left_children.as_slice(), right_children.as_slice())
+        }
+        _ => return false,
+    };
+
+    let left_literals = normalized_child_literals(exprs, left_children);
+    let right_literals = normalized_child_literals(exprs, right_children);
+
+    for (left_index, left_literal) in left_literals.iter().enumerate() {
+        for (right_index, right_literal) in right_literals.iter().enumerate() {
+            if left_literal.0 != right_literal.0 || left_literal.1 == right_literal.1 {
+                continue;
+            }
+
+            let mut union = Vec::new();
+            union.extend(
+                left_literals
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, literal)| (index != left_index).then_some(*literal)),
+            );
+            union.extend(
+                right_literals
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, literal)| (index != right_index).then_some(*literal)),
+            );
+            union.sort_unstable();
+            union.dedup();
+
+            if union == candidate_literals {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn normalized_child_literals(exprs: &[LogicExpr], children: &[usize]) -> Vec<(usize, bool)> {
+    let mut literals: Vec<(usize, bool)> = children.iter().copied().map(|expr| expr_literal(exprs, expr)).collect();
+    literals.sort_unstable();
+    literals.dedup();
+    literals
 }
 
 fn expect_exact_inputs(
@@ -495,6 +637,7 @@ fn expect_exact_inputs(
 fn expected_logic_inputs(node: &rflux_ir::Node) -> Option<usize> {
     match node.logic_op.clone().unwrap_or(LogicOp::And) {
         LogicOp::Buf => Some(1),
+        LogicOp::Not => Some(1),
         LogicOp::Mux2 => Some(3),
         LogicOp::And | LogicOp::Or | LogicOp::Xor => None,
         LogicOp::DffEnable => Some(3),
@@ -526,38 +669,19 @@ fn build_logic_expr(
             ensure_input_count(node.id.0, operands.len(), 1)?;
             Ok(operands[0])
         }
-        LogicOp::And => build_commutative_expr(
-            exprs,
-            logic_exprs,
-            node,
-            LogicExprKey::And,
-            |inputs| LogicExprKind::And(inputs),
-            operands,
-            config.share_logic_flattening_limit,
-            canonicalize_and_operands,
-        ),
-        LogicOp::Or => {
-            if let Some(rewritten) = try_factor_or_of_and_common_term(
+        LogicOp::Not => {
+            ensure_input_count(node.id.0, operands.len(), 1)?;
+            build_keyed_expr(
                 exprs,
                 logic_exprs,
                 node,
-                &operands,
-                config,
-            )? {
-                Ok(rewritten)
-            } else {
-                build_commutative_expr(
-                    exprs,
-                    logic_exprs,
-                    node,
-                    LogicExprKey::Or,
-                    |inputs| LogicExprKind::Or(inputs),
-                    operands,
-                    config.share_logic_flattening_limit,
-                    canonicalize_or_operands,
-                )
-            }
+                LogicExprKey::Not(operands[0]),
+                LogicExprKind::Not(operands[0]),
+                true,
+            )
         }
+        LogicOp::And => build_and_logic_expr(exprs, logic_exprs, node, operands, config),
+        LogicOp::Or => build_or_logic_expr(exprs, logic_exprs, node, operands, config),
         LogicOp::Xor => {
             let use_sharing = config.infer_xor_mux;
             build_commutative_expr_with_toggle(
@@ -588,6 +712,313 @@ fn build_logic_expr(
     }
 }
 
+fn build_and_logic_expr(
+    exprs: &mut Vec<LogicExpr>,
+    logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
+    node: &rflux_ir::Node,
+    operands: Vec<usize>,
+    config: &BoolOptConfig,
+) -> Result<usize, SynthError> {
+    let operands = canonicalize_and_operands(exprs, operands, config.share_logic_flattening_limit);
+    if let Some(rewritten) = try_infer_xor_or_mux_from_or_pattern(
+        exprs,
+        logic_exprs,
+        node,
+        &operands,
+        config,
+    )? {
+        Ok(rewritten)
+    } else if let Some(rewritten) = try_factor_and_of_or_common_term(
+        exprs,
+        logic_exprs,
+        node,
+        &operands,
+        config,
+    )? {
+        Ok(rewritten)
+    } else {
+        build_commutative_expr(
+            exprs,
+            logic_exprs,
+            node,
+            LogicExprKey::And,
+            |inputs| LogicExprKind::And(inputs),
+            operands,
+            config.share_logic_flattening_limit,
+            canonicalize_and_operands,
+        )
+    }
+}
+
+fn build_or_logic_expr(
+    exprs: &mut Vec<LogicExpr>,
+    logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
+    node: &rflux_ir::Node,
+    operands: Vec<usize>,
+    config: &BoolOptConfig,
+) -> Result<usize, SynthError> {
+    let operands = canonicalize_or_operands(exprs, operands, config.share_logic_flattening_limit);
+    if let Some(rewritten) = try_infer_xor_or_mux_from_and_pattern(
+        exprs,
+        logic_exprs,
+        node,
+        &operands,
+        config,
+    )? {
+        Ok(rewritten)
+    } else if let Some(rewritten) = try_factor_or_of_and_common_term(
+        exprs,
+        logic_exprs,
+        node,
+        &operands,
+        config,
+    )? {
+        Ok(rewritten)
+    } else {
+        build_commutative_expr(
+            exprs,
+            logic_exprs,
+            node,
+            LogicExprKey::Or,
+            |inputs| LogicExprKind::Or(inputs),
+            operands,
+            config.share_logic_flattening_limit,
+            canonicalize_or_operands,
+        )
+    }
+}
+
+fn try_infer_xor_or_mux_from_and_pattern(
+    exprs: &mut Vec<LogicExpr>,
+    logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
+    node: &rflux_ir::Node,
+    operands: &[usize],
+    config: &BoolOptConfig,
+) -> Result<Option<usize>, SynthError> {
+    if !config.infer_xor_mux || operands.len() != 2 {
+        return Ok(None);
+    }
+
+    let Some(left_terms) = binary_and_literals(exprs, operands[0]) else {
+        return Ok(None);
+    };
+    let Some(right_terms) = binary_and_literals(exprs, operands[1]) else {
+        return Ok(None);
+    };
+
+    if let Some([lhs, rhs]) = try_match_xor_pattern(exprs, left_terms, right_terms) {
+        let mut xor_node = node.clone();
+        xor_node.logic_op = Some(LogicOp::Xor);
+        return build_commutative_expr_with_toggle(
+            exprs,
+            logic_exprs,
+            &xor_node,
+            LogicExprKey::Xor,
+            |inputs| LogicExprKind::Xor(inputs),
+            vec![lhs, rhs],
+            config.share_logic_flattening_limit,
+            canonicalize_xor_operands,
+            true,
+        )
+        .map(Some);
+    }
+
+    if let Some([sel, when_true, when_false]) = try_match_mux_pattern(exprs, left_terms, right_terms) {
+        let mut mux_node = node.clone();
+        mux_node.logic_op = Some(LogicOp::Mux2);
+        return build_keyed_expr(
+            exprs,
+            logic_exprs,
+            &mux_node,
+            LogicExprKey::Mux2([sel, when_true, when_false]),
+            LogicExprKind::Mux2([sel, when_true, when_false]),
+            true,
+        )
+        .map(Some);
+    }
+
+    Ok(None)
+}
+
+fn try_infer_xor_or_mux_from_or_pattern(
+    exprs: &mut Vec<LogicExpr>,
+    logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
+    node: &rflux_ir::Node,
+    operands: &[usize],
+    config: &BoolOptConfig,
+) -> Result<Option<usize>, SynthError> {
+    if !config.infer_xor_mux || operands.len() != 2 {
+        return Ok(None);
+    }
+
+    let Some(left_terms) = binary_or_literals(exprs, operands[0]) else {
+        return Ok(None);
+    };
+    let Some(right_terms) = binary_or_literals(exprs, operands[1]) else {
+        return Ok(None);
+    };
+
+    if let Some([lhs, rhs]) = try_match_dual_xor_pattern(exprs, left_terms, right_terms) {
+        let mut xor_node = node.clone();
+        xor_node.logic_op = Some(LogicOp::Xor);
+        return build_commutative_expr_with_toggle(
+            exprs,
+            logic_exprs,
+            &xor_node,
+            LogicExprKey::Xor,
+            |inputs| LogicExprKind::Xor(inputs),
+            vec![lhs, rhs],
+            config.share_logic_flattening_limit,
+            canonicalize_xor_operands,
+            true,
+        )
+        .map(Some);
+    }
+
+    if let Some([sel, when_true, when_false]) = try_match_dual_mux_pattern(exprs, left_terms, right_terms) {
+        let mut mux_node = node.clone();
+        mux_node.logic_op = Some(LogicOp::Mux2);
+        return build_keyed_expr(
+            exprs,
+            logic_exprs,
+            &mux_node,
+            LogicExprKey::Mux2([sel, when_true, when_false]),
+            LogicExprKind::Mux2([sel, when_true, when_false]),
+            true,
+        )
+        .map(Some);
+    }
+
+    Ok(None)
+}
+
+fn binary_and_literals(exprs: &[LogicExpr], expr: usize) -> Option<[usize; 2]> {
+    match &exprs[expr].kind {
+        LogicExprKind::And(children) if children.len() == 2 => Some([children[0], children[1]]),
+        _ => None,
+    }
+}
+
+fn binary_or_literals(exprs: &[LogicExpr], expr: usize) -> Option<[usize; 2]> {
+    match &exprs[expr].kind {
+        LogicExprKind::Or(children) if children.len() == 2 => Some([children[0], children[1]]),
+        _ => None,
+    }
+}
+
+fn expr_literal(exprs: &[LogicExpr], expr: usize) -> (usize, bool) {
+    match exprs[expr].kind {
+        LogicExprKind::Not(inner) => (inner, true),
+        _ => (expr, false),
+    }
+}
+
+fn try_match_xor_pattern(
+    exprs: &[LogicExpr],
+    left_terms: [usize; 2],
+    right_terms: [usize; 2],
+) -> Option<[usize; 2]> {
+    let left = [expr_literal(exprs, left_terms[0]), expr_literal(exprs, left_terms[1])];
+    let right = [expr_literal(exprs, right_terms[0]), expr_literal(exprs, right_terms[1])];
+
+    for right_order in [[right[0], right[1]], [right[1], right[0]]] {
+        if left[0].0 == right_order[0].0
+            && left[1].0 == right_order[1].0
+            && left[0].0 != left[1].0
+            && left[0].1 != right_order[0].1
+            && left[1].1 != right_order[1].1
+            && left[0].1 != left[1].1
+        {
+            let mut inputs = [left[0].0, left[1].0];
+            inputs.sort_unstable();
+            return Some(inputs);
+        }
+    }
+
+    None
+}
+
+fn try_match_mux_pattern(
+    exprs: &[LogicExpr],
+    left_terms: [usize; 2],
+    right_terms: [usize; 2],
+) -> Option<[usize; 3]> {
+    for &left_sel_index in &[0usize, 1] {
+        for &right_sel_index in &[0usize, 1] {
+            let left_sel = expr_literal(exprs, left_terms[left_sel_index]);
+            let right_sel = expr_literal(exprs, right_terms[right_sel_index]);
+            if left_sel.0 != right_sel.0 || left_sel.1 == right_sel.1 {
+                continue;
+            }
+
+            let left_data = left_terms[1 - left_sel_index];
+            let right_data = right_terms[1 - right_sel_index];
+            let (when_true, when_false) = if !left_sel.1 {
+                (left_data, right_data)
+            } else {
+                (right_data, left_data)
+            };
+
+            return Some([left_sel.0, when_true, when_false]);
+        }
+    }
+
+    None
+}
+
+fn try_match_dual_xor_pattern(
+    exprs: &[LogicExpr],
+    left_terms: [usize; 2],
+    right_terms: [usize; 2],
+) -> Option<[usize; 2]> {
+    let left = [expr_literal(exprs, left_terms[0]), expr_literal(exprs, left_terms[1])];
+    let right = [expr_literal(exprs, right_terms[0]), expr_literal(exprs, right_terms[1])];
+
+    for right_order in [[right[0], right[1]], [right[1], right[0]]] {
+        if left[0].0 == right_order[0].0
+            && left[1].0 == right_order[1].0
+            && left[0].0 != left[1].0
+            && left[0].1 != right_order[0].1
+            && left[1].1 != right_order[1].1
+            && left[0].1 == left[1].1
+        {
+            let mut inputs = [left[0].0, left[1].0];
+            inputs.sort_unstable();
+            return Some(inputs);
+        }
+    }
+
+    None
+}
+
+fn try_match_dual_mux_pattern(
+    exprs: &[LogicExpr],
+    left_terms: [usize; 2],
+    right_terms: [usize; 2],
+) -> Option<[usize; 3]> {
+    for &left_sel_index in &[0usize, 1] {
+        for &right_sel_index in &[0usize, 1] {
+            let left_sel = expr_literal(exprs, left_terms[left_sel_index]);
+            let right_sel = expr_literal(exprs, right_terms[right_sel_index]);
+            if left_sel.0 != right_sel.0 || left_sel.1 == right_sel.1 {
+                continue;
+            }
+
+            let left_data = left_terms[1 - left_sel_index];
+            let right_data = right_terms[1 - right_sel_index];
+            let (when_true, when_false) = if !left_sel.1 {
+                (right_data, left_data)
+            } else {
+                (left_data, right_data)
+            };
+
+            return Some([left_sel.0, when_true, when_false]);
+        }
+    }
+
+    None
+}
+
 fn try_factor_or_of_and_common_term(
     exprs: &mut Vec<LogicExpr>,
     logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
@@ -595,26 +1026,26 @@ fn try_factor_or_of_and_common_term(
     operands: &[usize],
     config: &BoolOptConfig,
 ) -> Result<Option<usize>, SynthError> {
-    if operands.len() != 2 {
+    if operands.len() < 2 {
         return Ok(None);
     }
 
-    let left = match &exprs[operands[0]].kind {
-        LogicExprKind::And(children) => children,
-        _ => return Ok(None),
-    };
-    let right = match &exprs[operands[1]].kind {
-        LogicExprKind::And(children) => children,
-        _ => return Ok(None),
-    };
+    let mut and_terms = Vec::with_capacity(operands.len());
+    for operand in operands {
+        match &exprs[*operand].kind {
+            LogicExprKind::And(children) => and_terms.push(children.clone()),
+            _ => return Ok(None),
+        }
+    }
 
-    let Some(common) = left.iter().copied().find(|signal| right.binary_search(signal).is_ok()) else {
-        return Ok(None);
-    };
+    let mut common_terms = and_terms[0].to_vec();
+    common_terms.retain(|signal| {
+        and_terms[1..]
+            .iter()
+            .all(|children| children.binary_search(signal).is_ok())
+    });
 
-    let left_rest: Vec<usize> = left.iter().copied().filter(|s| *s != common).collect();
-    let right_rest: Vec<usize> = right.iter().copied().filter(|s| *s != common).collect();
-    if left_rest.is_empty() || right_rest.is_empty() {
+    if common_terms.is_empty() {
         return Ok(None);
     }
 
@@ -623,32 +1054,83 @@ fn try_factor_or_of_and_common_term(
     let mut or_node = node.clone();
     or_node.logic_op = Some(LogicOp::Or);
 
-    let left_tail = build_and_tail(exprs, logic_exprs, &and_node, left_rest, config)?;
-    let right_tail = build_and_tail(exprs, logic_exprs, &and_node, right_rest, config)?;
+    let mut factored_terms = Vec::with_capacity(and_terms.len());
+    for children in and_terms {
+        let tail: Vec<usize> = children
+            .iter()
+            .copied()
+            .filter(|signal| common_terms.binary_search(signal).is_err())
+            .collect();
+        if tail.is_empty() {
+            return Ok(None);
+        }
+        factored_terms.push(build_and_tail(exprs, logic_exprs, &and_node, tail, config)?);
+    }
 
-    let or_expr = build_commutative_expr(
-        exprs,
-        logic_exprs,
-        &or_node,
-        LogicExprKey::Or,
-        |inputs| LogicExprKind::Or(inputs),
-        vec![left_tail, right_tail],
-        config.share_logic_flattening_limit,
-        canonicalize_or_operands,
-    )?;
+    let or_expr = build_or_logic_expr(exprs, logic_exprs, &or_node, factored_terms, config)?;
 
-    let and_expr = build_commutative_expr(
-        exprs,
-        logic_exprs,
-        &and_node,
-        LogicExprKey::And,
-        |inputs| LogicExprKind::And(inputs),
-        vec![common, or_expr],
-        config.share_logic_flattening_limit,
-        canonicalize_and_operands,
-    )?;
+    common_terms.push(or_expr);
+
+    let and_expr = build_and_logic_expr(exprs, logic_exprs, &and_node, common_terms, config)?;
 
     Ok(Some(and_expr))
+}
+
+fn try_factor_and_of_or_common_term(
+    exprs: &mut Vec<LogicExpr>,
+    logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
+    node: &rflux_ir::Node,
+    operands: &[usize],
+    config: &BoolOptConfig,
+) -> Result<Option<usize>, SynthError> {
+    if operands.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut or_terms = Vec::with_capacity(operands.len());
+    for operand in operands {
+        match &exprs[*operand].kind {
+            LogicExprKind::Or(children) => or_terms.push(children.clone()),
+            _ => return Ok(None),
+        }
+    }
+
+    let mut common_terms = or_terms[0].clone();
+    common_terms.retain(|signal| {
+        or_terms[1..]
+            .iter()
+            .all(|children| children.binary_search(signal).is_ok())
+    });
+
+    if common_terms.is_empty() {
+        return Ok(None);
+    }
+
+    let mut and_node = node.clone();
+    and_node.logic_op = Some(LogicOp::And);
+    let mut or_node = node.clone();
+    or_node.logic_op = Some(LogicOp::Or);
+
+    let mut factored_terms = Vec::with_capacity(or_terms.len());
+    for children in or_terms {
+        let tail: Vec<usize> = children
+            .iter()
+            .copied()
+            .filter(|signal| common_terms.binary_search(signal).is_err())
+            .collect();
+        if tail.is_empty() {
+            return Ok(None);
+        }
+        factored_terms.push(build_or_tail(exprs, logic_exprs, &or_node, tail, config)?);
+    }
+
+    let and_expr = build_and_logic_expr(exprs, logic_exprs, &and_node, factored_terms, config)?;
+
+    common_terms.push(and_expr);
+
+    let or_expr = build_or_logic_expr(exprs, logic_exprs, &or_node, common_terms, config)?;
+
+    Ok(Some(or_expr))
 }
 
 fn build_and_tail(
@@ -662,16 +1144,21 @@ fn build_and_tail(
         return Ok(operands[0]);
     }
 
-    build_commutative_expr(
-        exprs,
-        logic_exprs,
-        node,
-        LogicExprKey::And,
-        |inputs| LogicExprKind::And(inputs),
-        operands,
-        config.share_logic_flattening_limit,
-        canonicalize_and_operands,
-    )
+    build_and_logic_expr(exprs, logic_exprs, node, operands, config)
+}
+
+fn build_or_tail(
+    exprs: &mut Vec<LogicExpr>,
+    logic_exprs: &mut BTreeMap<LogicExprKey, usize>,
+    node: &rflux_ir::Node,
+    operands: Vec<usize>,
+    config: &BoolOptConfig,
+) -> Result<usize, SynthError> {
+    if operands.len() == 1 {
+        return Ok(operands[0]);
+    }
+
+    build_or_logic_expr(exprs, logic_exprs, node, operands, config)
 }
 
 fn build_dffe_expr(
@@ -784,6 +1271,7 @@ fn build_keyed_expr(
 fn expr_inputs(kind: &LogicExprKind) -> Vec<usize> {
     match kind {
         LogicExprKind::Input => Vec::new(),
+        LogicExprKind::Not(input) => vec![*input],
         LogicExprKind::And(inputs)
         | LogicExprKind::Or(inputs)
         | LogicExprKind::Xor(inputs) => inputs.clone(),
@@ -812,4 +1300,186 @@ fn mark_live_exprs(exprs: &[LogicExpr], roots: &[usize]) -> Vec<bool> {
     }
 
     live
+}
+
+fn normalize_mux_feedback_dffe(netlist: &Netlist) -> Result<Option<Netlist>, SynthError> {
+    let (mut incoming_by_node, _) = incoming_and_outdegree(netlist);
+    for incoming in &mut incoming_by_node {
+        incoming.sort_by_key(|(port, _)| *port);
+    }
+
+    let mut rewritten = netlist.clone();
+    let mut changed = false;
+
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::Dff) || node.logic_op.is_some() {
+            continue;
+        }
+
+        let incoming = &incoming_by_node[node.id.0];
+        if incoming.len() != 2 || incoming[0].0 != 0 {
+            continue;
+        }
+
+        let data_source = incoming[0].1;
+        let clock_source = incoming[1].1;
+        let mux_source = trace_passthrough_source(netlist, data_source, &incoming_by_node);
+        let mux_node = &netlist.nodes()[mux_source.node.0];
+        if !matches!(mux_node.kind, NodeKind::CellInstance | NodeKind::MacroCell)
+            || mux_node.logic_op != Some(LogicOp::Mux2)
+        {
+            continue;
+        }
+
+        let mux_inputs = &incoming_by_node[mux_node.id.0];
+        if mux_inputs.len() != 3 || mux_inputs[0].0 != 0 || mux_inputs[1].0 != 1 || mux_inputs[2].0 != 2 {
+            continue;
+        }
+
+        let select_source = mux_inputs[0].1;
+        let arm_a_source = mux_inputs[1].1;
+        let arm_b_source = mux_inputs[2].1;
+
+        let (new_data_source, new_enable_source, needs_inverted_enable) =
+            if trace_passthrough_source(netlist, arm_a_source, &incoming_by_node).node == node.id {
+                (arm_b_source, select_source, false)
+            } else if trace_passthrough_source(netlist, arm_b_source, &incoming_by_node).node == node.id {
+                (arm_a_source, select_source, true)
+            } else {
+                continue;
+            };
+
+        disconnect_inputs(&mut rewritten, mux_node.id, &incoming_by_node);
+        rewritten.disconnect(data_source);
+        rewritten.disconnect(clock_source);
+
+        let enable_source = if needs_inverted_enable {
+            let inverted_enable = rewritten.add_node_with_logic(
+                NodeKind::CellInstance,
+                format!("{}_auto_enable_inv", node.name),
+                Some(LogicOp::Not),
+            );
+            rewritten
+                .connect(select_source, PinRef { node: inverted_enable, port: 0 })
+                .map_err(SynthError::from)?;
+            PinRef {
+                node: inverted_enable,
+                port: 0,
+            }
+        } else {
+            new_enable_source
+        };
+
+        rewritten
+            .connect(new_data_source, PinRef { node: node.id, port: 0 })
+            .map_err(SynthError::from)?;
+        rewritten
+            .connect(enable_source, PinRef { node: node.id, port: 1 })
+            .map_err(SynthError::from)?;
+        rewritten
+            .connect(clock_source, PinRef { node: node.id, port: 2 })
+            .map_err(SynthError::from)?;
+
+        let rewritten_node = rewritten
+            .node_mut(node.id)
+            .ok_or_else(|| SynthError::SatEncoding(format!("missing rewritten Dff node {}", node.id.0)))?;
+        rewritten_node.logic_op = Some(LogicOp::DffEnable);
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    Ok(Some(prune_to_observable_nodes(&rewritten)?))
+}
+
+fn disconnect_inputs(
+    netlist: &mut Netlist,
+    node: NodeId,
+    incoming_by_node: &[Vec<(u16, PinRef)>],
+) {
+    for (_, source) in &incoming_by_node[node.0] {
+        netlist.disconnect(*source);
+    }
+}
+
+fn trace_passthrough_source(
+    netlist: &Netlist,
+    mut source: PinRef,
+    incoming_by_node: &[Vec<(u16, PinRef)>],
+) -> PinRef {
+    loop {
+        let node = &netlist.nodes()[source.node.0];
+        if !matches!(node.kind, NodeKind::Port | NodeKind::Splitter | NodeKind::Jtl | NodeKind::Ptl) {
+            return source;
+        }
+
+        let incoming = &incoming_by_node[source.node.0];
+        if incoming.len() != 1 {
+            return source;
+        }
+
+        source = incoming[0].1;
+    }
+}
+
+fn prune_to_observable_nodes(netlist: &Netlist) -> Result<Netlist, SynthError> {
+    let (incoming_by_node, outdegree) = incoming_and_outdegree(netlist);
+    let mut keep = vec![false; netlist.node_count()];
+    let mut worklist = VecDeque::new();
+
+    for node in netlist.nodes() {
+        let is_observable_port = matches!(node.kind, NodeKind::Port)
+            && !incoming_by_node[node.id.0].is_empty()
+            && outdegree[node.id.0] == 0;
+        if is_observable_port || matches!(node.kind, NodeKind::Dff) {
+            keep[node.id.0] = true;
+            worklist.push_back(node.id.0);
+        }
+    }
+
+    while let Some(node_index) = worklist.pop_front() {
+        for (_, source) in &incoming_by_node[node_index] {
+            if !keep[source.node.0] {
+                keep[source.node.0] = true;
+                worklist.push_back(source.node.0);
+            }
+        }
+    }
+
+    let mut pruned = Netlist::new();
+    let mut remap = vec![None; netlist.node_count()];
+    for node in netlist.nodes() {
+        if !keep[node.id.0] {
+            continue;
+        }
+
+        let new_id = pruned.add_node_with_logic(node.kind.clone(), node.name.clone(), node.logic_op.clone());
+        remap[node.id.0] = Some(new_id);
+    }
+
+    for (from, to) in netlist.edge_pairs() {
+        let Some(mapped_from) = remap[from.node.0] else {
+            continue;
+        };
+        let Some(mapped_to) = remap[to.node.0] else {
+            continue;
+        };
+
+        pruned
+            .connect(
+                PinRef {
+                    node: mapped_from,
+                    port: from.port,
+                },
+                PinRef {
+                    node: mapped_to,
+                    port: to.port,
+                },
+            )
+            .map_err(SynthError::from)?;
+    }
+
+    Ok(pruned)
 }

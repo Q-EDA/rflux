@@ -1,0 +1,22 @@
+{
+  "nodes": [
+    { "id": 0, "kind": "Port", "name": "data" },
+    { "id": 1, "kind": "Port", "name": "enable" },
+    { "id": 2, "kind": "Port", "name": "clock" },
+    { "id": 3, "kind": "Dff", "name": "state" },
+    { "id": 4, "kind": "Splitter", "name": "feedback_split" },
+    { "id": 5, "kind": "CellInstance", "name": "state_mux", "logic_op": "Mux2" },
+    { "id": 6, "kind": "Jtl", "name": "clock_pipe" },
+    { "id": 7, "kind": "Port", "name": "out" }
+  ],
+  "edges": [
+    [ { "node": 3, "port": 0 }, { "node": 4, "port": 0 } ],
+    [ { "node": 0, "port": 0 }, { "node": 5, "port": 1 } ],
+    [ { "node": 4, "port": 1 }, { "node": 5, "port": 2 } ],
+    [ { "node": 1, "port": 0 }, { "node": 5, "port": 0 } ],
+    [ { "node": 5, "port": 0 }, { "node": 3, "port": 0 } ],
+    [ { "node": 2, "port": 0 }, { "node": 6, "port": 0 } ],
+    [ { "node": 6, "port": 0 }, { "node": 3, "port": 1 } ],
+    [ { "node": 4, "port": 2 }, { "node": 7, "port": 0 } ]
+  ]
+}

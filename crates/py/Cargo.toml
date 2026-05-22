@@ -18,6 +18,7 @@ rflux-sim = { path = "../sim" }
 rflux-synth = { path = "../synth" }
 rflux-tech = { path = "../tech" }
 rflux-timing = { path = "../timing" }
+rflux-verify = { path = "../verify" }
 serde_json.workspace = true
 
 [package.metadata.maturin]

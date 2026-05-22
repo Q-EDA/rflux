@@ -21,6 +21,175 @@ use rflux_timing::{
     ClockDomainConstraint, CrossingConstraint, CrossingConstraintKind, NodeTimingConstraint,
     PinTimingConstraint, StatisticalTimingConfig, TimingConfig,
 };
+use rflux_verify::Verifier;
+
+#[derive(Clone)]
+#[pyclass]
+struct PyEquivalenceInputAssignment {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    value: bool,
+}
+
+#[derive(Clone)]
+#[pyclass]
+struct PyOutputMismatchEntry {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    lhs: bool,
+    #[pyo3(get)]
+    rhs: bool,
+}
+
+#[derive(Clone)]
+#[pyclass]
+struct PyStateMismatchEntry {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    lhs_next: bool,
+    #[pyo3(get)]
+    rhs_next: bool,
+    #[pyo3(get)]
+    lhs_clock: bool,
+    #[pyo3(get)]
+    rhs_clock: bool,
+}
+
+#[derive(Clone)]
+#[pyclass]
+struct PyCombinationalEquivalenceReport {
+    #[pyo3(get)]
+    equivalent: bool,
+    #[pyo3(get)]
+    checked_outputs: Vec<String>,
+    #[pyo3(get)]
+    counterexample_inputs: Vec<PyEquivalenceInputAssignment>,
+    #[pyo3(get)]
+    counterexample_outputs: Vec<PyOutputMismatchEntry>,
+    #[pyo3(get)]
+    sat_recursive_calls: usize,
+    #[pyo3(get)]
+    sat_decisions: usize,
+    #[pyo3(get)]
+    sat_backtracks: usize,
+    #[pyo3(get)]
+    sat_restarts: usize,
+    #[pyo3(get)]
+    sat_elapsed_ns: u128,
+}
+
+#[derive(Clone)]
+#[pyclass]
+struct PySingleStepSequentialEquivalenceReport {
+    #[pyo3(get)]
+    equivalent: bool,
+    #[pyo3(get)]
+    checked_outputs: Vec<String>,
+    #[pyo3(get)]
+    checked_states: Vec<String>,
+    #[pyo3(get)]
+    counterexample_inputs: Vec<PyEquivalenceInputAssignment>,
+    #[pyo3(get)]
+    counterexample_present_states: Vec<PyEquivalenceInputAssignment>,
+    #[pyo3(get)]
+    counterexample_outputs: Vec<PyOutputMismatchEntry>,
+    #[pyo3(get)]
+    counterexample_states: Vec<PyStateMismatchEntry>,
+    #[pyo3(get)]
+    sat_recursive_calls: usize,
+    #[pyo3(get)]
+    sat_decisions: usize,
+    #[pyo3(get)]
+    sat_backtracks: usize,
+    #[pyo3(get)]
+    sat_restarts: usize,
+    #[pyo3(get)]
+    sat_elapsed_ns: u128,
+}
+
+impl From<rflux_verify::CombinationalEquivalenceReport> for PyCombinationalEquivalenceReport {
+    fn from(value: rflux_verify::CombinationalEquivalenceReport) -> Self {
+        Self {
+            equivalent: value.equivalent,
+            checked_outputs: value.checked_outputs,
+            counterexample_inputs: value
+                .counterexample_inputs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, value)| PyEquivalenceInputAssignment { name, value })
+                .collect(),
+            counterexample_outputs: value
+                .counterexample_outputs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, mismatch)| PyOutputMismatchEntry {
+                    name,
+                    lhs: mismatch.lhs,
+                    rhs: mismatch.rhs,
+                })
+                .collect(),
+            sat_recursive_calls: value.sat_stats.recursive_calls,
+            sat_decisions: value.sat_stats.decisions,
+            sat_backtracks: value.sat_stats.backtracks,
+            sat_restarts: value.sat_stats.restarts,
+            sat_elapsed_ns: value.sat_elapsed_ns,
+        }
+    }
+}
+
+impl From<rflux_verify::SingleStepSequentialEquivalenceReport>
+    for PySingleStepSequentialEquivalenceReport
+{
+    fn from(value: rflux_verify::SingleStepSequentialEquivalenceReport) -> Self {
+        Self {
+            equivalent: value.equivalent,
+            checked_outputs: value.checked_outputs,
+            checked_states: value.checked_states,
+            counterexample_inputs: value
+                .counterexample_inputs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, value)| PyEquivalenceInputAssignment { name, value })
+                .collect(),
+            counterexample_present_states: value
+                .counterexample_present_states
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, value)| PyEquivalenceInputAssignment { name, value })
+                .collect(),
+            counterexample_outputs: value
+                .counterexample_outputs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, mismatch)| PyOutputMismatchEntry {
+                    name,
+                    lhs: mismatch.lhs,
+                    rhs: mismatch.rhs,
+                })
+                .collect(),
+            counterexample_states: value
+                .counterexample_states
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, mismatch)| PyStateMismatchEntry {
+                    name,
+                    lhs_next: mismatch.lhs_next,
+                    rhs_next: mismatch.rhs_next,
+                    lhs_clock: mismatch.lhs_clock,
+                    rhs_clock: mismatch.rhs_clock,
+                })
+                .collect(),
+            sat_recursive_calls: value.sat_stats.recursive_calls,
+            sat_decisions: value.sat_stats.decisions,
+            sat_backtracks: value.sat_stats.backtracks,
+            sat_restarts: value.sat_stats.restarts,
+            sat_elapsed_ns: value.sat_elapsed_ns,
+        }
+    }
+}
 
 #[pyclass]
 struct Circuit {
@@ -1405,6 +1574,7 @@ fn parse_node_kind(kind: &str) -> PyResult<NodeKind> {
 fn parse_logic_op(logic_op: &str) -> PyResult<LogicOp> {
     match logic_op {
         "buf" => Ok(LogicOp::Buf),
+        "not" | "inv" => Ok(LogicOp::Not),
         "and" => Ok(LogicOp::And),
         "or" => Ok(LogicOp::Or),
         "xor" => Ok(LogicOp::Xor),
@@ -2148,6 +2318,30 @@ fn simulate_file(
     Ok(report.into())
 }
 
+#[pyfunction]
+fn check_equivalence(
+    lhs: PyRef<'_, Circuit>,
+    rhs: PyRef<'_, Circuit>,
+) -> PyResult<PyCombinationalEquivalenceReport> {
+    let verifier = Verifier::new();
+    let report = verifier
+        .check_boolean_equivalence(&lhs.netlist, &rhs.netlist)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(report.into())
+}
+
+#[pyfunction]
+fn check_single_step_sequential_equivalence(
+    lhs: PyRef<'_, Circuit>,
+    rhs: PyRef<'_, Circuit>,
+) -> PyResult<PySingleStepSequentialEquivalenceReport> {
+    let verifier = Verifier::new();
+    let report = verifier
+        .check_single_step_sequential_equivalence(&lhs.netlist, &rhs.netlist)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(report.into())
+}
+
 #[pymodule]
 fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Circuit>()?;
@@ -2176,6 +2370,11 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySimulationDelayDetail>()?;
     m.add_class::<PySimulationViolationDetail>()?;
     m.add_class::<PySimulationReport>()?;
+    m.add_class::<PyEquivalenceInputAssignment>()?;
+    m.add_class::<PyOutputMismatchEntry>()?;
+    m.add_class::<PyStateMismatchEntry>()?;
+    m.add_class::<PyCombinationalEquivalenceReport>()?;
+    m.add_class::<PySingleStepSequentialEquivalenceReport>()?;
     m.add_class::<PyVerificationReport>()?;
     m.add_class::<PyCompoundCellCharacterizationReport>()?;
     m.add_class::<PyAdvancedConstraintViolation>()?;
@@ -2195,6 +2394,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_layout, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_text, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_file, m)?)?;
+    m.add_function(wrap_pyfunction!(check_equivalence, m)?)?;
+    m.add_function(wrap_pyfunction!(check_single_step_sequential_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }

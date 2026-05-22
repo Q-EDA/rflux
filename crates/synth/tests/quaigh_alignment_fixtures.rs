@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use rflux_io::read_ir_json;
 use rflux_synth::{BoolOptConfig, Compiler};
+use rflux_verify::Verifier;
 
 #[derive(Debug, Clone)]
 struct FixtureCase {
@@ -94,6 +95,84 @@ fn quaigh_alignment_fixture_cases() {
             config: BoolOptConfig::default(),
         },
         FixtureCase {
+            file_name: "factor_and_of_or_common_term.json",
+            expected_before: 3,
+            expected_after: 2,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "absorb_and_subset.json",
+            expected_before: 3,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "absorb_or_subset.json",
+            expected_before: 3,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "xor_from_and_pattern.json",
+            expected_before: 5,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "mux_from_and_pattern.json",
+            expected_before: 4,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "xor_from_or_pattern.json",
+            expected_before: 5,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "mux_from_or_pattern.json",
+            expected_before: 4,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "factor_then_xor_from_and_pattern.json",
+            expected_before: 5,
+            expected_after: 2,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "factor_then_mux_from_and_pattern.json",
+            expected_before: 4,
+            expected_after: 2,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "factor_then_xor_from_or_pattern.json",
+            expected_before: 5,
+            expected_after: 2,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "factor_then_mux_from_or_pattern.json",
+            expected_before: 4,
+            expected_after: 2,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "consensus_or_redundancy.json",
+            expected_before: 5,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
+            file_name: "consensus_and_redundancy.json",
+            expected_before: 5,
+            expected_after: 1,
+            config: BoolOptConfig::default(),
+        },
+        FixtureCase {
             file_name: "xor3_chain_from_bench.json",
             expected_before: 2,
             expected_after: 1,
@@ -141,6 +220,7 @@ fn quaigh_alignment_fixture_cases() {
     let mut total_recursive_calls = 0usize;
     let mut max_elapsed_ns = 0u128;
     let mut csv_rows: Vec<(String, u128, usize, usize, usize, usize, usize, usize)> = Vec::new();
+    let verifier = Verifier::new();
 
     for case in cases {
         let path = fixture_path(case.file_name);
@@ -163,8 +243,8 @@ fn quaigh_alignment_fixture_cases() {
             case.file_name
         );
 
-        let eq = compiler
-            .check_boolean_equivalence_sat(&baseline, &netlist)
+        let eq = verifier
+            .check_boolean_equivalence(&baseline, &netlist)
             .expect("sat equivalence check should succeed for fixture optimization");
         assert!(
             eq.equivalent,

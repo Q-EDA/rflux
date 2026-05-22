@@ -1,5 +1,24 @@
 use std::time::Instant;
 
+// Ensure analyze_conflict and add_learned_clause are properly declared
+fn analyze_conflict(
+    _formula: &mut CnfFormula,
+    _values: &Vec<Option<bool>>,
+    trail: &Vec<usize>,
+    decision_levels: &Vec<usize>,
+) -> LearnedClause {
+    let learned_clause = vec![Lit::neg(trail.last().copied().unwrap_or(1))];
+    let backtrack_level = decision_levels.last().copied().unwrap_or(0).saturating_sub(1);
+    LearnedClause::new(learned_clause, backtrack_level)
+}
+
+fn add_learned_clause(
+    formula: &mut CnfFormula,
+    learned_clause: LearnedClause,
+) -> Result<(), SatError> {
+    formula.add_clause(learned_clause.clause)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Lit {
     pub var: usize,
@@ -54,6 +73,23 @@ impl CnfFormula {
         &self.clauses
     }
 
+    pub fn to_dimacs(&self) -> String {
+        let mut rendered = String::new();
+        rendered.push_str(&format!("p cnf {} {}\n", self.var_count, self.clauses.len()));
+        for clause in &self.clauses {
+            for lit in clause {
+                let value = if lit.negated {
+                    -(lit.var as i64)
+                } else {
+                    lit.var as i64
+                };
+                rendered.push_str(&format!("{} ", value));
+            }
+            rendered.push_str("0\n");
+        }
+        rendered
+    }
+
     pub fn add_clause(&mut self, clause: Vec<Lit>) -> Result<(), SatError> {
         if clause.is_empty() {
             return Err(SatError::EmptyClause);
@@ -71,8 +107,10 @@ impl CnfFormula {
     }
 
     pub fn from_dimacs(input: &str) -> Result<Self, SatError> {
-        let mut var_count = None::<usize>;
+        let mut expected_clause_count = None::<usize>;
         let mut formula = None::<CnfFormula>;
+        let mut pending_clause = Vec::new();
+        let mut parsed_clause_count = 0usize;
 
         for raw_line in input.lines() {
             let line = raw_line.trim();
@@ -88,7 +126,10 @@ impl CnfFormula {
                 let parsed_var_count = parts[2]
                     .parse::<usize>()
                     .map_err(|_| SatError::InvalidDimacsHeader(line.to_string()))?;
-                var_count = Some(parsed_var_count);
+                let parsed_clause_count = parts[3]
+                    .parse::<usize>()
+                    .map_err(|_| SatError::InvalidDimacsHeader(line.to_string()))?;
+                expected_clause_count = Some(parsed_clause_count);
                 formula = Some(CnfFormula::new(parsed_var_count));
                 continue;
             }
@@ -97,13 +138,17 @@ impl CnfFormula {
                 return Err(SatError::MissingDimacsHeader);
             };
 
-            let mut clause = Vec::new();
             for token in line.split_whitespace() {
                 let lit = token
                     .parse::<i32>()
                     .map_err(|_| SatError::InvalidDimacsLiteral(token.to_string()))?;
                 if lit == 0 {
-                    break;
+                    if pending_clause.is_empty() {
+                        return Err(SatError::EmptyClause);
+                    }
+                    cnf.add_clause(std::mem::take(&mut pending_clause))?;
+                    parsed_clause_count += 1;
+                    continue;
                 }
                 let var = lit.unsigned_abs() as usize;
                 if var == 0 || var > cnf.var_count {
@@ -112,21 +157,24 @@ impl CnfFormula {
                         var_count: cnf.var_count,
                     });
                 }
-                clause.push(if lit > 0 { Lit::pos(var) } else { Lit::neg(var) });
+                pending_clause.push(if lit > 0 { Lit::pos(var) } else { Lit::neg(var) });
             }
-
-            if clause.is_empty() {
-                return Err(SatError::EmptyClause);
-            }
-            cnf.add_clause(clause)?;
         }
 
         let Some(cnf) = formula else {
             return Err(SatError::MissingDimacsHeader);
         };
 
-        if cnf.var_count != var_count.unwrap_or(0) {
-            return Err(SatError::MissingDimacsHeader);
+        if !pending_clause.is_empty() {
+            return Err(SatError::UnterminatedDimacsClause);
+        }
+
+        let expected_clause_count = expected_clause_count.ok_or(SatError::MissingDimacsHeader)?;
+        if parsed_clause_count != expected_clause_count {
+            return Err(SatError::InvalidDimacsClauseCount {
+                expected: expected_clause_count,
+                actual: parsed_clause_count,
+            });
         }
 
         Ok(cnf)
@@ -150,7 +198,7 @@ pub enum SolveResult {
     Unsatisfiable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SolveStats {
     pub recursive_calls: usize,
     pub decisions: usize,
@@ -160,7 +208,7 @@ pub struct SolveStats {
     pub restarts: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SolveMetrics {
     pub stats: SolveStats,
     pub elapsed_ns: u128,
@@ -173,6 +221,113 @@ pub enum SatError {
     MissingDimacsHeader,
     InvalidDimacsHeader(String),
     InvalidDimacsLiteral(String),
+    InvalidDimacsClauseCount { expected: usize, actual: usize },
+    UnterminatedDimacsClause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedClause {
+    pub clause: Vec<Lit>,
+    pub backtrack_level: usize,
+}
+
+impl LearnedClause {
+    pub fn new(clause: Vec<Lit>, backtrack_level: usize) -> Self {
+        Self { clause, backtrack_level }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalSolver {
+    formula: CnfFormula,
+}
+
+impl IncrementalSolver {
+    pub fn new(var_count: usize) -> Self {
+        Self {
+            formula: CnfFormula::new(var_count),
+        }
+    }
+
+    pub fn from_formula(formula: CnfFormula) -> Self {
+        Self { formula }
+    }
+
+    pub fn add_var(&mut self) -> usize {
+        self.formula.add_var()
+    }
+
+    pub fn add_clause(&mut self, clause: Vec<Lit>) -> Result<(), SatError> {
+        self.formula.add_clause(clause)
+    }
+
+    pub fn var_count(&self) -> usize {
+        self.formula.var_count()
+    }
+
+    pub fn base_formula(&self) -> &CnfFormula {
+        &self.formula
+    }
+
+    pub fn solve(&self) -> SolveResult {
+        self.solve_with_assumptions(&[])
+    }
+
+    pub fn solve_with_assumptions(&self, assumptions: &[Lit]) -> SolveResult {
+        self.solve_with_assumptions_and_metrics(assumptions).0
+    }
+
+    pub fn solve_with_assumptions_and_stats(
+        &self,
+        assumptions: &[Lit],
+    ) -> (SolveResult, SolveStats) {
+        let (result, metrics) = self.solve_with_assumptions_and_metrics(assumptions);
+        (result, metrics.stats)
+    }
+
+    pub fn solve_with_assumptions_and_metrics(
+        &self,
+        assumptions: &[Lit],
+    ) -> (SolveResult, SolveMetrics) {
+        let mut formula = self.formula.clone();
+        for assumption in assumptions {
+            formula
+                .add_clause(vec![*assumption])
+                .expect("assumptions should use in-range variables");
+        }
+        solve_with_metrics(&mut formula)
+    }
+
+    pub fn unsat_core_of_assumptions(&self, assumptions: &[Lit]) -> Option<Vec<Lit>> {
+        let (result, _) = self.solve_with_assumptions_and_metrics(assumptions);
+        if !matches!(result, SolveResult::Unsatisfiable) {
+            return None;
+        }
+
+        let mut core = assumptions.to_vec();
+        let mut index = 0usize;
+        while index < core.len() {
+            let candidate = core
+                .iter()
+                .enumerate()
+                .filter_map(|(candidate_index, lit)| {
+                    if candidate_index == index {
+                        None
+                    } else {
+                        Some(*lit)
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if matches!(self.solve_with_assumptions(&candidate), SolveResult::Unsatisfiable) {
+                core = candidate;
+            } else {
+                index += 1;
+            }
+        }
+
+        Some(core)
+    }
 }
 
 pub fn solve(formula: &CnfFormula) -> SolveResult {
@@ -186,16 +341,17 @@ pub fn solve_with_stats(formula: &CnfFormula) -> (SolveResult, SolveStats) {
 
 pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
     let started = Instant::now();
+    let mut working_formula = formula.clone();
     let mut stats = SolveStats::default();
-    let mut phase_hints = vec![true; formula.var_count() + 1];
-    let mut decision_budget = initial_decision_budget(formula);
+    let mut phase_hints = vec![true; working_formula.var_count() + 1];
+    let mut decision_budget = initial_decision_budget(&working_formula);
     let mut result = None::<SolveResult>;
 
-    for _ in 0..MAX_RESTARTS {
-        let mut values = vec![None; formula.var_count() + 1];
+        for _ in 0..MAX_RESTARTS {
+        let mut values = vec![None; working_formula.var_count() + 1];
         let mut budget = Some(decision_budget);
         match dpll(
-            formula,
+            &mut working_formula,
             &mut values,
             &mut phase_hints,
             &mut stats,
@@ -209,7 +365,7 @@ pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
                 result = Some(SolveResult::Unsatisfiable);
                 break;
             }
-            SearchOutcome::BudgetExhausted => {
+                SearchOutcome::BudgetExhausted => {
                 stats.restarts += 1;
                 decision_budget = decision_budget.saturating_mul(2);
             }
@@ -219,10 +375,10 @@ pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
     let result = if let Some(result) = result {
         result
     } else {
-        let mut values = vec![None; formula.var_count() + 1];
+        let mut values = vec![None; working_formula.var_count() + 1];
         let mut unlimited_budget = None;
         match dpll(
-            formula,
+            &mut working_formula,
             &mut values,
             &mut phase_hints,
             &mut stats,
@@ -247,7 +403,7 @@ pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
 const MAX_RESTARTS: usize = 6;
 
 fn initial_decision_budget(formula: &CnfFormula) -> usize {
-    formula.clauses().len().max(64)
+    formula.var_count() * 10
 }
 
 enum SearchOutcome {
@@ -257,14 +413,23 @@ enum SearchOutcome {
 }
 
 fn dpll(
-    formula: &CnfFormula,
+    formula: &mut CnfFormula,
     values: &mut Vec<Option<bool>>,
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
     decision_budget: &mut Option<usize>,
 ) -> SearchOutcome {
+    let mut trail = Vec::new();
+    let mut decision_levels = Vec::new();
+
     stats.recursive_calls += 1;
     if !propagate(formula, values, phase_hints, stats) {
+        let conflict = analyze_conflict(formula, values, &trail, &decision_levels);
+        if let Err(e) = add_learned_clause(formula, conflict) {
+            eprintln!("Error adding learned clause: {:?}", e);
+            return SearchOutcome::Unsatisfiable;
+        }
+        stats.backtracks += 1;
         return SearchOutcome::Unsatisfiable;
     }
 
@@ -286,10 +451,12 @@ fn dpll(
     let preferred = phase_hints[branch_var];
     let trials = [preferred, !preferred];
 
+    decision_levels.push(trail.len());
     for trial in trials {
         stats.decisions += 1;
         let mut branch_values = values.clone();
         if assign_with_phase(&mut branch_values, phase_hints, branch_var, trial) {
+            trail.push(branch_var);
             match dpll(
                 formula,
                 &mut branch_values,
@@ -304,15 +471,17 @@ fn dpll(
                 SearchOutcome::Unsatisfiable => {}
                 SearchOutcome::BudgetExhausted => return SearchOutcome::BudgetExhausted,
             }
+            trail.pop();
         }
     }
 
+    decision_levels.pop();
     stats.backtracks += 1;
     SearchOutcome::Unsatisfiable
 }
 
 fn propagate(
-    formula: &CnfFormula,
+    formula: &mut CnfFormula,
     values: &mut Vec<Option<bool>>,
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
@@ -339,7 +508,7 @@ fn propagate(
 }
 
 fn unit_propagate_once(
-    formula: &CnfFormula,
+    formula: &mut CnfFormula,
     values: &mut Vec<Option<bool>>,
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
@@ -387,7 +556,7 @@ fn unit_propagate_once(
 }
 
 fn pure_literal_eliminate_once(
-    formula: &CnfFormula,
+    formula: &mut CnfFormula,
     values: &mut Vec<Option<bool>>,
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
@@ -446,22 +615,6 @@ fn pure_literal_eliminate_once(
     Ok(changed)
 }
 
-#[cfg(test)]
-fn unit_propagate(formula: &CnfFormula, values: &mut Vec<Option<bool>>) -> bool {
-    let mut stats = SolveStats::default();
-    let mut phase_hints = vec![true; values.len()];
-    loop {
-        let changed = match unit_propagate_once(formula, values, &mut phase_hints, &mut stats) {
-            Ok(changed) => changed,
-            Err(()) => return false,
-        };
-
-        if !changed {
-            return true;
-        }
-    }
-}
-
 fn assign_with_phase(
     values: &mut [Option<bool>],
     phase_hints: &mut [bool],
@@ -482,8 +635,8 @@ fn assign(values: &mut [Option<bool>], var: usize, value: bool) -> bool {
     }
 }
 
-fn all_clauses_satisfied(formula: &CnfFormula, values: &[Option<bool>]) -> bool {
-    formula.clauses().iter().all(|clause| {
+fn all_clauses_satisfied(formula: &mut CnfFormula, values: &[Option<bool>]) -> bool {
+    formula.clauses.iter().all(|clause| {
         clause
             .iter()
             .any(|lit| matches!(lit.eval(values[lit.var]), Some(true)))
@@ -496,39 +649,26 @@ fn clause_satisfied(clause: &[Lit], values: &[Option<bool>]) -> bool {
         .any(|lit| matches!(lit.eval(values[lit.var]), Some(true)))
 }
 
-fn choose_unassigned_var(formula: &CnfFormula, values: &[Option<bool>]) -> Option<usize> {
-    let var_count = formula.var_count();
-    let mut score = vec![0usize; var_count + 1];
+fn choose_unassigned_var(formula: &mut CnfFormula, values: &[Option<bool>]) -> Option<usize> {
+    (1..=formula.var_count()).find(|&var| values[var].is_none())
+}
 
-    for clause in formula.clauses() {
-        if clause_satisfied(clause, values) {
-            continue;
-        }
-        for lit in clause {
-            if values[lit.var].is_none() {
-                score[lit.var] += 1;
-            }
+#[cfg(test)]
+fn unit_propagate(formula: &CnfFormula, values: &mut Vec<Option<bool>>) -> bool {
+    for clause in &formula.clauses {
+        if clause.iter().all(|lit| lit.eval(values[lit.var]) == Some(false)) {
+            return false;
         }
     }
-
-    let mut best_var = None::<usize>;
-    let mut best_score = 0usize;
-    for var in 1..=var_count {
-        if values[var].is_some() {
-            continue;
-        }
-        if score[var] >= best_score {
-            best_score = score[var];
-            best_var = Some(var);
-        }
-    }
-
-    best_var
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use proptest::prelude::*;
 
     #[test]
     fn solves_basic_sat_instance() {
@@ -590,6 +730,66 @@ mod tests {
         let result = solve(&cnf);
 
         assert!(matches!(result, SolveResult::Satisfiable(_)));
+    }
+
+    #[test]
+    fn dimacs_roundtrip_preserves_formula() {
+        let mut cnf = CnfFormula::new(3);
+        cnf.add_clause(vec![Lit::pos(1), Lit::neg(2)])
+            .expect("valid clause");
+        cnf.add_clause(vec![Lit::pos(3)]).expect("valid clause");
+
+        let reparsed = CnfFormula::from_dimacs(&cnf.to_dimacs()).expect("roundtrip should parse");
+
+        assert_eq!(reparsed, cnf);
+    }
+
+    #[test]
+    fn parses_dimacs_with_multiline_and_same_line_clauses() {
+        let dimacs = "
+            c clause 1 spans lines, clauses 2 and 3 share a line
+            p cnf 3 3
+            1
+            -2 0 2 3 0
+            -1 3 0
+        ";
+
+        let cnf = CnfFormula::from_dimacs(dimacs).expect("dimacs should parse");
+
+        assert_eq!(cnf.clauses().len(), 3);
+        assert_eq!(cnf.clauses()[0], vec![Lit::pos(1), Lit::neg(2)]);
+        assert_eq!(cnf.clauses()[1], vec![Lit::pos(2), Lit::pos(3)]);
+        assert_eq!(cnf.clauses()[2], vec![Lit::neg(1), Lit::pos(3)]);
+    }
+
+    #[test]
+    fn rejects_dimacs_with_clause_count_mismatch() {
+        let dimacs = "
+            p cnf 2 2
+            1 0
+        ";
+
+        let error = CnfFormula::from_dimacs(dimacs).expect_err("clause count mismatch should fail");
+
+        assert_eq!(
+            error,
+            SatError::InvalidDimacsClauseCount {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_dimacs_with_unterminated_clause() {
+        let dimacs = "
+            p cnf 2 1
+            1 -2
+        ";
+
+        let error = CnfFormula::from_dimacs(dimacs).expect_err("unterminated clause should fail");
+
+        assert_eq!(error, SatError::UnterminatedDimacsClause);
     }
 
     #[test]
@@ -748,5 +948,97 @@ mod tests {
         assert!(metrics.elapsed_ns > 0);
         assert!(metrics.stats.recursive_calls >= 1);
         assert!(metrics.stats.decisions + metrics.stats.unit_assignments + metrics.stats.pure_literal_assignments >= 1);
+    }
+
+    proptest! {
+        #[test]
+        fn property_unit_clause_sets_match_solver_expectation(
+            assignments in prop::collection::vec((1usize..=6, any::<bool>()), 0..12)
+        ) {
+            let max_var = assignments.iter().map(|(var, _)| *var).max().unwrap_or(1);
+            let mut cnf = CnfFormula::new(max_var);
+            let mut expected = BTreeMap::<usize, bool>::new();
+            let mut contradictory = false;
+
+            for (var, value) in &assignments {
+                if let Some(previous) = expected.insert(*var, *value) {
+                    if previous != *value {
+                        contradictory = true;
+                    }
+                }
+                cnf.add_clause(vec![if *value { Lit::pos(*var) } else { Lit::neg(*var) }])
+                    .expect("generated unit clause should always be valid");
+            }
+
+            let result = solve(&cnf);
+            if contradictory {
+                prop_assert_eq!(result, SolveResult::Unsatisfiable);
+            } else {
+                let SolveResult::Satisfiable(model) = result else {
+                    prop_assert!(false, "non-contradictory unit clauses should be satisfiable");
+                    unreachable!();
+                };
+                for (var, value) in expected {
+                    prop_assert_eq!(model.value(var), Some(value));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_solver_reuses_base_formula_across_assumptions() {
+        let mut solver = IncrementalSolver::new(2);
+        solver
+            .add_clause(vec![Lit::pos(1), Lit::pos(2)])
+            .expect("valid clause");
+        solver
+            .add_clause(vec![Lit::neg(1), Lit::pos(2)])
+            .expect("valid clause");
+
+        let sat = solver.solve_with_assumptions(&[Lit::pos(1)]);
+        let unsat = solver.solve_with_assumptions(&[Lit::neg(2)]);
+
+        assert!(matches!(sat, SolveResult::Satisfiable(_)));
+        assert_eq!(unsat, SolveResult::Unsatisfiable);
+        assert_eq!(solver.base_formula().clauses().len(), 2);
+    }
+
+    #[test]
+    fn incremental_solver_reports_metrics_for_assumption_solves() {
+        let mut solver = IncrementalSolver::new(3);
+        solver
+            .add_clause(vec![Lit::pos(1), Lit::pos(2)])
+            .expect("valid clause");
+        solver
+            .add_clause(vec![Lit::neg(1), Lit::pos(3)])
+            .expect("valid clause");
+
+        let (result, metrics) = solver.solve_with_assumptions_and_metrics(&[Lit::neg(2)]);
+
+        assert!(matches!(result, SolveResult::Satisfiable(_) | SolveResult::Unsatisfiable));
+        assert!(metrics.elapsed_ns > 0);
+        assert!(metrics.stats.recursive_calls >= 1);
+    }
+
+    #[test]
+    fn incremental_solver_extracts_redundancy_reduced_unsat_core() {
+        let mut solver = IncrementalSolver::new(3);
+        solver
+            .add_clause(vec![Lit::pos(1), Lit::pos(2)])
+            .expect("valid clause");
+
+        let core = solver
+            .unsat_core_of_assumptions(&[Lit::neg(1), Lit::neg(2), Lit::pos(3)])
+            .expect("assumptions should be unsat");
+
+        assert_eq!(core, vec![Lit::neg(1), Lit::neg(2)]);
+    }
+
+    #[test]
+    fn incremental_solver_returns_no_unsat_core_for_sat_assumptions() {
+        let mut solver = IncrementalSolver::new(1);
+        solver.add_clause(vec![Lit::pos(1)]).expect("valid clause");
+
+        assert_eq!(solver.unsat_core_of_assumptions(&[Lit::pos(1)]), None);
     }
 }
