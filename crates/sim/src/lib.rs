@@ -554,14 +554,18 @@ fn is_allowed_external_command(command: &str) -> bool {
         return false;
     };
 
-    matches_ascii_case(file_name, "josim")
-        || matches_ascii_case(file_name, "josim.exe")
-        || matches_ascii_case(file_name, "josim-cli")
-        || matches_ascii_case(file_name, "josim-cli.exe")
+    is_allowed_external_command_file_name(file_name)
 }
 
-fn matches_ascii_case(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
+fn is_allowed_external_command_file_name(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    let stem = lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".cmd"))
+        .or_else(|| lower.strip_suffix(".bat"))
+        .or_else(|| lower.strip_suffix(".sh"))
+        .unwrap_or(&lower);
+    matches!(stem, "josim" | "josim-cli")
 }
 
 fn prepare_external_simulator_deck(deck: &str, include_base_dir: Option<&Path>) -> String {
@@ -6727,11 +6731,17 @@ mod tests {
         assert!(is_allowed_external_command("josim.exe"));
         assert!(is_allowed_external_command("josim-cli"));
         assert!(is_allowed_external_command("josim-cli.exe"));
+        assert!(is_allowed_external_command("josim.cmd"));
+        assert!(is_allowed_external_command("josim.bat"));
+        assert!(is_allowed_external_command("josim.sh"));
         assert!(is_allowed_external_command(r"C:\tools\josim.exe"));
+        assert!(is_allowed_external_command(r"C:\tools\josim.cmd"));
         assert!(is_allowed_external_command(r"C:\tools\JoSIM-v2.7-windows-x64\bin\josim-cli.exe"));
         assert!(is_allowed_external_command("subdir/josim"));
         assert!(!is_allowed_external_command("python"));
         assert!(!is_allowed_external_command(r"C:\tools\python.exe"));
+        assert!(!is_allowed_external_command("mock-sim.cmd"));
+        assert!(!is_allowed_external_command(r"C:\tools\cmd.exe"));
     }
 
     #[test]

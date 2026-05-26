@@ -642,9 +642,13 @@ def test_verify_layout_reports_missing_external_simulator_with_deck_path():
     sink = circuit.add_node("dff", "sink")
     circuit.connect(source, 0, sink, 0)
 
+    missing_simulator = Path.cwd() / "__missing_rflux_simulator__" / "josim"
+    if os.name == "nt":
+        missing_simulator = missing_simulator.with_suffix(".exe")
+
     report = rflux.verify_layout(
         circuit,
-        external_command="__missing_rflux_simulator__",
+        external_command=str(missing_simulator),
     )
 
     assert report.simulation_backend == "external_unavailable"
@@ -2157,7 +2161,7 @@ def test_verify_layout_propagates_external_simulator_summary(tmp_path):
     circuit.connect(source, 0, sink, 0)
 
     if os.name == "nt":
-        simulator = tmp_path / "mock-sim.cmd"
+        simulator = tmp_path / "josim.cmd"
         simulator.write_text(
             "@echo off\n"
             "echo RFLOW_EVENTS=7\n"
@@ -2170,7 +2174,7 @@ def test_verify_layout_propagates_external_simulator_summary(tmp_path):
             encoding="utf-8",
         )
     else:
-        simulator = tmp_path / "mock-sim.sh"
+        simulator = tmp_path / "josim.sh"
         simulator.write_text(
             "#!/bin/sh\n"
             "echo RFLOW_EVENTS=7\n"

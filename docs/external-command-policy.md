@@ -12,10 +12,18 @@
 
 - `josim`
 - `josim.exe`
+- `josim.cmd`
+- `josim.bat`
+- `josim.sh`
+- `josim-cli`
+- `josim-cli.exe`
+- `josim-cli.cmd`
+- `josim-cli.bat`
+- `josim-cli.sh`
 
 说明：
 
-- 这里只允许裸命令 token，不允许 `./josim`、`subdir/josim`、绝对路径或其他可执行文件名。
+- 允许裸命令 token，也允许路径形式，只要最终文件名在去掉受限 wrapper 后缀（`.exe` / `.cmd` / `.bat` / `.sh`）后仍是 `josim` 或 `josim-cli`；其他程序名仍会被拒绝。
 - 当前策略与 `rflux-sim` 中的 allowlist 实现一致。
 
 ## 3. 当前调用方式
@@ -31,8 +39,8 @@
 
 当前策略已经具备以下最小约束：
 
-- 最小 allowlist：只允许 `josim` / `josim.exe`。
-- 最小路径信任规则：只接受裸命令，不接受路径形式的命令值。
+- 最小 allowlist：只允许 `josim` / `josim-cli` 及其受限 wrapper 后缀 `.exe` / `.cmd` / `.bat` / `.sh`。
+- 最小路径信任规则：允许路径形式，但只按最终可执行文件名做 JoSIM allowlist 匹配，不放开任意其他程序。
 - 最小输入边界：外部程序当前只接收生成的 deck 文件路径一个参数。
 - 最小环境隔离：当前会在外部子进程中移除 `RFLOW_*` 与 `JOSIM_*` 环境变量，避免仓库自身控制变量直接泄漏到外部仿真器。
 - 最小副作用文件约束：每次外部运行都会先在系统临时目录下创建独立的 `rflux-ext-*` 子目录，并把输入 deck 写入该目录，降低默认输出文件污染其他路径的概率。
