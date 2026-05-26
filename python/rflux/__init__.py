@@ -58,6 +58,8 @@ try:
         check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
         simulate_file as _core_simulate_file,
         simulate_text as _core_simulate_text,
+        read_bench_file as _core_read_bench_file,
+        read_bench_text as _core_read_bench_text,
         verify_layout as _core_verify_layout,
         version as core_version,
     )
@@ -91,6 +93,8 @@ except ImportError:
             check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
             simulate_file as _core_simulate_file,
             simulate_text as _core_simulate_text,
+            read_bench_file as _core_read_bench_file,
+            read_bench_text as _core_read_bench_text,
             verify_layout as _core_verify_layout,
             version as core_version,
         )
@@ -123,6 +127,8 @@ except ImportError:
         _core_check_single_step_sequential_equivalence = None
         _core_simulate_file = None
         _core_simulate_text = None
+        _core_read_bench_file = None
+        _core_read_bench_text = None
         _core_verify_layout = None
 
         class Circuit:  # type: ignore[no-redef]
@@ -485,6 +491,8 @@ class VerificationReport:
     reported_violations: int
     reported_worst_delay_ps: float | None
     delay_details: list["SimulationDelayDetail"]
+    measurement_details: list["SimulationMeasurementDetail"]
+    measurement_warnings: list["SimulationMeasurementWarning"]
     violation_details: list["SimulationViolationDetail"]
     external_status_code: int | None
     external_result: str | None
@@ -590,6 +598,22 @@ class SimulationDelayDetail:
 
 
 @dataclass(frozen=True)
+class SimulationMeasurementDetail:
+    name: str
+    kind: str
+    measured_value: float
+    at_ref: SimulationEndpointRef | None = None
+
+
+@dataclass(frozen=True)
+class SimulationMeasurementWarning:
+    name: str
+    kind: str
+    reason: str
+    at_ref: SimulationEndpointRef | None = None
+
+
+@dataclass(frozen=True)
 class SimulationViolationDetail:
     kind: str
     detail: str
@@ -606,6 +630,8 @@ class SimulationReport:
     reported_violations: int
     reported_worst_delay_ps: float | None
     delay_details: list[SimulationDelayDetail]
+    measurement_details: list[SimulationMeasurementDetail]
+    measurement_warnings: list[SimulationMeasurementWarning]
     violation_details: list[SimulationViolationDetail]
     external_status_code: int | None
     external_result: str | None
@@ -622,6 +648,16 @@ def _require_core_extension(api_name: str, binding) -> None:
         raise RuntimeError(
             f"{api_name} requires the compiled rflux._core extension; run `uv run maturin develop -m crates/py/Cargo.toml`"
         )
+
+
+def read_bench_file(file_path: str | Path, name: str | None = None) -> Circuit:
+    _require_core_extension("read_bench_file(...)", _core_read_bench_file)
+    return _core_read_bench_file(str(file_path), name)
+
+
+def read_bench_text(text: str, name: str | None = None) -> Circuit:
+    _require_core_extension("read_bench_text(...)", _core_read_bench_text)
+    return _core_read_bench_text(text, name)
 
 
 def simulate_text(
@@ -667,6 +703,40 @@ def simulate_text(
                 ),
             )
             for detail in report.delay_details
+        ],
+        measurement_details=[
+            SimulationMeasurementDetail(
+                name=detail.name,
+                kind=detail.kind,
+                measured_value=detail.measured_value,
+                at_ref=(
+                    None
+                    if detail.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=detail.at_ref.raw,
+                        node=detail.at_ref.node,
+                        port=detail.at_ref.port,
+                    )
+                ),
+            )
+            for detail in getattr(report, "measurement_details", [])
+        ],
+        measurement_warnings=[
+            SimulationMeasurementWarning(
+                name=warning.name,
+                kind=warning.kind,
+                reason=warning.reason,
+                at_ref=(
+                    None
+                    if warning.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=warning.at_ref.raw,
+                        node=warning.at_ref.node,
+                        port=warning.at_ref.port,
+                    )
+                ),
+            )
+            for warning in getattr(report, "measurement_warnings", [])
         ],
         violation_details=[
             SimulationViolationDetail(
@@ -732,6 +802,40 @@ def simulate_file(
                 ),
             )
             for detail in report.delay_details
+        ],
+        measurement_details=[
+            SimulationMeasurementDetail(
+                name=detail.name,
+                kind=detail.kind,
+                measured_value=detail.measured_value,
+                at_ref=(
+                    None
+                    if detail.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=detail.at_ref.raw,
+                        node=detail.at_ref.node,
+                        port=detail.at_ref.port,
+                    )
+                ),
+            )
+            for detail in getattr(report, "measurement_details", [])
+        ],
+        measurement_warnings=[
+            SimulationMeasurementWarning(
+                name=warning.name,
+                kind=warning.kind,
+                reason=warning.reason,
+                at_ref=(
+                    None
+                    if warning.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=warning.at_ref.raw,
+                        node=warning.at_ref.node,
+                        port=warning.at_ref.port,
+                    )
+                ),
+            )
+            for warning in getattr(report, "measurement_warnings", [])
         ],
         violation_details=[
             SimulationViolationDetail(
@@ -1619,6 +1723,40 @@ def verify_layout(
             )
             for detail in report.delay_details
         ],
+        measurement_details=[
+            SimulationMeasurementDetail(
+                name=detail.name,
+                kind=detail.kind,
+                measured_value=detail.measured_value,
+                at_ref=(
+                    None
+                    if detail.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=detail.at_ref.raw,
+                        node=detail.at_ref.node,
+                        port=detail.at_ref.port,
+                    )
+                ),
+            )
+            for detail in getattr(report, "measurement_details", [])
+        ],
+        measurement_warnings=[
+            SimulationMeasurementWarning(
+                name=warning.name,
+                kind=warning.kind,
+                reason=warning.reason,
+                at_ref=(
+                    None
+                    if warning.at_ref is None
+                    else SimulationEndpointRef(
+                        raw=warning.at_ref.raw,
+                        node=warning.at_ref.node,
+                        port=warning.at_ref.port,
+                    )
+                ),
+            )
+            for warning in getattr(report, "measurement_warnings", [])
+        ],
         violation_details=[
             SimulationViolationDetail(
                 kind=detail.kind,
@@ -2170,6 +2308,8 @@ __all__ = [
     "SynthesisReport",
     "SimulationDelayDetail",
     "SimulationEndpointRef",
+    "SimulationMeasurementDetail",
+    "SimulationMeasurementWarning",
     "SimulationViolationDetail",
     "SingleStepSequentialEquivalenceReport",
     "StateTransitionMismatch",
@@ -2182,6 +2322,8 @@ __all__ = [
     "optimize_ac_bias_with_characterized_library",
     "optimize_design_with_characterized_library",
     "merge_characterized_library",
+    "read_bench_file",
+    "read_bench_text",
     "compile",
     "compile_layout",
     "compile_netlist",

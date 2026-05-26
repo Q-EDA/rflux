@@ -1503,6 +1503,7 @@ fn match_delay_detail_to_edge(
 fn characterization_arc_delays_from_simulation(
     netlist: &Netlist,
     simulation: &SimulationReport,
+    characterized_cell_name: &str,
 ) -> Vec<rflux_tech::CharacterizationArcDelay> {
     let mut arc_delays = simulation
         .delay_details
@@ -1520,6 +1521,8 @@ fn characterization_arc_delays_from_simulation(
             })
         })
         .collect::<Vec<_>>();
+
+    append_canonical_characterized_output_arcs(netlist, characterized_cell_name, &mut arc_delays);
 
     if !arc_delays.is_empty() {
         return arc_delays;
@@ -1570,7 +1573,60 @@ fn characterization_arc_delays_from_simulation(
         });
     }
 
+    append_canonical_characterized_output_arcs(netlist, characterized_cell_name, &mut arc_delays);
+
     arc_delays
+}
+
+fn append_canonical_characterized_output_arcs(
+    netlist: &Netlist,
+    characterized_cell_name: &str,
+    arc_delays: &mut Vec<rflux_tech::CharacterizationArcDelay>,
+) {
+    let mut existing_keys = arc_delays
+        .iter()
+        .map(|arc| {
+            (
+                arc.driver_cell_name.clone(),
+                arc.from_port,
+                arc.sink_cell_name.clone(),
+                arc.to_port,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let port_names = netlist
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Port))
+        .map(|node| node.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut canonical_arcs = Vec::new();
+    for arc in arc_delays.iter() {
+        if !port_names.contains(arc.sink_cell_name.as_str()) {
+            continue;
+        }
+        let key = (
+            characterized_cell_name.to_string(),
+            arc.from_port,
+            "*".to_string(),
+            arc.to_port,
+        );
+        if !existing_keys.insert(key) {
+            continue;
+        }
+        canonical_arcs.push(rflux_tech::CharacterizationArcDelay {
+            name: format!("{}_output_port_{}", characterized_cell_name, arc.from_port),
+            driver_cell_name: characterized_cell_name.to_string(),
+            from_port: arc.from_port,
+            sink_cell_name: "*".to_string(),
+            to_port: arc.to_port,
+            delay_ps: arc.delay_ps,
+        });
+    }
+
+    arc_delays.extend(canonical_arcs);
 }
 
 fn compound_cell_characterization_from_artifacts(
@@ -1596,7 +1652,11 @@ fn compound_cell_characterization_from_artifacts(
         .max(1)
         .min(u8::MAX as usize) as u8;
     let delay_details = characterization_delay_details_from_simulation(&simulation);
-    let arc_delays = characterization_arc_delays_from_simulation(netlist, &simulation);
+    let arc_delays = characterization_arc_delays_from_simulation(
+        netlist,
+        &simulation,
+        &characterization_config.cell_name,
+    );
     let delay_calibration_sigma_ps =
         delay_calibration_sigma_from_simulation(&simulation, derived_intrinsic_delay_ps);
     let generated_entry = CharacterizedCellLibraryEntry {
@@ -1883,7 +1943,7 @@ mod tests {
     use super::*;
     use rflux_ir::{NodeKind, PinRef};
     use rflux_place::{FixedNodePlacement, Point};
-    use rflux_route::BlockedRegion;
+    use rflux_route::{BlockedRegion, NetRoute};
     use rflux_synth::{BoolOptReport, CompilePlan, CompileReport, ConnectionSpec, TechMapReport};
 
     #[test]
@@ -2509,6 +2569,8 @@ mod tests {
                     to_ref: None,
                 },
             ],
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
             violation_details: Vec::new(),
             external_status_code: Some(0),
             external_result: Some("ok".to_string()),
@@ -2539,7 +2601,13 @@ mod tests {
             serde_json::from_str(&report.generated_library_json).expect("artifact should parse");
         let metadata = entry.metadata.expect("metadata should exist");
         assert_eq!(metadata.delay_details.len(), 2);
-        assert_eq!(metadata.arc_delays.len(), 2);
+        assert_eq!(metadata.arc_delays.len(), 3);
+        let canonical_arc = metadata
+            .arc_delays
+            .iter()
+            .find(|arc| arc.driver_cell_name == "macro_buf" && arc.sink_cell_name == "*")
+            .expect("canonical output arc");
+        assert!(canonical_arc.delay_ps > 0.0);
         assert!(metadata.delay_calibration_sigma_ps > 0.0);
         assert_eq!(metadata.delay_detail_spread_sigma_ps(), 2.25);
     }
@@ -2618,6 +2686,8 @@ mod tests {
                     to_ref: None,
                 },
             ],
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
             violation_details: Vec::new(),
             external_status_code: Some(0),
             external_result: Some("ok".to_string()),
@@ -2645,7 +2715,7 @@ mod tests {
         let entry: rflux_tech::CharacterizedCellLibraryEntry =
             serde_json::from_str(&report.generated_library_json).expect("artifact should parse");
         let metadata = entry.metadata.expect("metadata should exist");
-        assert_eq!(metadata.arc_delays.len(), 2);
+        assert_eq!(metadata.arc_delays.len(), 3);
         let source_arc = metadata
             .arc_delays
             .iter()
@@ -2656,8 +2726,172 @@ mod tests {
             .iter()
             .find(|arc| arc.driver_cell_name == "gate")
             .expect("gate arc");
+        let canonical_arc = metadata
+            .arc_delays
+            .iter()
+            .find(|arc| arc.driver_cell_name == "macro_buf" && arc.sink_cell_name == "*")
+            .expect("canonical arc");
         assert_eq!(source_arc.delay_ps, 11.0);
         assert_eq!(gate_arc.delay_ps, 9.0);
+        assert_eq!(canonical_arc.delay_ps, 9.0);
+    }
+
+    #[test]
+    fn generated_characterization_artifact_feeds_sta_via_canonical_output_arc() {
+        let artifacts = CompiledArtifacts {
+            synthesis: SynthesisReport {
+                compile: CompileReport::default(),
+                bool_opt: BoolOptReport {
+                    gate_count_before: 0,
+                    gate_count_after: 0,
+                },
+                tech_map: TechMapReport {
+                    mapped_nodes: 2,
+                    total_area_um2: 48.0,
+                },
+                path_balance: Default::default(),
+                bool_opt_compatibility: Default::default(),
+                node_count: 2,
+                edge_count: 1,
+            },
+            placement: Placement {
+                nodes: Vec::new(),
+                width_um: 40.0,
+                height_um: 24.0,
+            },
+            routing: RoutingReport {
+                routes: Vec::new(),
+                total_length_um: 40.0,
+                total_detour_overhead_um: 0.0,
+                detoured_routes: 0,
+                jtl_routes: 1,
+                ptl_routes: 0,
+            },
+            clock: ClockSummary {
+                clock_sinks: 1,
+                clock_buffers: 0,
+                phase_count: 2,
+                assigned_phases: 2,
+            },
+            timing: TimingReport {
+                arcs: Vec::new(),
+                worst_setup_slack_ps: 10.0,
+                worst_hold_slack_ps: 2.0,
+                critical_path_delay_ps: 12.0,
+                setup_violations: 0,
+                hold_violations: 0,
+                analyzed_arcs: 1,
+                false_path_arcs: 0,
+            },
+            initial_total_detour_overhead_um: 0.0,
+            detour_feedback_applied: false,
+            hold_fix_applied: false,
+            initial_hold_violations: 0,
+        };
+        let simulation = SimulationReport {
+            backend: SimulationBackend::ExternalCompleted,
+            simulated_events: 2,
+            generated_deck_lines: 4,
+            generated_deck_path: None,
+            waveform_path: None,
+            reported_violations: 0,
+            reported_worst_delay_ps: Some(20.0),
+            delay_details: vec![
+                SimulationDelayDetail {
+                    name: "gate_to_sink".to_string(),
+                    delay_ps: 9.0,
+                    from_ref: None,
+                    to_ref: None,
+                },
+                SimulationDelayDetail {
+                    name: "source_to_gate".to_string(),
+                    delay_ps: 11.0,
+                    from_ref: None,
+                    to_ref: None,
+                },
+            ],
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
+            violation_details: Vec::new(),
+            external_status_code: Some(0),
+            external_result: Some("ok".to_string()),
+        };
+
+        let mut characterization_netlist = Netlist::new();
+        let source = characterization_netlist.add_node(NodeKind::Port, "source");
+        let gate = characterization_netlist.add_node(NodeKind::CellInstance, "gate");
+        let sink = characterization_netlist.add_node(NodeKind::Port, "sink");
+        characterization_netlist
+            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .expect("source to gate");
+        characterization_netlist
+            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .expect("gate to sink");
+
+        let characterization = compound_cell_characterization_from_artifacts(
+            &characterization_netlist,
+            &artifacts,
+            simulation,
+            &CompoundCellCharacterizationConfig {
+                cell_name: "macro_buf".to_string(),
+            },
+        );
+        let characterized_pdk = Pdk::minimal("test")
+            .with_characterized_library_json(&characterization.generated_library_json)
+            .expect("characterized artifact should merge");
+
+        let mut consumer = Netlist::new();
+        let consumer_source = consumer.add_node(NodeKind::Port, "consumer_source");
+        let consumer_macro = consumer.add_node(NodeKind::MacroCell, "macro_buf");
+        let consumer_sink = consumer.add_node(NodeKind::Dff, "consumer_sink");
+        consumer
+            .connect(
+                PinRef { node: consumer_source, port: 0 },
+                PinRef { node: consumer_macro, port: 0 },
+            )
+            .expect("consumer source to macro_buf");
+        consumer
+            .connect(
+                PinRef { node: consumer_macro, port: 0 },
+                PinRef { node: consumer_sink, port: 0 },
+            )
+            .expect("macro_buf to consumer sink");
+
+        let routing = RoutingReport {
+            routes: vec![
+                NetRoute {
+                    from: PinRef { node: consumer_source, port: 0 },
+                    to: PinRef { node: consumer_macro, port: 0 },
+                    mode: RouteMode::Jtl,
+                    segments: Vec::new(),
+                    direct_length_um: 40.0,
+                    length_um: 40.0,
+                },
+                NetRoute {
+                    from: PinRef { node: consumer_macro, port: 0 },
+                    to: PinRef { node: consumer_sink, port: 0 },
+                    mode: RouteMode::Jtl,
+                    segments: Vec::new(),
+                    direct_length_um: 40.0,
+                    length_um: 40.0,
+                },
+            ],
+            total_length_um: 80.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 2,
+            ptl_routes: 0,
+        };
+
+        let timing = StaticTimingAnalyzer::new()
+            .analyze(&consumer, &routing, &characterized_pdk, &TimingConfig::default())
+            .expect("timing should succeed");
+        let macro_arc = timing
+            .arcs
+            .iter()
+            .find(|arc| arc.from.node == consumer_macro)
+            .expect("macro arc should exist");
+        assert_eq!(macro_arc.cell_delay_ps, 9.0);
     }
 
     #[test]
@@ -3153,9 +3387,10 @@ mod tests {
             reported_violations,
             reported_worst_delay_ps,
             delay_details,
+            measurement_details,
             violation_details,
         ) = parse_simulator_output(
-            "RFLOW_EVENTS=42\nRFLOW_RESULT=PASS\nRFLOW_WAVEFORM=C:/tmp/out.raw\nRFLOW_VIOLATIONS=3\nRFLOW_WORST_DELAY_PS=18.5\nRFLOW_DELAY_DETAIL=critical_path,18.5\nRFLOW_VIOLATION_DETAIL=hold,sink_dff\n",
+            "RFLOW_EVENTS=42\nRFLOW_RESULT=PASS\nRFLOW_WAVEFORM=C:/tmp/out.raw\nRFLOW_VIOLATIONS=3\nRFLOW_WORST_DELAY_PS=18.5\nRFLOW_DELAY_DETAIL=critical_path,18.5\nRFLOW_MEASUREMENT_DETAIL=out_rms,rms,0.001\nRFLOW_VIOLATION_DETAIL=hold,sink_dff\n",
         );
 
         assert_eq!(events, Some(42));
@@ -3168,6 +3403,10 @@ mod tests {
         assert_eq!(delay_details[0].delay_ps, 18.5);
         assert_eq!(delay_details[0].from_ref, None);
         assert_eq!(delay_details[0].to_ref, None);
+        assert_eq!(measurement_details.len(), 1);
+        assert_eq!(measurement_details[0].name, "out_rms");
+        assert_eq!(measurement_details[0].kind, "rms");
+        assert_eq!(measurement_details[0].measured_value, 0.001);
         assert_eq!(violation_details.len(), 1);
         assert_eq!(violation_details[0].kind, "hold");
         assert_eq!(violation_details[0].detail, "sink_dff");
@@ -3183,6 +3422,7 @@ mod tests {
             reported_violations,
             reported_worst_delay_ps,
             delay_details,
+            measurement_details,
             violation_details,
         ) = parse_simulator_output(
             "Status: PASS\nMeasured_Events: 17\nRaw_File: C:/tmp/josim.raw\nViolation_Count: 2\nMeasured_Delay_Ps: 11.25\nDelay_Detail: name=ptl_link,delay_ps=11.25,from=n0:0,to=n1:0\nViolation_Detail: kind=setup,detail=crossing_1_2,at=n1:0\n",
@@ -3202,6 +3442,7 @@ mod tests {
         assert_eq!(delay_details[0].to_ref.as_ref().map(|endpoint| endpoint.raw.as_str()), Some("n1:0"));
         assert_eq!(delay_details[0].to_ref.as_ref().map(|endpoint| endpoint.node.as_str()), Some("n1"));
         assert_eq!(delay_details[0].to_ref.as_ref().and_then(|endpoint| endpoint.port), Some(0));
+        assert!(measurement_details.is_empty());
         assert_eq!(violation_details.len(), 1);
         assert_eq!(violation_details[0].kind, "setup");
         assert_eq!(violation_details[0].detail, "crossing_1_2");

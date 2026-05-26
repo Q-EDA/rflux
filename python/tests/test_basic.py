@@ -1,5 +1,8 @@
+import json
 import os
+import shutil
 import stat
+from pathlib import Path
 
 import pytest
 import rflux
@@ -62,6 +65,13 @@ def test_compile_netlist_requires_compiled_extension(monkeypatch):
 
     with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
         rflux.compile_netlist(circuit)
+
+
+def test_read_bench_text_requires_compiled_extension(monkeypatch):
+    monkeypatch.setattr(rflux, "_core_read_bench_text", None)
+
+    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+        rflux.read_bench_text("INPUT(a)\nOUTPUT(y)\ny = BUF(a)\n")
 
 
 def test_compile_layout_requires_compiled_extension(monkeypatch):
@@ -221,6 +231,28 @@ def test_circuit_json_roundtrip():
     assert restored.node_count() == 2
     assert restored.edge_count() == 1
     assert restored.nodes()[1][1] in {"dff", "NodeKind.Dff", "Dff"}
+
+
+def test_read_bench_text_returns_circuit():
+    circuit = rflux.read_bench_text(
+        "INPUT(a)\nINPUT(b)\nOUTPUT(y)\ny = XOR(a, b)\n",
+        name="bench-demo",
+    )
+
+    assert circuit.name == "bench-demo"
+    assert circuit.node_count() == 4
+    assert circuit.edge_count() == 3
+    assert circuit.nodes()[2][2] == "y"
+
+
+def test_read_bench_file_returns_circuit(tmp_path):
+    bench_path = tmp_path / "sample.logic"
+    bench_path.write_text("INPUT(a)\nOUTPUT(y)\ny = BUF(a)\n", encoding="utf-8")
+
+    circuit = rflux.read_bench_file(bench_path)
+
+    assert circuit.node_count() == 3
+    assert circuit.edge_count() == 2
 
 
 def test_compile_netlist_returns_unified_summary():
@@ -766,6 +798,219 @@ def test_simulate_text_internal_transient_supports_pulse_source():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_reports_measurement_details():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PULSE(0,1m,0,1p,1p,2p,6p)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran out_peak max V(out)\n"
+        ".measure tran out_rms rms V(out)\n"
+        ".measure tran out_final final V(out)\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.delay_details == []
+    assert len(report.measurement_details) == 3
+    assert report.measurement_details[0].name == "out_peak"
+    assert report.measurement_details[0].kind == "max"
+    assert report.measurement_details[0].at_ref.node == "out"
+    assert report.measurement_details[0].measured_value > 0.0
+    assert report.measurement_details[1].name == "out_rms"
+    assert report.measurement_details[1].kind == "rms"
+    assert report.measurement_details[1].measured_value > 0.0
+    assert report.measurement_details[2].name == "out_final"
+    assert report.measurement_details[2].kind == "final"
+
+
+def test_simulate_text_internal_transient_measurement_details_honor_time_windows():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 3p 1m 6p 0)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran early_final final V(out) FROM = 0p TO=3p\n"
+        ".measure tran full_final final V(out)\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.measurement_details) == 2
+    assert report.measurement_details[0].name == "early_final"
+    assert report.measurement_details[0].kind == "final"
+    assert report.measurement_details[1].name == "full_final"
+    assert report.measurement_details[1].kind == "final"
+    assert report.measurement_details[0].measured_value > report.measurement_details[1].measured_value
+
+
+def test_simulate_text_internal_transient_measurement_details_support_differential_voltage():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 6p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran diff_final final V(in,out)\n"
+        ".tran 0.5p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.measurement_details) == 1
+    assert report.measurement_details[0].name == "diff_final"
+    assert report.measurement_details[0].at_ref.node == "in,out"
+    assert report.measurement_details[0].measured_value >= 0.0
+
+
+def test_simulate_text_internal_transient_measurement_details_support_find_at():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 6p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran out_at find V(out) AT=2.5p\n"
+        ".measure tran diff_at find V(in,out) AT=2.5p\n"
+        ".tran 0.5p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.measurement_details) == 2
+    assert report.measurement_details[0].name == "out_at"
+    assert report.measurement_details[0].kind == "find"
+    assert report.measurement_details[0].measured_value > 0.0
+    assert report.measurement_details[1].name == "diff_at"
+    assert report.measurement_details[1].at_ref.node == "in,out"
+    assert report.measurement_details[1].measured_value >= 0.0
+
+
+def test_simulate_text_internal_transient_measurement_details_support_find_when():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 6p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran out_when find V(out) WHEN V(in)=0.5m RISE=1\n"
+        ".measure tran diff_when find V(in,out) WHEN V(in,out)=0.2m RISE=1\n"
+        ".tran 0.5p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.measurement_details) == 2
+    assert report.measurement_details[0].name == "out_when"
+    assert report.measurement_details[0].kind == "find"
+    assert report.measurement_details[0].measured_value >= 0.0
+    assert report.measurement_details[1].name == "diff_when"
+    assert report.measurement_details[1].at_ref.node == "in,out"
+    assert report.measurement_details[1].measured_value >= 0.0
+
+
+def test_simulate_text_internal_transient_reports_measurement_warnings():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 6p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran missing find V(out) WHEN V(in)=2m RISE=1\n"
+        ".tran 0.5p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.measurement_details == []
+    assert len(report.measurement_warnings) == 1
+    assert report.measurement_warnings[0].name == "missing"
+    assert report.measurement_warnings[0].kind == "find"
+    assert report.measurement_warnings[0].reason == "measurement_crossing_not_found"
+    assert report.measurement_warnings[0].at_ref.node == "in"
+
+
+def test_simulate_text_internal_transient_reports_delay_measurement_details():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 8p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran rc_delay TRIG V(in)=0.5m RISE=1 TARG V(out)=0.25m RISE=1\n"
+        ".tran 0.5p 8p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.delay_details) == 1
+    assert report.delay_details[0].name == "rc_delay"
+    assert report.delay_details[0].from_ref.node == "in"
+    assert report.delay_details[0].to_ref.node == "out"
+    assert report.delay_details[0].delay_ps > 0.0
+    assert report.reported_worst_delay_ps == report.delay_details[0].delay_ps
+
+
+def test_simulate_text_internal_transient_delay_measurements_support_differential_voltage():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 8p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran diff_delay TRIG V(in,out) VAL=0.2m RISE=1 TARG V(out) VAL=0.25m RISE=1\n"
+        ".tran 0.5p 8p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.delay_details) == 1
+    assert report.delay_details[0].name == "diff_delay"
+    assert report.delay_details[0].from_ref.node == "in,out"
+    assert report.delay_details[0].to_ref.node == "out"
+    assert report.delay_details[0].delay_ps > 0.0
+
+
+def test_simulate_text_internal_transient_delay_measurements_support_fall_and_td():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 3p 1m 4p 0 8p 0)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran fall_delay TRIG V(in) VAL=0.5m FALL=1 TARGET V(out) VAL=0.25m FALL=1 TD=2p\n"
+        ".tran 0.5p 8p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.delay_details) == 1
+    assert report.delay_details[0].name == "fall_delay"
+    assert report.delay_details[0].delay_ps > 0.0
+
+
+def test_simulate_text_internal_transient_delay_measurements_support_last_crossing():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PWL(0 0 1p 1m 2p 1m 3p 0 8p 0 9p 1m 14p 1m)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".measure tran last_rise_delay TRIG V(in) VAL=0.5m RISE=LAST TARG V(out) VAL=0.25m RISE=LAST\n"
+        ".tran 0.5p 14p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert len(report.delay_details) == 1
+    assert report.delay_details[0].name == "last_rise_delay"
+    assert report.delay_details[0].delay_ps > 0.0
+
+
 def test_simulate_text_internal_transient_supports_one_shot_pulse_source():
     report = rflux.simulate_text(
         ".title demo\n"
@@ -1098,11 +1343,9 @@ def test_simulate_text_internal_transient_supports_spaced_junction_assignments()
 
 def test_simulate_file_internal_transient_phase6_benchmark_smoke():
     benchmark_dir = os.path.join(os.path.dirname(__file__), "benchmarks", "phase6")
-    deck_paths = [
-        os.path.join(benchmark_dir, "k_mutual_smoke.cir"),
-        os.path.join(benchmark_dir, "t_delay_smoke.cir"),
-        os.path.join(benchmark_dir, "jj_minimal_smoke.cir"),
-    ]
+    thresholds_path = os.path.join(benchmark_dir, "waveform_thresholds.json")
+    threshold_payload = json.loads(open(thresholds_path, "r", encoding="utf-8").read())
+    deck_paths = [os.path.join(benchmark_dir, deck_name) for deck_name in sorted(threshold_payload)]
 
     for deck_path in deck_paths:
         report = rflux.simulate_file(deck_path, simulation_mode="internal_transient")
@@ -1262,6 +1505,649 @@ def test_simulate_text_internal_transient_accepts_nodeset_startup_hint():
     assert report.simulated_events == 2
     assert report.external_result == "internal_transient_linear_rc"
     assert report.waveform_path is not None
+
+
+def test_simulate_file_external_josim_preserves_pi_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external pi benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_pi_model_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    if report.external_result is not None:
+        assert "external_josim_translation_warning:jj_pi_model_unsupported" not in report.external_result
+        assert "external_josim_translation_warning:jj_pi_instance_unsupported" not in report.external_result
+        assert "external_josim_translation_warning:jj_model_override_unsupported" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_modelname_keyword_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external modelname benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_modelname_keyword_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    if report.external_result is not None:
+        assert "external_josim_translation_warning:jj_model_override_unsupported" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_second_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external second-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_second_harmonic_model_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={1," in generated_deck.lower()
+    if report.external_result is not None:
+        assert (
+            "external_josim_translation_warning:jj_second_harmonic_model_unsupported"
+            not in report.external_result
+        )
+        assert (
+            "external_josim_translation_warning:jj_second_harmonic_instance_unsupported"
+            not in report.external_result
+        )
+        assert "external_josim_translation_warning:jj_model_override_unsupported" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_second_harmonic_model_override_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external second-harmonic model-override benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_second_harmonic_model_override_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "rn=25" in generated_deck.lower()
+    assert "cpr={1," in generated_deck.lower()
+    if report.external_result is not None:
+        assert (
+            "external_josim_translation_warning:jj_second_harmonic_model_unsupported"
+            not in report.external_result
+        )
+        assert (
+            "external_josim_translation_warning:jj_second_harmonic_instance_unsupported"
+            not in report.external_result
+        )
+        assert "external_josim_translation_warning:jj_model_override_unsupported" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_third_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external third-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_third_harmonic_model_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={1,0," in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning:jj_model_override_unsupported" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_third_harmonic_model_override_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external third-harmonic model-override benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_third_harmonic_model_override_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "rn=25" in generated_deck.lower()
+    assert "cpr={1,0," in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_fourth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external fourth-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_fourth_harmonic_model_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={1,0,0," in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_fourth_harmonic_model_override_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external fourth-harmonic model-override benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_fourth_harmonic_model_override_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "rn=25" in generated_deck.lower()
+    assert "cpr={1,0,0," in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_fifth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external fifth-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_fifth_harmonic_model_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={1,0,0,0," in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_fifth_harmonic_model_override_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external fifth-harmonic model-override benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_fifth_harmonic_model_override_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "rn=25" in generated_deck.lower()
+    assert "cpr={1,0,0,0," in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_model_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_model_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_model_fourth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr fourth-harmonic model benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_model_fourth_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={1,0.2,0.05,0.01}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_model_fifth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr fifth-harmonic model benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_model_fifth_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={1,0.2,0.05,0.01,0.005}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_model_override_fifth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr fifth-harmonic model-override benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_model_override_fifth_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "rn=25" in generated_deck.lower()
+    assert "cpr={1,0.2,0.05,0.01,0.005}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_instance_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr instance benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_instance_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "cpr={" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_instance_fourth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr fourth-harmonic instance benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_instance_fourth_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "cpr={1,0.2,0.05,0.01}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_native_cpr_instance_fifth_harmonic_semantics_for_benchmark_asset() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external native-cpr fifth-harmonic instance benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_native_cpr_instance_fifth_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert ".model rflux_auto_j1 jj(" in generated_deck.lower()
+    assert "cpr={1,0.2,0.05,0.01,0.005}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_pure_second_harmonic_semantics_without_primary_icrit() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external second-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_second_harmonic_warning_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={0,1}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert (
+            "external_josim_translation_warning:jj_second_harmonic_model_unsupported"
+            not in report.external_result
+        )
+        assert (
+            "external_josim_translation_warning:jj_second_harmonic_instance_unsupported"
+            not in report.external_result
+        )
+        assert "external_josim_translation_warning:jj_model_override_unsupported" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_pure_third_harmonic_semantics_without_primary_icrit() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external third-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_third_harmonic_pure_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={0,0,1}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_pure_fourth_harmonic_semantics_without_primary_icrit() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external fourth-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_fourth_harmonic_pure_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={0,0,0,1}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
+
+
+def test_simulate_file_external_josim_preserves_pure_fifth_harmonic_semantics_without_primary_icrit() -> None:
+    josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
+    josim = josim_override or shutil.which("josim")
+    if not josim:
+        pytest.skip("josim command not found; skipping external fifth-harmonic benchmark check")
+
+    deck_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "benchmarks"
+        / "phase6"
+        / "jj_fifth_harmonic_pure_smoke.cir"
+    )
+    report = rflux.simulate_file(
+        str(deck_path),
+        simulation_mode="external_josim",
+        external_command=josim,
+    )
+
+    assert report.backend == "external_completed"
+    assert report.external_status_code == 0
+    assert report.generated_deck_path is not None
+    assert report.waveform_path is not None
+    generated_deck = Path(report.generated_deck_path).read_text(encoding="utf-8")
+    assert "cpr={0,0,0,0,1}" in generated_deck.lower()
+    if report.external_result is not None:
+        assert "external_josim_translation_warning" not in report.external_result
 
 
 def test_verify_layout_propagates_external_simulator_summary(tmp_path):

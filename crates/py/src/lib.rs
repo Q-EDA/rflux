@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+use std::fs;
 use rflux_flow::{
     AcBiasOptimizationReport, AcBiasReport, AdvancedConstraintConfig, AdvancedConstraintReport,
     AdvancedConstraintViolation, CompoundCellCharacterizationConfig,
@@ -9,6 +10,7 @@ use rflux_flow::{
     StatisticalTimingAnalysisReport, TimingAnalysisReport, VerificationReport,
 };
 use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
+use rflux_io::{read_bench_netlist, read_netlist_as, NetlistInputFormat};
 use rflux_place::{FixedNodePlacement, Point};
 use rflux_route::{BlockedRegion, RouteMode};
 use rflux_sim::{simulate_file as simulate_file_core, simulate_text as simulate_text_core};
@@ -843,6 +845,32 @@ struct PySimulationDelayDetail {
 
 #[pyclass]
 #[derive(Clone)]
+struct PySimulationMeasurementDetail {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    measured_value: f64,
+    #[pyo3(get)]
+    at_ref: Option<PySimulationEndpointRef>,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PySimulationMeasurementWarning {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    reason: String,
+    #[pyo3(get)]
+    at_ref: Option<PySimulationEndpointRef>,
+}
+
+#[pyclass]
+#[derive(Clone)]
 struct PySimulationViolationDetail {
     #[pyo3(get)]
     kind: String,
@@ -870,6 +898,10 @@ struct PySimulationReport {
     reported_worst_delay_ps: Option<f64>,
     #[pyo3(get)]
     delay_details: Vec<PySimulationDelayDetail>,
+    #[pyo3(get)]
+    measurement_details: Vec<PySimulationMeasurementDetail>,
+    #[pyo3(get)]
+    measurement_warnings: Vec<PySimulationMeasurementWarning>,
     #[pyo3(get)]
     violation_details: Vec<PySimulationViolationDetail>,
     #[pyo3(get)]
@@ -906,6 +938,10 @@ struct PyVerificationReport {
     reported_worst_delay_ps: Option<f64>,
     #[pyo3(get)]
     delay_details: Vec<PySimulationDelayDetail>,
+    #[pyo3(get)]
+    measurement_details: Vec<PySimulationMeasurementDetail>,
+    #[pyo3(get)]
+    measurement_warnings: Vec<PySimulationMeasurementWarning>,
     #[pyo3(get)]
     violation_details: Vec<PySimulationViolationDetail>,
     #[pyo3(get)]
@@ -1207,6 +1243,34 @@ impl From<SimulationReport> for PySimulationReport {
                     }),
                 })
                 .collect(),
+            measurement_details: value
+                .measurement_details
+                .into_iter()
+                .map(|detail| PySimulationMeasurementDetail {
+                    name: detail.name,
+                    kind: detail.kind,
+                    measured_value: detail.measured_value,
+                    at_ref: detail.at_ref.map(|endpoint| PySimulationEndpointRef {
+                        raw: endpoint.raw,
+                        node: endpoint.node,
+                        port: endpoint.port,
+                    }),
+                })
+                .collect(),
+            measurement_warnings: value
+                .measurement_warnings
+                .into_iter()
+                .map(|warning| PySimulationMeasurementWarning {
+                    name: warning.name,
+                    kind: warning.kind,
+                    reason: warning.reason,
+                    at_ref: warning.at_ref.map(|endpoint| PySimulationEndpointRef {
+                        raw: endpoint.raw,
+                        node: endpoint.node,
+                        port: endpoint.port,
+                    }),
+                })
+                .collect(),
             violation_details: value
                 .violation_details
                 .into_iter()
@@ -1254,6 +1318,36 @@ impl From<VerificationReport> for PyVerificationReport {
                         port: endpoint.port,
                     }),
                     to_ref: detail.to_ref.map(|endpoint| PySimulationEndpointRef {
+                        raw: endpoint.raw,
+                        node: endpoint.node,
+                        port: endpoint.port,
+                    }),
+                })
+                .collect(),
+            measurement_details: value
+                .simulation
+                .measurement_details
+                .into_iter()
+                .map(|detail| PySimulationMeasurementDetail {
+                    name: detail.name,
+                    kind: detail.kind,
+                    measured_value: detail.measured_value,
+                    at_ref: detail.at_ref.map(|endpoint| PySimulationEndpointRef {
+                        raw: endpoint.raw,
+                        node: endpoint.node,
+                        port: endpoint.port,
+                    }),
+                })
+                .collect(),
+            measurement_warnings: value
+                .simulation
+                .measurement_warnings
+                .into_iter()
+                .map(|warning| PySimulationMeasurementWarning {
+                    name: warning.name,
+                    kind: warning.kind,
+                    reason: warning.reason,
+                    at_ref: warning.at_ref.map(|endpoint| PySimulationEndpointRef {
                         raw: endpoint.raw,
                         node: endpoint.node,
                         port: endpoint.port,
@@ -1709,6 +1803,38 @@ fn merge_characterized_library(serialized_entries: Vec<String>, base_name: &str)
 #[pyfunction]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, name=None))]
+fn read_bench_file(path: &str, name: Option<String>) -> PyResult<Circuit> {
+    let netlist = read_bench_netlist(path)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(Circuit {
+        name: name.unwrap_or_default(),
+        netlist,
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (text, name=None))]
+fn read_bench_text(text: &str, name: Option<String>) -> PyResult<Circuit> {
+    let temp_path = std::env::temp_dir().join(format!(
+        "rflux-py-bench-{}.bench",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            .as_nanos()
+    ));
+    fs::write(&temp_path, text)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+    let result = read_netlist_as(&temp_path, NetlistInputFormat::Bench)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
+    let _ = fs::remove_file(&temp_path);
+    Ok(Circuit {
+        name: name.unwrap_or_default(),
+        netlist: result?,
+    })
 }
 
 #[pyfunction]
@@ -2368,6 +2494,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLibraryAwareDesignOptimizationReport>()?;
     m.add_class::<PySimulationEndpointRef>()?;
     m.add_class::<PySimulationDelayDetail>()?;
+    m.add_class::<PySimulationMeasurementDetail>()?;
+    m.add_class::<PySimulationMeasurementWarning>()?;
     m.add_class::<PySimulationViolationDetail>()?;
     m.add_class::<PySimulationReport>()?;
     m.add_class::<PyEquivalenceInputAssignment>()?;
@@ -2396,6 +2524,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_file, m)?)?;
     m.add_function(wrap_pyfunction!(check_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(check_single_step_sequential_equivalence, m)?)?;
+    m.add_function(wrap_pyfunction!(read_bench_file, m)?)?;
+    m.add_function(wrap_pyfunction!(read_bench_text, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }
