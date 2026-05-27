@@ -17,7 +17,7 @@
 
 ## 3. 当前证据
 
-- 自动化输出：`rflux-sim` 已有针对 allowlist、环境变量隔离和独立临时运行目录的回归测试。
+- 自动化输出：`rflux-sim` 已有针对 allowlist、环境变量隔离、独立临时运行目录，以及成功后输出副本与运行目录清理的回归测试。
 - 人工核对来源：`docs/external-command-policy.md`、`docs/security-compliance.md`、`docs/third-party-risk-register.md`。
 - 当前已知限制：外部仿真路径仍属于受信任操作者接口；不应作为不受控用户输入面。
 
@@ -30,6 +30,7 @@
   - 不通过 shell 拼接命令行
   - 子进程移除 `RFLOW_*` / `JOSIM_*` 环境变量
   - 输入 deck 收敛到独立 `rflux-ext-*` 临时目录
+  - 成功运行后把 deck / waveform 复制到稳定临时文件，并清理原运行目录
 - 不可接受范围：
   - 放宽到任意可执行文件
   - 在未更新策略文件和回归测试的情况下扩展外部工具支持
@@ -46,6 +47,6 @@
 
 - 关闭条件：形成外部执行策略配置、签名或来源验证方案，以及更明确的输出文件生命周期约束
 - 跟踪动作：
-  - 继续补副作用文件生命周期和清理策略
+  - 继续补外部输出保留策略和失败路径清理策略
   - 若引入新外部工具，必须新增独立风险记录
 - 相关文档更新：`docs/external-command-policy.md`、`docs/security-compliance.md`、`docs/third-party-risk-register.md`

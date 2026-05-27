@@ -525,11 +525,23 @@ fn run_generated_deck_with_base(
                     external_notes.dedup();
                     let external_result =
                         combine_external_result_with_notes(reported_result, &external_notes);
+                    let waveform_source_path = waveform_path
+                        .as_deref()
+                        .map(Path::new)
+                        .filter(|path| path.is_file())
+                        .unwrap_or(&expected_waveform_path);
+                    let (generated_deck_path, waveform_path) = stage_external_run_artifacts(
+                        &run_dir,
+                        &deck_path,
+                        Some(waveform_source_path),
+                        std::process::id(),
+                        timestamp_millis,
+                    );
                     return SimulationReport {
                         backend,
                         simulated_events: reported_events.unwrap_or(simulated_events),
                         generated_deck_lines,
-                        generated_deck_path: Some(deck_path.display().to_string()),
+                        generated_deck_path,
                         waveform_path,
                         reported_violations: reported_violations.unwrap_or(violation_details.len()),
                         reported_worst_delay_ps,
@@ -1833,6 +1845,44 @@ fn create_external_run_dir(
     let run_dir = base_temp_dir.join(format!("rflux-ext-{}-{}", process_id, timestamp_millis));
     fs::create_dir(&run_dir)?;
     Ok(run_dir)
+}
+
+fn stage_external_run_artifacts(
+    run_dir: &Path,
+    deck_path: &Path,
+    waveform_source_path: Option<&Path>,
+    process_id: u32,
+    timestamp_millis: u128,
+) -> (Option<String>, Option<String>) {
+    let staged_deck_path = std::env::temp_dir().join(format!(
+        "rflux-ext-{}-{}-input.sp",
+        process_id, timestamp_millis
+    ));
+    let staged_waveform_path = std::env::temp_dir().join(format!(
+        "rflux-ext-{}-{}-external_output.csv",
+        process_id, timestamp_millis
+    ));
+    let deck_copied = fs::copy(deck_path, &staged_deck_path).is_ok();
+    let waveform_copied = waveform_source_path
+        .filter(|path| path.is_file())
+        .map(|source_path| fs::copy(source_path, &staged_waveform_path).is_ok())
+        .unwrap_or(false);
+    if deck_copied && waveform_copied {
+        let _ = fs::remove_dir_all(run_dir);
+    }
+    let generated_deck_path = Some(if deck_copied {
+        staged_deck_path.display().to_string()
+    } else {
+        deck_path.display().to_string()
+    });
+    let waveform_path = waveform_source_path.map(|path| {
+        if waveform_copied {
+            staged_waveform_path.display().to_string()
+        } else {
+            path.display().to_string()
+        }
+    });
+    (generated_deck_path, waveform_path)
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -7078,6 +7128,7 @@ mod tests {
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -7267,6 +7318,42 @@ mod tests {
         assert!(rendered.contains("-o"));
         assert!(rendered.contains("external_output.csv"));
         assert!(rendered.contains("input.sp"));
+    }
+
+    #[test]
+    fn stage_external_run_artifacts_copies_outputs_and_cleans_run_dir() {
+        let base_dir = unique_test_dir("external-stage-artifacts");
+        let run_dir = base_dir.join("rflux-ext-1234-5678");
+        fs::create_dir_all(&run_dir).unwrap();
+        let deck_path = run_dir.join("input.sp");
+        let waveform_path = run_dir.join("external_output.csv");
+        fs::write(&deck_path, ".tran 1p 1p\n.end\n").unwrap();
+        fs::write(&waveform_path, "time,voltage\n0,0\n").unwrap();
+
+        let (generated_deck_path, staged_waveform_path) = super::stage_external_run_artifacts(
+            &run_dir,
+            &deck_path,
+            Some(&waveform_path),
+            1234,
+            5678,
+        );
+
+        let staged_deck_path = Path::new(generated_deck_path.as_deref().unwrap());
+        let staged_waveform_path = Path::new(staged_waveform_path.as_deref().unwrap());
+
+        assert!(staged_deck_path.is_file());
+        assert!(staged_waveform_path.is_file());
+        assert!(!run_dir.exists());
+        assert!(staged_deck_path.to_string_lossy().contains("rflux-ext-1234-5678-input.sp"));
+        assert!(
+            staged_waveform_path
+                .to_string_lossy()
+                .contains("rflux-ext-1234-5678-external_output.csv")
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+        let _ = fs::remove_file(staged_deck_path);
+        let _ = fs::remove_file(staged_waveform_path);
     }
 
     #[test]
