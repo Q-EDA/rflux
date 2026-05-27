@@ -16,6 +16,15 @@ Before running steps, create a run record from:
 
 - `docs/phase-b-run-record-template.md`
 
+Optional automation (recommended):
+
+```bash
+uv run python python/scripts/generate_phase_b_run_record.py \
+  --date 2026-05-28 \
+  --artifact-dir target/waveform-compare-linux \
+  --output docs/phase-b-run-record-2026-05-28.md
+```
+
 1. Run Linux waveform gate for candidate generation
 
 ```md
