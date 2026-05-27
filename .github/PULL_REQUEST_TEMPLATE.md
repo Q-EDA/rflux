@@ -17,6 +17,15 @@ List the commands or checks you ran.
 
 If this PR changes `crates/sim`, JoSIM correlation scripts, or phase-6 waveform thresholds, also state whether [docs/sim-release-readiness-checklist.md](../docs/sim-release-readiness-checklist.md) was completed or why it does not apply.
 
+## Alignment scorecard impact
+
+- [ ] No scorecard item impacted
+- [ ] Scorecard item(s) impacted and evidence was updated
+
+Impacted item IDs (for example `Y-01`, `J-03`, `P-01`):
+
+Scorecard reference: [docs/alignment-scorecard.md](../docs/alignment-scorecard.md)
+
 ## Compatibility
 
 - [ ] No public API or schema change

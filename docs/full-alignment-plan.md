@@ -44,6 +44,11 @@
 - 为每栏定义 `must` / `should` 项与权重。
 - 把每一项映射到代码入口、测试入口、CI 锚点、文档锚点。
 
+当前落地：
+
+- 评分卡文档已创建：`docs/alignment-scorecard.md`。
+- PR 模板已接入评分卡条目引用：`.github/PULL_REQUEST_TEMPLATE.md`。
+
 退出条件：
 
 - scorecard 合入仓库并在 PR 模板中可引用。
