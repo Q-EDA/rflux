@@ -17,7 +17,7 @@
 | 维度 | 范围 | 等级 | 说明 |
 |------|------|------|------|
 | 操作系统 | Ubuntu latest | 正式验证 | 当前 GitHub Actions 默认检查运行在 Ubuntu。 |
-| 操作系统 | Windows | 受限支持 | 仓库可在 Windows 开发，但当前无正式 CI 矩阵覆盖。 |
+| 操作系统 | Windows latest | 正式验证 | 当前已新增 `core-smoke-windows` job 覆盖 CLI 最小链路与 Python 最小链路。 |
 | 操作系统 | macOS | 实验性 | 当前无自动化验证。 |
 | Rust toolchain | stable | 正式验证 | README 与 CI 均以 stable 为基线。 |
 | Python | 3.12 | 正式验证 | `.python-version` 与 `pyproject.toml` 已锁定 3.12。 |
@@ -161,8 +161,10 @@
 |--------|------|------|
 | `cargo test --workspace` | 正式验证 | 默认 CI 覆盖。 |
 | `uv run pytest` | 正式验证 | 默认 CI 覆盖。 |
+| Windows 核心 smoke（CLI） | 正式验证 | `core-smoke-windows` 直接锚定 `lint-input / compile-netlist / check-equivalence` 三条命令链路。 |
+| Windows 核心 smoke（Python） | 正式验证 | `core-smoke-windows` 运行 `python/tests/test_basic.py` 的最小子集（包版本、结构化 API 重导出、simulate_file 路径）。 |
 | 外部 waveform compare | 受限支持 | 手动触发工作流，可选执行。 |
-| 多平台矩阵 | 实验性 | 当前缺失。 |
+| 多平台矩阵 | 受限支持 | 当前具备 Ubuntu 默认检查 + Windows 核心 smoke；尚未扩展到 macOS 或完整对称矩阵。 |
 | nightly fuzz / benchmark / compatibility suite | 实验性 | 当前未建立。 |
 
 ## 11. 当前不承诺事项

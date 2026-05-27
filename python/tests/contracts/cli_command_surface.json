@@ -1,0 +1,976 @@
+{
+  "command_count": 14,
+  "commands": [
+    {
+      "args_struct": "PdkMinimalArgs",
+      "command": "pdk-minimal",
+      "option_count": 2,
+      "options": [
+        {
+          "has_default": true,
+          "long": "name",
+          "required": true,
+          "value_enum": false,
+          "value_type": "String"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "PdkMinimal"
+    },
+    {
+      "args_struct": "PdkValidateArgs",
+      "command": "pdk-validate",
+      "option_count": 2,
+      "options": [
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "PdkValidate"
+    },
+    {
+      "args_struct": "PdkCellLibraryArgs",
+      "command": "pdk-cell-library",
+      "option_count": 4,
+      "options": [
+        {
+          "has_default": false,
+          "long": "cell",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "kind",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "PdkCellLibrary"
+    },
+    {
+      "args_struct": "LintInputArgs",
+      "command": "lint-input",
+      "option_count": 3,
+      "options": [
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "enum_values": [
+            "ir",
+            "bench",
+            "pdk"
+          ],
+          "has_default": false,
+          "long": "kind",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliInputKind"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "LintInput"
+    },
+    {
+      "args_struct": "LintTimingConstraintsArgs",
+      "command": "lint-timing-constraints",
+      "option_count": 4,
+      "options": [
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "netlist",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "netlist-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "LintTimingConstraints"
+    },
+    {
+      "args_struct": "CollectDiagnosticsArgs",
+      "command": "collect-diagnostics",
+      "option_count": 8,
+      "options": [
+        {
+          "has_default": false,
+          "long": "command",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "external-command",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "event_only",
+            "external_josim",
+            "internal_transient"
+          ],
+          "has_default": false,
+          "long": "mode",
+          "required": false,
+          "value_enum": true,
+          "value_type": "Option<CliSimulationMode>"
+        },
+        {
+          "has_default": false,
+          "long": "notes",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "output-dir",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "pdk",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "report",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "CollectDiagnostics"
+    },
+    {
+      "args_struct": "RunWithDiagnosticsArgs",
+      "command": "run-with-diagnostics",
+      "option_count": 28,
+      "options": [
+        {
+          "has_default": false,
+          "long": "assumptions",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "check-ref",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "clock-period-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "detour-margin-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "dimacs-output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": true,
+          "long": "equivalence-depth",
+          "required": true,
+          "value_enum": false,
+          "value_type": "usize"
+        },
+        {
+          "enum_values": [
+            "combinational",
+            "single_step_sequential",
+            "bounded_sequential"
+          ],
+          "has_default": false,
+          "long": "equivalence-kind",
+          "required": false,
+          "value_enum": true,
+          "value_type": "Option<CliEquivalenceKind>"
+        },
+        {
+          "has_default": false,
+          "long": "equivalence-metadata",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "external-command",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "flow-config",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "input-arrival-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "input-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "enum_values": [
+            "ir",
+            "bench",
+            "pdk"
+          ],
+          "has_default": false,
+          "long": "input-kind",
+          "required": false,
+          "value_enum": true,
+          "value_type": "Option<CliInputKind>"
+        },
+        {
+          "enum_values": [
+            "analyze-timing",
+            "check-equivalence",
+            "compile-netlist",
+            "compile-layout",
+            "lint-input",
+            "lint-timing-constraints",
+            "pdk-validate",
+            "pdk-cell-library",
+            "solve-dimacs",
+            "simulate-file",
+            "verify-layout"
+          ],
+          "has_default": false,
+          "long": "kind",
+          "required": true,
+          "value_enum": true,
+          "value_type": "DiagnosticsCommandKind"
+        },
+        {
+          "has_default": false,
+          "long": "min-hold-jtl-length-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "event_only",
+            "external_josim",
+            "internal_transient"
+          ],
+          "has_default": true,
+          "long": "mode",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliSimulationMode"
+        },
+        {
+          "has_default": false,
+          "long": "netlist",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "netlist-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "notes",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "output-dir",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "pdk",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "prefer-ptl-from-length-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "rhs",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "rhs-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "sfq-phase-count",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<usize>"
+        },
+        {
+          "has_default": false,
+          "long": "sfq-pulse-window-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "timing-constraints",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "RunWithDiagnostics"
+    },
+    {
+      "args_struct": "CompileNetlistArgs",
+      "command": "compile-netlist",
+      "option_count": 5,
+      "options": [
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "input-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "netlist-output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "pdk",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "CompileNetlist"
+    },
+    {
+      "args_struct": "LayoutCommandArgs",
+      "command": "compile-layout",
+      "option_count": 14,
+      "options": [
+        {
+          "has_default": false,
+          "long": "clock-period-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "detour-margin-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "flow-config",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "flow-config-patch-output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "input-arrival-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "input-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "min-hold-jtl-length-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "pdk",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "prefer-ptl-from-length-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "sfq-phase-count",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<usize>"
+        },
+        {
+          "has_default": false,
+          "long": "sfq-pulse-window-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "timing-constraints",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "CompileLayout"
+    },
+    {
+      "args_struct": "LayoutCommandArgs",
+      "command": "analyze-timing",
+      "option_count": 14,
+      "options": [
+        {
+          "has_default": false,
+          "long": "clock-period-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "detour-margin-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "flow-config",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "flow-config-patch-output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "input-arrival-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "input-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "min-hold-jtl-length-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "pdk",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "prefer-ptl-from-length-um",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "sfq-phase-count",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<usize>"
+        },
+        {
+          "has_default": false,
+          "long": "sfq-pulse-window-ps",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<f64>"
+        },
+        {
+          "has_default": false,
+          "long": "timing-constraints",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "AnalyzeTiming"
+    },
+    {
+      "args_struct": "VerifyLayoutArgs",
+      "command": "verify-layout",
+      "option_count": 6,
+      "options": [
+        {
+          "has_default": false,
+          "long": "external-command",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "input-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "event_only",
+            "external_josim",
+            "internal_transient"
+          ],
+          "has_default": true,
+          "long": "mode",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliSimulationMode"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "pdk",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "VerifyLayout"
+    },
+    {
+      "args_struct": "SimulateFileArgs",
+      "command": "simulate-file",
+      "option_count": 4,
+      "options": [
+        {
+          "has_default": false,
+          "long": "external-command",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "event_only",
+            "external_josim",
+            "internal_transient"
+          ],
+          "has_default": true,
+          "long": "mode",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliSimulationMode"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "SimulateFile"
+    },
+    {
+      "args_struct": "SolveDimacsArgs",
+      "command": "solve-dimacs",
+      "option_count": 5,
+      "options": [
+        {
+          "has_default": false,
+          "long": "assumptions",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "check-ref",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<String>"
+        },
+        {
+          "has_default": false,
+          "long": "equivalence-metadata",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "input",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        }
+      ],
+      "variant": "SolveDimacs"
+    },
+    {
+      "args_struct": "CheckEquivalenceArgs",
+      "command": "check-equivalence",
+      "option_count": 8,
+      "options": [
+        {
+          "has_default": true,
+          "long": "depth",
+          "required": true,
+          "value_enum": false,
+          "value_type": "usize"
+        },
+        {
+          "has_default": false,
+          "long": "dimacs-output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "enum_values": [
+            "combinational",
+            "single_step_sequential",
+            "bounded_sequential"
+          ],
+          "has_default": true,
+          "long": "kind",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliEquivalenceKind"
+        },
+        {
+          "has_default": false,
+          "long": "lhs",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "lhs-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        },
+        {
+          "has_default": false,
+          "long": "output",
+          "required": false,
+          "value_enum": false,
+          "value_type": "Option<PathBuf>"
+        },
+        {
+          "has_default": false,
+          "long": "rhs",
+          "required": true,
+          "value_enum": false,
+          "value_type": "PathBuf"
+        },
+        {
+          "enum_values": [
+            "auto",
+            "ir",
+            "bench"
+          ],
+          "has_default": true,
+          "long": "rhs-format",
+          "required": true,
+          "value_enum": true,
+          "value_type": "CliNetlistInputFormat"
+        }
+      ],
+      "variant": "CheckEquivalence"
+    }
+  ],
+  "kind": "cli_command_surface",
+  "schema_version": 1,
+  "source": "C:/Users/lilu/works/rflux/crates/cli/src/main.rs"
+}

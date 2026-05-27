@@ -26,6 +26,9 @@ Change scope:
 - [ ] Run `uv run cargo test --workspace` or a narrower command plus justification.
 - [ ] Run `uv run pytest` or a narrower command plus justification.
 - [ ] Run the candidate artifact build path.
+- [ ] Run CLI command surface contract check (`export_cli_command_surface.py --check`) when the candidate touches `crates/cli` command/arg surface.
+- [ ] Run Python API public contract check (`export_python_api_surface.py --check`) when the candidate touches `python/rflux` public symbols.
+- [ ] Run report schema surface contract check (`export_report_schema_surface.py --check`) when the candidate touches CLI report JSON or artifact manifest schemas.
 - [ ] Preserve the exact build command lines used for the candidate bundle.
 
 Recommended commands:
@@ -34,11 +37,17 @@ Recommended commands:
 uv run cargo test --workspace
 uv run pytest
 uv run python python/scripts/prepare_release_artifacts.py --output-dir target/release-artifacts
+uv run python python/scripts/export_cli_command_surface.py --check
+uv run python python/scripts/export_python_api_surface.py --check
+uv run python python/scripts/export_report_schema_surface.py --check
 ```
 
 The candidate artifact helper also has an explicit CI smoke anchor:
 
 - `uv run pytest python/tests/test_prepare_release_artifacts.py -q`
+- `uv run pytest python/tests/test_cli_command_surface_contract.py -q`
+- `uv run pytest python/tests/test_python_api_surface_contract.py -q`
+- `uv run pytest python/tests/test_report_schema_surface_contract.py -q`
 
 ## 3. Evidence package
 
@@ -47,6 +56,9 @@ The candidate artifact helper also has an explicit CI smoke anchor:
 - [ ] Attach or archive `target/release-artifacts/manifest.json`.
 - [ ] Attach or archive `target/release-artifacts/README.txt`.
 - [ ] Record copied build-input snapshots (`README.md`, `Cargo.toml`, `pyproject.toml`, `uv.lock`).
+- [ ] When `crates/cli` command/arg surface changed, attach or archive `python/tests/contracts/cli_command_surface.json` and record contract diff summary.
+- [ ] When `python/rflux` public surface changed, attach or archive `python/tests/contracts/python_api_surface.json` and record contract diff summary.
+- [ ] When report JSON/manifest kind-schema surface changed, attach or archive `python/tests/contracts/report_schema_surface.json` and record contract diff summary.
 
 Minimum evidence record:
 
@@ -57,6 +69,12 @@ Wheel paths:
 Manifest path:
 README path:
 Build input snapshots:
+CLI command surface baseline path:
+CLI command surface diff summary:
+Python API surface baseline path:
+Python API diff summary:
+Report schema surface baseline path:
+Report schema surface diff summary:
 ```
 
 ## 4. Compatibility and installability review

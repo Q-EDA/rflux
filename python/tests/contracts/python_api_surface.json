@@ -1,0 +1,1021 @@
+{
+  "kind": "python_api_surface",
+  "modules": {
+    "rflux": {
+      "exported": [
+        "__version__",
+        "BalanceStrategy",
+        "BlockedRegion",
+        "ClockDomainConstraint",
+        "CrossingConstraint",
+        "Circuit",
+        "CoreStatus",
+        "RfluxError",
+        "RfluxCoreUnavailableError",
+        "FLOW_CONFIG_KIND",
+        "FLOW_CONFIG_SCHEMA_VERSION",
+        "SIMULATION_MODES",
+        "CellLibraryEntry",
+        "CellLibraryMetadata",
+        "CellLibrarySummary",
+        "CompilePlan",
+        "CompileReport",
+        "ConnectionSpec",
+        "FixedNodePlacement",
+        "LayoutReport",
+        "NodeTimingConstraint",
+        "PinTimingConstraint",
+        "TimingAnalysisReport",
+        "TimingArcReport",
+        "TimingCornerAnalysisReport",
+        "MultiCornerTimingAnalysisReport",
+        "TimingClosureAction",
+        "TimingClosureLoopReport",
+        "TimingClosureSummary",
+        "StatisticalTimingAnalysisReport",
+        "StatisticalTimingArcReport",
+        "AcBiasReport",
+        "AcBiasOptimizationReport",
+        "LibraryAwareAcBiasOptimizationReport",
+        "LibraryAwareDesignOptimizationReport",
+        "Pdk",
+        "AdvancedConstraintReport",
+        "AdvancedConstraintViolation",
+        "BoundedSequentialEquivalenceReport",
+        "BoundedSequentialEquivalenceStepReport",
+        "CombinationalEquivalenceReport",
+        "VerificationReport",
+        "CompoundCellCharacterizationReport",
+        "OutputMismatch",
+        "PinRef",
+        "SynthesisReport",
+        "SimulationDelayDetail",
+        "SimulationEndpointRef",
+        "SimulationMeasurementDetail",
+        "SimulationMeasurementWarning",
+        "SimulationReport",
+        "SimulationViolationDetail",
+        "SingleStepSequentialEquivalenceReport",
+        "StateTransitionMismatch",
+        "analyze_timing",
+        "analyze_timing_corners",
+        "analyze_timing_statistical",
+        "analyze_ac_bias",
+        "analyze_advanced_constraints",
+        "characterize_compound_cell",
+        "optimize_ac_bias",
+        "optimize_ac_bias_with_characterized_library",
+        "optimize_design_with_characterized_library",
+        "merge_characterized_library",
+        "read_bench_file",
+        "read_bench_text",
+        "simulate_file",
+        "simulate_text",
+        "compile",
+        "compile_layout",
+        "compile_netlist",
+        "compile_plan",
+        "compile_plan_report",
+        "check_equivalence",
+        "check_bounded_sequential_equivalence",
+        "check_single_step_sequential_equivalence",
+        "core_available",
+        "core_status",
+        "core_version",
+        "flow",
+        "pdk",
+        "sim",
+        "timing",
+        "verify_layout",
+        "verify"
+      ],
+      "exported_count": 85,
+      "module": "rflux",
+      "symbols": [
+        {
+          "kind": "value",
+          "name": "__version__",
+          "type": "str"
+        },
+        {
+          "init_signature": "(*values)",
+          "kind": "class",
+          "name": "BalanceStrategy"
+        },
+        {
+          "init_signature": "(min_x_um: 'float', max_x_um: 'float', min_y_um: 'float', max_y_um: 'float') -> None",
+          "kind": "class",
+          "name": "BlockedRegion"
+        },
+        {
+          "init_signature": "(id: 'int', period_ps: 'float') -> None",
+          "kind": "class",
+          "name": "ClockDomainConstraint"
+        },
+        {
+          "init_signature": "(from_domain: 'int', to_domain: 'int', kind: 'str', value_ps: 'float | None' = None, cycles: 'int | None' = None) -> None",
+          "kind": "class",
+          "name": "CrossingConstraint"
+        },
+        {
+          "init_signature": "(name=None)",
+          "kind": "class",
+          "name": "Circuit"
+        },
+        {
+          "init_signature": "(available: bool, version: str, extension_path: str | None, import_error: str | None) -> None",
+          "kind": "class",
+          "name": "CoreStatus"
+        },
+        {
+          "init_signature": null,
+          "kind": "class",
+          "name": "RfluxError"
+        },
+        {
+          "init_signature": null,
+          "kind": "class",
+          "name": "RfluxCoreUnavailableError"
+        },
+        {
+          "kind": "value",
+          "name": "FLOW_CONFIG_KIND",
+          "type": "str"
+        },
+        {
+          "kind": "value",
+          "name": "FLOW_CONFIG_SCHEMA_VERSION",
+          "type": "int"
+        },
+        {
+          "kind": "value",
+          "name": "SIMULATION_MODES",
+          "type": "tuple"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', area_um2: 'float', pipeline_stages: 'int', intrinsic_delay_ps: 'float', setup_ps: 'float', hold_ps: 'float', timing_source: 'str', has_characterization_metadata: 'bool') -> None",
+          "kind": "class",
+          "name": "CellLibraryEntry"
+        },
+        {
+          "init_signature": "(name: 'str', version: 'str | None', source: 'str | None') -> None",
+          "kind": "class",
+          "name": "CellLibraryMetadata"
+        },
+        {
+          "init_signature": "(cell_count: 'int', kind_count: 'int', kind_counts: 'dict[str, int]', named_timing_count: 'int', kind_timing_count: 'int', missing_timing_count: 'int', characterized_cell_count: 'int', named_timing_cells: 'list[str]', missing_timing_cells: 'list[str]', characterized_cells: 'list[str]') -> None",
+          "kind": "class",
+          "name": "CellLibrarySummary"
+        },
+        {
+          "init_signature": "(connections: 'list[ConnectionSpec]' = <factory>, balance_strategy: 'BalanceStrategy' = <BalanceStrategy.NONE: 'none'>, balancing_sources: 'list[PinRef]' = <factory>) -> None",
+          "kind": "class",
+          "name": "CompilePlan"
+        },
+        {
+          "init_signature": "(connections_applied: 'int', splitters_inserted: 'int', balancing_dffs_inserted: 'int') -> None",
+          "kind": "class",
+          "name": "CompileReport"
+        },
+        {
+          "init_signature": "(from_pin: 'PinRef', to_pin: 'PinRef') -> None",
+          "kind": "class",
+          "name": "ConnectionSpec"
+        },
+        {
+          "init_signature": "(node: 'int', x_um: 'float', y_um: 'float') -> None",
+          "kind": "class",
+          "name": "FixedNodePlacement"
+        },
+        {
+          "init_signature": "(connections_applied: 'int', splitters_inserted: 'int', balancing_dffs_inserted: 'int', mapped_nodes: 'int', total_area_um2: 'float', bool_opt_compatible: 'bool', placed_nodes: 'int', placement_width_um: 'float', placement_height_um: 'float', clock_sinks: 'int', clock_buffers: 'int', clock_phase_count: 'int', initial_hold_violations: 'int', final_hold_violations: 'int', hold_fix_applied: 'bool', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', critical_path_delay_ps: 'float', analyzed_timing_arcs: 'int', false_path_arcs: 'int', setup_violations: 'int', capture_window_violations: 'int', timing_closure: 'TimingClosureSummary', timing_closure_loop: 'TimingClosureLoopReport', routed_nets: 'int', total_route_length_um: 'float', initial_total_detour_overhead_um: 'float', total_detour_overhead_um: 'float', detoured_routes: 'int', detour_feedback_applied: 'bool', effective_prefer_ptl_from_length_um: 'float', effective_detour_margin_um: 'float', flow_config_patch: 'dict[str, object]', jtl_routes: 'int', ptl_routes: 'int', node_count: 'int', edge_count: 'int') -> None",
+          "kind": "class",
+          "name": "LayoutReport"
+        },
+        {
+          "init_signature": "(node: 'int', input_arrival_ps: 'float | None' = None, required_ps: 'float | None' = None, clock_domain: 'int | None' = None) -> None",
+          "kind": "class",
+          "name": "NodeTimingConstraint"
+        },
+        {
+          "init_signature": "(pin: 'PinRef', input_arrival_ps: 'float | None' = None, required_ps: 'float | None' = None, clock_domain: 'int | None' = None) -> None",
+          "kind": "class",
+          "name": "PinTimingConstraint"
+        },
+        {
+          "init_signature": "(worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', critical_path_delay_ps: 'float', analyzed_timing_arcs: 'int', false_path_arcs: 'int', setup_violations: 'int', hold_violations: 'int', capture_window_violations: 'int', detour_feedback_applied: 'bool', hold_fix_applied: 'bool', closure: 'TimingClosureSummary', timing_arcs: 'list[TimingArcReport]') -> None",
+          "kind": "class",
+          "name": "TimingAnalysisReport"
+        },
+        {
+          "init_signature": "(from_pin: 'PinRef', to_pin: 'PinRef', is_false_path: 'bool', route_mode: 'str', route_length_um: 'float', from_domain: 'int | None', to_domain: 'int | None', launch_phase: 'int', capture_phase: 'int', launch_window_start_ps: 'float', launch_window_end_ps: 'float', capture_window_start_ps: 'float', capture_window_end_ps: 'float', arrival_phase_offset_ps: 'float', capture_window_slack_ps: 'float', capture_window_violation: 'bool', arrival_ps: 'float', required_ps: 'float', setup_slack_ps: 'float', hold_slack_ps: 'float') -> None",
+          "kind": "class",
+          "name": "TimingArcReport"
+        },
+        {
+          "init_signature": "(corner_name: 'str', is_default_corner: 'bool', is_active_corner: 'bool', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', critical_path_delay_ps: 'float', analyzed_timing_arcs: 'int', setup_violations: 'int', hold_violations: 'int', capture_window_violations: 'int', closure: 'TimingClosureSummary') -> None",
+          "kind": "class",
+          "name": "TimingCornerAnalysisReport"
+        },
+        {
+          "init_signature": "(active_timing_corner: 'str | None', corner_count: 'int', worst_setup_corner: 'str', worst_hold_corner: 'str', worst_critical_path_corner: 'str', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', worst_critical_path_delay_ps: 'float', corners: 'list[TimingCornerAnalysisReport]') -> None",
+          "kind": "class",
+          "name": "MultiCornerTimingAnalysisReport"
+        },
+        {
+          "init_signature": "(check: 'str', priority: 'int', remediation_kind: 'str', from_pin: 'PinRef', to_pin: 'PinRef', slack_ps: 'float', route_mode: 'str', route_length_um: 'float', from_domain: 'int | None', to_domain: 'int | None') -> None",
+          "kind": "class",
+          "name": "TimingClosureAction"
+        },
+        {
+          "init_signature": "(detour_feedback_attempted: 'bool', detour_feedback_applied: 'bool', initial_total_detour_overhead_um: 'float', final_total_detour_overhead_um: 'float', route_delay_optimization_attempted: 'bool', route_delay_optimization_applied: 'bool', reduce_route_delay_candidate_available: 'bool', recommended_prefer_ptl_from_length_um: 'float | None', recommended_detour_margin_um: 'float | None', recommended_route_mode: 'str | None', estimated_route_length_um: 'float | None', estimated_slack_deficit_ps: 'float | None', reduce_route_delay_candidate_attempted: 'bool', reduce_route_delay_candidate_improved: 'bool', candidate_worst_setup_slack_ps: 'float | None', candidate_setup_violations: 'int | None', candidate_hold_violations: 'int | None', candidate_route_mode: 'str | None', candidate_route_length_um: 'float | None', hold_fix_attempted: 'bool', hold_fix_applied: 'bool', initial_hold_violations: 'int', final_hold_violations: 'int', status: 'str', next_step: 'str') -> None",
+          "kind": "class",
+          "name": "TimingClosureLoopReport"
+        },
+        {
+          "init_signature": "(closed: 'bool', status: 'str', setup_closed: 'bool', hold_closed: 'bool', capture_window_closed: 'bool', setup_violations: 'int', hold_violations: 'int', capture_window_violations: 'int', failing_checks: 'list[str]', action_count: 'int', primary_action: 'TimingClosureAction | None', reduce_route_delay_actions: 'int', relax_constraint_or_improve_library_timing_actions: 'int', add_hold_padding_actions: 'int', adjust_sfq_phase_or_pulse_window_actions: 'int', actions: 'list[TimingClosureAction]', next_step: 'str') -> None",
+          "kind": "class",
+          "name": "TimingClosureSummary"
+        },
+        {
+          "init_signature": "(worst_pessimistic_setup_slack_ps: 'float', worst_pessimistic_hold_slack_ps: 'float', analyzed_timing_arcs: 'int', false_path_arcs: 'int', setup_risk_violations: 'int', hold_risk_violations: 'int', sigma_multiplier: 'float', timing_arcs: 'list[StatisticalTimingArcReport]') -> None",
+          "kind": "class",
+          "name": "StatisticalTimingAnalysisReport"
+        },
+        {
+          "init_signature": "(from_pin: 'PinRef', to_pin: 'PinRef', is_false_path: 'bool', route_mode: 'str', route_length_um: 'float', from_domain: 'int | None', to_domain: 'int | None', launch_phase: 'int', capture_phase: 'int', launch_window_start_ps: 'float', launch_window_end_ps: 'float', capture_window_start_ps: 'float', capture_window_end_ps: 'float', arrival_phase_offset_ps: 'float', capture_window_slack_ps: 'float', capture_window_violation: 'bool', mean_arrival_ps: 'float', mean_required_ps: 'float', setup_slack_ps: 'float', hold_slack_ps: 'float', setup_sigma_ps: 'float', hold_sigma_ps: 'float', pessimistic_setup_slack_ps: 'float', pessimistic_hold_slack_ps: 'float') -> None",
+          "kind": "class",
+          "name": "StatisticalTimingArcReport"
+        },
+        {
+          "init_signature": "(routed_nets: 'int', jtl_carrier_candidates: 'int', ptl_coupling_risk_routes: 'int', clock_sink_count: 'int', estimated_static_power_savings_uw: 'float', estimated_area_overhead_ratio: 'float', estimated_frequency_derate_ratio: 'float', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', timing_guardband_score: 'float', feasibility_score: 'float', optimization_score: 'float') -> None",
+          "kind": "class",
+          "name": "AcBiasReport"
+        },
+        {
+          "init_signature": "(baseline: 'AcBiasReport', optimized: 'AcBiasReport', baseline_prefer_ptl_from_length_um: 'float', optimized_prefer_ptl_from_length_um: 'float', threshold_candidates_evaluated: 'int', baseline_detour_margin_um: 'float', optimized_detour_margin_um: 'float', detour_margin_candidates_evaluated: 'int', optimization_applied: 'bool') -> None",
+          "kind": "class",
+          "name": "AcBiasOptimizationReport"
+        },
+        {
+          "init_signature": "(ac_bias: 'AcBiasOptimizationReport', baseline_constraints: 'AdvancedConstraintReport', optimized_constraints: 'AdvancedConstraintReport', characterized_cells_merged: 'int', library_optimization_score: 'float') -> None",
+          "kind": "class",
+          "name": "LibraryAwareAcBiasOptimizationReport"
+        },
+        {
+          "init_signature": "(ac_bias: 'AcBiasOptimizationReport', baseline_statistical: 'StatisticalTimingAnalysisReport', optimized_statistical: 'StatisticalTimingAnalysisReport', baseline_constraints: 'AdvancedConstraintReport', optimized_constraints: 'AdvancedConstraintReport', characterized_cells_merged: 'int', design_optimization_score: 'float', baseline_cell_delay_sigma_ratio: 'float' = 0.05, optimized_cell_delay_sigma_ratio: 'float' = 0.05, baseline_sigma_multiplier: 'float' = 3.0, optimized_sigma_multiplier: 'float' = 3.0, baseline_placement_halo_scale: 'float' = 1.0, optimized_placement_halo_scale: 'float' = 1.0, placement_candidates_evaluated: 'int' = 1, statistical_candidates_evaluated: 'int' = 1) -> None",
+          "kind": "class",
+          "name": "LibraryAwareDesignOptimizationReport"
+        },
+        {
+          "init_signature": "(core) -> None",
+          "kind": "class",
+          "name": "Pdk"
+        },
+        {
+          "init_signature": "(estimated_thermal_load_uw: 'float', estimated_mechanical_stress_score: 'float', jtl_density_per_100um: 'float', detour_overhead_ratio: 'float', ptl_coupling_ratio: 'float', manufacturing_hotspots: 'int', violation_count: 'int', violations: 'list[AdvancedConstraintViolation]') -> None",
+          "kind": "class",
+          "name": "AdvancedConstraintReport"
+        },
+        {
+          "init_signature": "(category: 'str', detail: 'str', measured_value: 'float', limit_value: 'float') -> None",
+          "kind": "class",
+          "name": "AdvancedConstraintViolation"
+        },
+        {
+          "init_signature": "(equivalent: 'bool', depth: 'int', checked_steps: 'int', unroll_mode: 'str', checked_outputs: 'list[str]', checked_states: 'list[str]', first_failing_step: 'int | None', steps: 'list[BoundedSequentialEquivalenceStepReport]', sat_recursive_calls: 'int', sat_decisions: 'int', sat_backtracks: 'int', sat_restarts: 'int', sat_elapsed_ns: 'int') -> None",
+          "kind": "class",
+          "name": "BoundedSequentialEquivalenceReport"
+        },
+        {
+          "init_signature": "(step: 'int', report: 'SingleStepSequentialEquivalenceReport') -> None",
+          "kind": "class",
+          "name": "BoundedSequentialEquivalenceStepReport"
+        },
+        {
+          "init_signature": "(equivalent: 'bool', checked_outputs: 'list[str]', counterexample_inputs: 'dict[str, bool]', counterexample_outputs: 'dict[str, OutputMismatch]', sat_recursive_calls: 'int', sat_decisions: 'int', sat_backtracks: 'int', sat_restarts: 'int', sat_elapsed_ns: 'int') -> None",
+          "kind": "class",
+          "name": "CombinationalEquivalenceReport"
+        },
+        {
+          "init_signature": "(checked_routes: 'int', checked_ptl_routes: 'int', structural_violations: 'int', ptl_macro_boundary_violations: 'int', ptl_forbidden_length_violations: 'int', simulation_backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "kind": "class",
+          "name": "VerificationReport"
+        },
+        {
+          "init_signature": "(cell_name: 'str', node_count: 'int', edge_count: 'int', mapped_nodes: 'int', total_area_um2: 'float', derived_intrinsic_delay_ps: 'float', derived_setup_ps: 'float', derived_hold_ps: 'float', generated_cell_kind: 'str', generated_pipeline_stages: 'int', generated_library_json: 'str', simulated_delay_ps: 'float | None', simulation_backend: 'str', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int') -> None",
+          "kind": "class",
+          "name": "CompoundCellCharacterizationReport"
+        },
+        {
+          "init_signature": "(lhs: 'bool', rhs: 'bool') -> None",
+          "kind": "class",
+          "name": "OutputMismatch"
+        },
+        {
+          "init_signature": "(node: 'int', port: 'int') -> None",
+          "kind": "class",
+          "name": "PinRef"
+        },
+        {
+          "init_signature": "(connections_applied: 'int', splitters_inserted: 'int', balancing_dffs_inserted: 'int', bool_gate_count_before: 'int', bool_gate_count_after: 'int', mapped_nodes: 'int', total_area_um2: 'float', path_balance_insertions: 'int', bool_opt_compatible: 'bool', node_count: 'int', edge_count: 'int') -> None",
+          "kind": "class",
+          "name": "SynthesisReport"
+        },
+        {
+          "init_signature": "(name: 'str', delay_ps: 'float', from_ref: 'SimulationEndpointRef | None' = None, to_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationDelayDetail"
+        },
+        {
+          "init_signature": "(raw: 'str', node: 'str', port: 'int | None') -> None",
+          "kind": "class",
+          "name": "SimulationEndpointRef"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', measured_value: 'float', at_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationMeasurementDetail"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', reason: 'str', at_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationMeasurementWarning"
+        },
+        {
+          "init_signature": "(backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "kind": "class",
+          "name": "SimulationReport"
+        },
+        {
+          "init_signature": "(kind: 'str', detail: 'str', at_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationViolationDetail"
+        },
+        {
+          "init_signature": "(equivalent: 'bool', checked_outputs: 'list[str]', checked_states: 'list[str]', counterexample_inputs: 'dict[str, bool]', counterexample_present_states: 'dict[str, bool]', counterexample_outputs: 'dict[str, OutputMismatch]', counterexample_states: 'dict[str, StateTransitionMismatch]', sat_recursive_calls: 'int', sat_decisions: 'int', sat_backtracks: 'int', sat_restarts: 'int', sat_elapsed_ns: 'int') -> None",
+          "kind": "class",
+          "name": "SingleStepSequentialEquivalenceReport"
+        },
+        {
+          "init_signature": "(lhs_next: 'bool', rhs_next: 'bool', lhs_clock: 'bool', rhs_clock: 'bool') -> None",
+          "kind": "class",
+          "name": "StateTransitionMismatch"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_timing",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None) -> rflux._types.TimingAnalysisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_timing_corners",
+          "signature": "(circuit, pdk: rflux.pdk.Pdk, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None) -> rflux._types.MultiCornerTimingAnalysisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_timing_statistical",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None, cell_delay_sigma_ratio: float = 0.05, wire_delay_sigma_ratio: float = 0.05, global_cell_delay_sigma_ratio: float = 0.0, global_wire_delay_sigma_ratio: float = 0.0, clock_uncertainty_sigma_ps: float = 0.0, cross_domain_uncertainty_sigma_ps: float = 0.0, max_delay_cross_domain_uncertainty_sigma_ps: float = 0.0, multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0, sigma_multiplier: float = 3.0) -> rflux._types.StatisticalTimingAnalysisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_ac_bias",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None) -> rflux._types.AcBiasReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_advanced_constraints",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65) -> rflux._types.AdvancedConstraintReport"
+        },
+        {
+          "kind": "callable",
+          "name": "characterize_compound_cell",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, cell_name: str = 'compound_cell', simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.CompoundCellCharacterizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "optimize_ac_bias",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None) -> rflux._types.AcBiasOptimizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "optimize_ac_bias_with_characterized_library",
+          "signature": "(circuit, characterized_library_entries: list[str], plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65) -> rflux._types.LibraryAwareAcBiasOptimizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "optimize_design_with_characterized_library",
+          "signature": "(circuit, characterized_library_entries: list[str], plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65, cell_delay_sigma_ratio: float = 0.05, wire_delay_sigma_ratio: float = 0.05, global_cell_delay_sigma_ratio: float = 0.0, global_wire_delay_sigma_ratio: float = 0.0, clock_uncertainty_sigma_ps: float = 0.0, cross_domain_uncertainty_sigma_ps: float = 0.0, max_delay_cross_domain_uncertainty_sigma_ps: float = 0.0, multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0, sigma_multiplier: float = 3.0) -> rflux._types.LibraryAwareDesignOptimizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "merge_characterized_library",
+          "signature": "(serialized_entries: list[str], base_name: str = 'py-minimal-pdk') -> str"
+        },
+        {
+          "kind": "callable",
+          "name": "read_bench_file",
+          "signature": "(file_path: str | pathlib.Path, name: str | None = None) -> Circuit"
+        },
+        {
+          "kind": "callable",
+          "name": "read_bench_text",
+          "signature": "(text: str, name: str | None = None) -> Circuit"
+        },
+        {
+          "kind": "callable",
+          "name": "simulate_file",
+          "signature": "(file_path: str | pathlib.Path, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.SimulationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "simulate_text",
+          "signature": "(deck_text: str, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.SimulationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "compile",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None)"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_layout",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, min_hold_jtl_length_um: float | None = None, prefer_ptl_from_length_um: float | None = None, detour_margin_um: float | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None) -> rflux._types.LayoutReport"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_netlist",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None) -> rflux._types.SynthesisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_plan",
+          "signature": "(circuit, plan: rflux._types.CompilePlan)"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_plan_report",
+          "signature": "(circuit, plan: rflux._types.CompilePlan) -> rflux._types.CompileReport"
+        },
+        {
+          "kind": "callable",
+          "name": "check_equivalence",
+          "signature": "(lhs, rhs) -> rflux._types.CombinationalEquivalenceReport"
+        },
+        {
+          "kind": "callable",
+          "name": "check_bounded_sequential_equivalence",
+          "signature": "(lhs, rhs, depth: int = 2) -> rflux._types.BoundedSequentialEquivalenceReport"
+        },
+        {
+          "kind": "callable",
+          "name": "check_single_step_sequential_equivalence",
+          "signature": "(lhs, rhs) -> rflux._types.SingleStepSequentialEquivalenceReport"
+        },
+        {
+          "kind": "callable",
+          "name": "core_available",
+          "signature": "() -> bool"
+        },
+        {
+          "kind": "callable",
+          "name": "core_status",
+          "signature": "() -> rflux.CoreStatus"
+        },
+        {
+          "kind": "callable",
+          "name": "core_version",
+          "signature": "()"
+        },
+        {
+          "kind": "module",
+          "name": "flow"
+        },
+        {
+          "kind": "module",
+          "name": "pdk"
+        },
+        {
+          "kind": "module",
+          "name": "sim"
+        },
+        {
+          "kind": "module",
+          "name": "timing"
+        },
+        {
+          "kind": "callable",
+          "name": "verify_layout",
+          "signature": "(circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.VerificationReport"
+        },
+        {
+          "kind": "module",
+          "name": "verify"
+        }
+      ]
+    },
+    "rflux.flow": {
+      "exported": [
+        "DEFAULT_CLOCK_PERIOD_PS",
+        "DEFAULT_INPUT_ARRIVAL_PS",
+        "DEFAULT_MIN_HOLD_JTL_LENGTH_UM",
+        "DEFAULT_SFQ_PHASE_COUNT",
+        "DEFAULT_SFQ_PULSE_WINDOW_PS",
+        "AcBiasOptimizationReport",
+        "AcBiasReport",
+        "BalanceStrategy",
+        "BlockedRegion",
+        "CellLibraryEntry",
+        "CellLibraryMetadata",
+        "CellLibrarySummary",
+        "CompilePlan",
+        "CompileReport",
+        "CompoundCellCharacterizationReport",
+        "ConnectionSpec",
+        "FixedNodePlacement",
+        "LayoutReport",
+        "LibraryAwareAcBiasOptimizationReport",
+        "LibraryAwareDesignOptimizationReport",
+        "PinRef",
+        "SynthesisReport",
+        "analyze_ac_bias",
+        "characterize_compound_cell",
+        "compile",
+        "compile_layout",
+        "compile_netlist",
+        "compile_plan",
+        "compile_plan_report",
+        "merge_characterized_library",
+        "optimize_ac_bias",
+        "optimize_ac_bias_with_characterized_library",
+        "optimize_design_with_characterized_library"
+      ],
+      "exported_count": 33,
+      "module": "rflux.flow",
+      "symbols": [
+        {
+          "kind": "value",
+          "name": "DEFAULT_CLOCK_PERIOD_PS",
+          "type": "float"
+        },
+        {
+          "kind": "value",
+          "name": "DEFAULT_INPUT_ARRIVAL_PS",
+          "type": "float"
+        },
+        {
+          "kind": "value",
+          "name": "DEFAULT_MIN_HOLD_JTL_LENGTH_UM",
+          "type": "float"
+        },
+        {
+          "kind": "value",
+          "name": "DEFAULT_SFQ_PHASE_COUNT",
+          "type": "int"
+        },
+        {
+          "kind": "value",
+          "name": "DEFAULT_SFQ_PULSE_WINDOW_PS",
+          "type": "float"
+        },
+        {
+          "init_signature": "(baseline: 'AcBiasReport', optimized: 'AcBiasReport', baseline_prefer_ptl_from_length_um: 'float', optimized_prefer_ptl_from_length_um: 'float', threshold_candidates_evaluated: 'int', baseline_detour_margin_um: 'float', optimized_detour_margin_um: 'float', detour_margin_candidates_evaluated: 'int', optimization_applied: 'bool') -> None",
+          "kind": "class",
+          "name": "AcBiasOptimizationReport"
+        },
+        {
+          "init_signature": "(routed_nets: 'int', jtl_carrier_candidates: 'int', ptl_coupling_risk_routes: 'int', clock_sink_count: 'int', estimated_static_power_savings_uw: 'float', estimated_area_overhead_ratio: 'float', estimated_frequency_derate_ratio: 'float', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', timing_guardband_score: 'float', feasibility_score: 'float', optimization_score: 'float') -> None",
+          "kind": "class",
+          "name": "AcBiasReport"
+        },
+        {
+          "init_signature": "(*values)",
+          "kind": "class",
+          "name": "BalanceStrategy"
+        },
+        {
+          "init_signature": "(min_x_um: 'float', max_x_um: 'float', min_y_um: 'float', max_y_um: 'float') -> None",
+          "kind": "class",
+          "name": "BlockedRegion"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', area_um2: 'float', pipeline_stages: 'int', intrinsic_delay_ps: 'float', setup_ps: 'float', hold_ps: 'float', timing_source: 'str', has_characterization_metadata: 'bool') -> None",
+          "kind": "class",
+          "name": "CellLibraryEntry"
+        },
+        {
+          "init_signature": "(name: 'str', version: 'str | None', source: 'str | None') -> None",
+          "kind": "class",
+          "name": "CellLibraryMetadata"
+        },
+        {
+          "init_signature": "(cell_count: 'int', kind_count: 'int', kind_counts: 'dict[str, int]', named_timing_count: 'int', kind_timing_count: 'int', missing_timing_count: 'int', characterized_cell_count: 'int', named_timing_cells: 'list[str]', missing_timing_cells: 'list[str]', characterized_cells: 'list[str]') -> None",
+          "kind": "class",
+          "name": "CellLibrarySummary"
+        },
+        {
+          "init_signature": "(connections: 'list[ConnectionSpec]' = <factory>, balance_strategy: 'BalanceStrategy' = <BalanceStrategy.NONE: 'none'>, balancing_sources: 'list[PinRef]' = <factory>) -> None",
+          "kind": "class",
+          "name": "CompilePlan"
+        },
+        {
+          "init_signature": "(connections_applied: 'int', splitters_inserted: 'int', balancing_dffs_inserted: 'int') -> None",
+          "kind": "class",
+          "name": "CompileReport"
+        },
+        {
+          "init_signature": "(cell_name: 'str', node_count: 'int', edge_count: 'int', mapped_nodes: 'int', total_area_um2: 'float', derived_intrinsic_delay_ps: 'float', derived_setup_ps: 'float', derived_hold_ps: 'float', generated_cell_kind: 'str', generated_pipeline_stages: 'int', generated_library_json: 'str', simulated_delay_ps: 'float | None', simulation_backend: 'str', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int') -> None",
+          "kind": "class",
+          "name": "CompoundCellCharacterizationReport"
+        },
+        {
+          "init_signature": "(from_pin: 'PinRef', to_pin: 'PinRef') -> None",
+          "kind": "class",
+          "name": "ConnectionSpec"
+        },
+        {
+          "init_signature": "(node: 'int', x_um: 'float', y_um: 'float') -> None",
+          "kind": "class",
+          "name": "FixedNodePlacement"
+        },
+        {
+          "init_signature": "(connections_applied: 'int', splitters_inserted: 'int', balancing_dffs_inserted: 'int', mapped_nodes: 'int', total_area_um2: 'float', bool_opt_compatible: 'bool', placed_nodes: 'int', placement_width_um: 'float', placement_height_um: 'float', clock_sinks: 'int', clock_buffers: 'int', clock_phase_count: 'int', initial_hold_violations: 'int', final_hold_violations: 'int', hold_fix_applied: 'bool', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', critical_path_delay_ps: 'float', analyzed_timing_arcs: 'int', false_path_arcs: 'int', setup_violations: 'int', capture_window_violations: 'int', timing_closure: 'TimingClosureSummary', timing_closure_loop: 'TimingClosureLoopReport', routed_nets: 'int', total_route_length_um: 'float', initial_total_detour_overhead_um: 'float', total_detour_overhead_um: 'float', detoured_routes: 'int', detour_feedback_applied: 'bool', effective_prefer_ptl_from_length_um: 'float', effective_detour_margin_um: 'float', flow_config_patch: 'dict[str, object]', jtl_routes: 'int', ptl_routes: 'int', node_count: 'int', edge_count: 'int') -> None",
+          "kind": "class",
+          "name": "LayoutReport"
+        },
+        {
+          "init_signature": "(ac_bias: 'AcBiasOptimizationReport', baseline_constraints: 'AdvancedConstraintReport', optimized_constraints: 'AdvancedConstraintReport', characterized_cells_merged: 'int', library_optimization_score: 'float') -> None",
+          "kind": "class",
+          "name": "LibraryAwareAcBiasOptimizationReport"
+        },
+        {
+          "init_signature": "(ac_bias: 'AcBiasOptimizationReport', baseline_statistical: 'StatisticalTimingAnalysisReport', optimized_statistical: 'StatisticalTimingAnalysisReport', baseline_constraints: 'AdvancedConstraintReport', optimized_constraints: 'AdvancedConstraintReport', characterized_cells_merged: 'int', design_optimization_score: 'float', baseline_cell_delay_sigma_ratio: 'float' = 0.05, optimized_cell_delay_sigma_ratio: 'float' = 0.05, baseline_sigma_multiplier: 'float' = 3.0, optimized_sigma_multiplier: 'float' = 3.0, baseline_placement_halo_scale: 'float' = 1.0, optimized_placement_halo_scale: 'float' = 1.0, placement_candidates_evaluated: 'int' = 1, statistical_candidates_evaluated: 'int' = 1) -> None",
+          "kind": "class",
+          "name": "LibraryAwareDesignOptimizationReport"
+        },
+        {
+          "init_signature": "(node: 'int', port: 'int') -> None",
+          "kind": "class",
+          "name": "PinRef"
+        },
+        {
+          "init_signature": "(connections_applied: 'int', splitters_inserted: 'int', balancing_dffs_inserted: 'int', bool_gate_count_before: 'int', bool_gate_count_after: 'int', mapped_nodes: 'int', total_area_um2: 'float', path_balance_insertions: 'int', bool_opt_compatible: 'bool', node_count: 'int', edge_count: 'int') -> None",
+          "kind": "class",
+          "name": "SynthesisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_ac_bias",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None) -> rflux._types.AcBiasReport"
+        },
+        {
+          "kind": "callable",
+          "name": "characterize_compound_cell",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, cell_name: str = 'compound_cell', simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.CompoundCellCharacterizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "compile",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None)"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_layout",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, min_hold_jtl_length_um: float | None = None, prefer_ptl_from_length_um: float | None = None, detour_margin_um: float | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None) -> rflux._types.LayoutReport"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_netlist",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None) -> rflux._types.SynthesisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_plan",
+          "signature": "(circuit, plan: rflux._types.CompilePlan)"
+        },
+        {
+          "kind": "callable",
+          "name": "compile_plan_report",
+          "signature": "(circuit, plan: rflux._types.CompilePlan) -> rflux._types.CompileReport"
+        },
+        {
+          "kind": "callable",
+          "name": "merge_characterized_library",
+          "signature": "(serialized_entries: list[str], base_name: str = 'py-minimal-pdk') -> str"
+        },
+        {
+          "kind": "callable",
+          "name": "optimize_ac_bias",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None) -> rflux._types.AcBiasOptimizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "optimize_ac_bias_with_characterized_library",
+          "signature": "(circuit, characterized_library_entries: list[str], plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65) -> rflux._types.LibraryAwareAcBiasOptimizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "optimize_design_with_characterized_library",
+          "signature": "(circuit, characterized_library_entries: list[str], plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65, cell_delay_sigma_ratio: float = 0.05, wire_delay_sigma_ratio: float = 0.05, global_cell_delay_sigma_ratio: float = 0.0, global_wire_delay_sigma_ratio: float = 0.0, clock_uncertainty_sigma_ps: float = 0.0, cross_domain_uncertainty_sigma_ps: float = 0.0, max_delay_cross_domain_uncertainty_sigma_ps: float = 0.0, multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0, sigma_multiplier: float = 3.0) -> rflux._types.LibraryAwareDesignOptimizationReport"
+        }
+      ]
+    },
+    "rflux.pdk": {
+      "exported": [
+        "Pdk",
+        "CellLibraryEntry",
+        "CellLibraryMetadata",
+        "CellLibrarySummary"
+      ],
+      "exported_count": 4,
+      "module": "rflux.pdk",
+      "symbols": [
+        {
+          "init_signature": "(core) -> None",
+          "kind": "class",
+          "name": "Pdk"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', area_um2: 'float', pipeline_stages: 'int', intrinsic_delay_ps: 'float', setup_ps: 'float', hold_ps: 'float', timing_source: 'str', has_characterization_metadata: 'bool') -> None",
+          "kind": "class",
+          "name": "CellLibraryEntry"
+        },
+        {
+          "init_signature": "(name: 'str', version: 'str | None', source: 'str | None') -> None",
+          "kind": "class",
+          "name": "CellLibraryMetadata"
+        },
+        {
+          "init_signature": "(cell_count: 'int', kind_count: 'int', kind_counts: 'dict[str, int]', named_timing_count: 'int', kind_timing_count: 'int', missing_timing_count: 'int', characterized_cell_count: 'int', named_timing_cells: 'list[str]', missing_timing_cells: 'list[str]', characterized_cells: 'list[str]') -> None",
+          "kind": "class",
+          "name": "CellLibrarySummary"
+        }
+      ]
+    },
+    "rflux.sim": {
+      "exported": [
+        "SIMULATION_MODES",
+        "SimulationDelayDetail",
+        "SimulationEndpointRef",
+        "SimulationMeasurementDetail",
+        "SimulationMeasurementWarning",
+        "SimulationReport",
+        "SimulationViolationDetail",
+        "simulate_file",
+        "simulate_text"
+      ],
+      "exported_count": 9,
+      "module": "rflux.sim",
+      "symbols": [
+        {
+          "kind": "value",
+          "name": "SIMULATION_MODES",
+          "type": "tuple"
+        },
+        {
+          "init_signature": "(name: 'str', delay_ps: 'float', from_ref: 'SimulationEndpointRef | None' = None, to_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationDelayDetail"
+        },
+        {
+          "init_signature": "(raw: 'str', node: 'str', port: 'int | None') -> None",
+          "kind": "class",
+          "name": "SimulationEndpointRef"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', measured_value: 'float', at_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationMeasurementDetail"
+        },
+        {
+          "init_signature": "(name: 'str', kind: 'str', reason: 'str', at_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationMeasurementWarning"
+        },
+        {
+          "init_signature": "(backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "kind": "class",
+          "name": "SimulationReport"
+        },
+        {
+          "init_signature": "(kind: 'str', detail: 'str', at_ref: 'SimulationEndpointRef | None' = None) -> None",
+          "kind": "class",
+          "name": "SimulationViolationDetail"
+        },
+        {
+          "kind": "callable",
+          "name": "simulate_file",
+          "signature": "(file_path: str | pathlib.Path, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.SimulationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "simulate_text",
+          "signature": "(deck_text: str, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.SimulationReport"
+        }
+      ]
+    },
+    "rflux.timing": {
+      "exported": [
+        "AdvancedConstraintReport",
+        "AdvancedConstraintViolation",
+        "ClockDomainConstraint",
+        "CrossingConstraint",
+        "MultiCornerTimingAnalysisReport",
+        "NodeTimingConstraint",
+        "PinRef",
+        "PinTimingConstraint",
+        "StatisticalTimingAnalysisReport",
+        "StatisticalTimingArcReport",
+        "TimingAnalysisReport",
+        "TimingArcReport",
+        "TimingClosureAction",
+        "TimingClosureLoopReport",
+        "TimingClosureSummary",
+        "TimingCornerAnalysisReport",
+        "analyze_advanced_constraints",
+        "analyze_timing",
+        "analyze_timing_corners",
+        "analyze_timing_statistical"
+      ],
+      "exported_count": 20,
+      "module": "rflux.timing",
+      "symbols": [
+        {
+          "init_signature": "(estimated_thermal_load_uw: 'float', estimated_mechanical_stress_score: 'float', jtl_density_per_100um: 'float', detour_overhead_ratio: 'float', ptl_coupling_ratio: 'float', manufacturing_hotspots: 'int', violation_count: 'int', violations: 'list[AdvancedConstraintViolation]') -> None",
+          "kind": "class",
+          "name": "AdvancedConstraintReport"
+        },
+        {
+          "init_signature": "(category: 'str', detail: 'str', measured_value: 'float', limit_value: 'float') -> None",
+          "kind": "class",
+          "name": "AdvancedConstraintViolation"
+        },
+        {
+          "init_signature": "(id: 'int', period_ps: 'float') -> None",
+          "kind": "class",
+          "name": "ClockDomainConstraint"
+        },
+        {
+          "init_signature": "(from_domain: 'int', to_domain: 'int', kind: 'str', value_ps: 'float | None' = None, cycles: 'int | None' = None) -> None",
+          "kind": "class",
+          "name": "CrossingConstraint"
+        },
+        {
+          "init_signature": "(active_timing_corner: 'str | None', corner_count: 'int', worst_setup_corner: 'str', worst_hold_corner: 'str', worst_critical_path_corner: 'str', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', worst_critical_path_delay_ps: 'float', corners: 'list[TimingCornerAnalysisReport]') -> None",
+          "kind": "class",
+          "name": "MultiCornerTimingAnalysisReport"
+        },
+        {
+          "init_signature": "(node: 'int', input_arrival_ps: 'float | None' = None, required_ps: 'float | None' = None, clock_domain: 'int | None' = None) -> None",
+          "kind": "class",
+          "name": "NodeTimingConstraint"
+        },
+        {
+          "init_signature": "(node: 'int', port: 'int') -> None",
+          "kind": "class",
+          "name": "PinRef"
+        },
+        {
+          "init_signature": "(pin: 'PinRef', input_arrival_ps: 'float | None' = None, required_ps: 'float | None' = None, clock_domain: 'int | None' = None) -> None",
+          "kind": "class",
+          "name": "PinTimingConstraint"
+        },
+        {
+          "init_signature": "(worst_pessimistic_setup_slack_ps: 'float', worst_pessimistic_hold_slack_ps: 'float', analyzed_timing_arcs: 'int', false_path_arcs: 'int', setup_risk_violations: 'int', hold_risk_violations: 'int', sigma_multiplier: 'float', timing_arcs: 'list[StatisticalTimingArcReport]') -> None",
+          "kind": "class",
+          "name": "StatisticalTimingAnalysisReport"
+        },
+        {
+          "init_signature": "(from_pin: 'PinRef', to_pin: 'PinRef', is_false_path: 'bool', route_mode: 'str', route_length_um: 'float', from_domain: 'int | None', to_domain: 'int | None', launch_phase: 'int', capture_phase: 'int', launch_window_start_ps: 'float', launch_window_end_ps: 'float', capture_window_start_ps: 'float', capture_window_end_ps: 'float', arrival_phase_offset_ps: 'float', capture_window_slack_ps: 'float', capture_window_violation: 'bool', mean_arrival_ps: 'float', mean_required_ps: 'float', setup_slack_ps: 'float', hold_slack_ps: 'float', setup_sigma_ps: 'float', hold_sigma_ps: 'float', pessimistic_setup_slack_ps: 'float', pessimistic_hold_slack_ps: 'float') -> None",
+          "kind": "class",
+          "name": "StatisticalTimingArcReport"
+        },
+        {
+          "init_signature": "(worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', critical_path_delay_ps: 'float', analyzed_timing_arcs: 'int', false_path_arcs: 'int', setup_violations: 'int', hold_violations: 'int', capture_window_violations: 'int', detour_feedback_applied: 'bool', hold_fix_applied: 'bool', closure: 'TimingClosureSummary', timing_arcs: 'list[TimingArcReport]') -> None",
+          "kind": "class",
+          "name": "TimingAnalysisReport"
+        },
+        {
+          "init_signature": "(from_pin: 'PinRef', to_pin: 'PinRef', is_false_path: 'bool', route_mode: 'str', route_length_um: 'float', from_domain: 'int | None', to_domain: 'int | None', launch_phase: 'int', capture_phase: 'int', launch_window_start_ps: 'float', launch_window_end_ps: 'float', capture_window_start_ps: 'float', capture_window_end_ps: 'float', arrival_phase_offset_ps: 'float', capture_window_slack_ps: 'float', capture_window_violation: 'bool', arrival_ps: 'float', required_ps: 'float', setup_slack_ps: 'float', hold_slack_ps: 'float') -> None",
+          "kind": "class",
+          "name": "TimingArcReport"
+        },
+        {
+          "init_signature": "(check: 'str', priority: 'int', remediation_kind: 'str', from_pin: 'PinRef', to_pin: 'PinRef', slack_ps: 'float', route_mode: 'str', route_length_um: 'float', from_domain: 'int | None', to_domain: 'int | None') -> None",
+          "kind": "class",
+          "name": "TimingClosureAction"
+        },
+        {
+          "init_signature": "(detour_feedback_attempted: 'bool', detour_feedback_applied: 'bool', initial_total_detour_overhead_um: 'float', final_total_detour_overhead_um: 'float', route_delay_optimization_attempted: 'bool', route_delay_optimization_applied: 'bool', reduce_route_delay_candidate_available: 'bool', recommended_prefer_ptl_from_length_um: 'float | None', recommended_detour_margin_um: 'float | None', recommended_route_mode: 'str | None', estimated_route_length_um: 'float | None', estimated_slack_deficit_ps: 'float | None', reduce_route_delay_candidate_attempted: 'bool', reduce_route_delay_candidate_improved: 'bool', candidate_worst_setup_slack_ps: 'float | None', candidate_setup_violations: 'int | None', candidate_hold_violations: 'int | None', candidate_route_mode: 'str | None', candidate_route_length_um: 'float | None', hold_fix_attempted: 'bool', hold_fix_applied: 'bool', initial_hold_violations: 'int', final_hold_violations: 'int', status: 'str', next_step: 'str') -> None",
+          "kind": "class",
+          "name": "TimingClosureLoopReport"
+        },
+        {
+          "init_signature": "(closed: 'bool', status: 'str', setup_closed: 'bool', hold_closed: 'bool', capture_window_closed: 'bool', setup_violations: 'int', hold_violations: 'int', capture_window_violations: 'int', failing_checks: 'list[str]', action_count: 'int', primary_action: 'TimingClosureAction | None', reduce_route_delay_actions: 'int', relax_constraint_or_improve_library_timing_actions: 'int', add_hold_padding_actions: 'int', adjust_sfq_phase_or_pulse_window_actions: 'int', actions: 'list[TimingClosureAction]', next_step: 'str') -> None",
+          "kind": "class",
+          "name": "TimingClosureSummary"
+        },
+        {
+          "init_signature": "(corner_name: 'str', is_default_corner: 'bool', is_active_corner: 'bool', worst_setup_slack_ps: 'float', worst_hold_slack_ps: 'float', critical_path_delay_ps: 'float', analyzed_timing_arcs: 'int', setup_violations: 'int', hold_violations: 'int', capture_window_violations: 'int', closure: 'TimingClosureSummary') -> None",
+          "kind": "class",
+          "name": "TimingCornerAnalysisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_advanced_constraints",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65) -> rflux._types.AdvancedConstraintReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_timing",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None) -> rflux._types.TimingAnalysisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_timing_corners",
+          "signature": "(circuit, pdk: rflux.pdk.Pdk, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None) -> rflux._types.MultiCornerTimingAnalysisReport"
+        },
+        {
+          "kind": "callable",
+          "name": "analyze_timing_statistical",
+          "signature": "(circuit, plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list[rflux._types.ClockDomainConstraint] | None = None, crossing_constraints: list[rflux._types.CrossingConstraint] | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None, cell_delay_sigma_ratio: float = 0.05, wire_delay_sigma_ratio: float = 0.05, global_cell_delay_sigma_ratio: float = 0.0, global_wire_delay_sigma_ratio: float = 0.0, clock_uncertainty_sigma_ps: float = 0.0, cross_domain_uncertainty_sigma_ps: float = 0.0, max_delay_cross_domain_uncertainty_sigma_ps: float = 0.0, multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0, sigma_multiplier: float = 3.0) -> rflux._types.StatisticalTimingAnalysisReport"
+        }
+      ]
+    },
+    "rflux.verify": {
+      "exported": [
+        "BoundedSequentialEquivalenceReport",
+        "BoundedSequentialEquivalenceStepReport",
+        "CombinationalEquivalenceReport",
+        "OutputMismatch",
+        "SingleStepSequentialEquivalenceReport",
+        "StateTransitionMismatch",
+        "VerificationReport",
+        "check_bounded_sequential_equivalence",
+        "check_equivalence",
+        "check_single_step_sequential_equivalence",
+        "verify_layout"
+      ],
+      "exported_count": 11,
+      "module": "rflux.verify",
+      "symbols": [
+        {
+          "init_signature": "(equivalent: 'bool', depth: 'int', checked_steps: 'int', unroll_mode: 'str', checked_outputs: 'list[str]', checked_states: 'list[str]', first_failing_step: 'int | None', steps: 'list[BoundedSequentialEquivalenceStepReport]', sat_recursive_calls: 'int', sat_decisions: 'int', sat_backtracks: 'int', sat_restarts: 'int', sat_elapsed_ns: 'int') -> None",
+          "kind": "class",
+          "name": "BoundedSequentialEquivalenceReport"
+        },
+        {
+          "init_signature": "(step: 'int', report: 'SingleStepSequentialEquivalenceReport') -> None",
+          "kind": "class",
+          "name": "BoundedSequentialEquivalenceStepReport"
+        },
+        {
+          "init_signature": "(equivalent: 'bool', checked_outputs: 'list[str]', counterexample_inputs: 'dict[str, bool]', counterexample_outputs: 'dict[str, OutputMismatch]', sat_recursive_calls: 'int', sat_decisions: 'int', sat_backtracks: 'int', sat_restarts: 'int', sat_elapsed_ns: 'int') -> None",
+          "kind": "class",
+          "name": "CombinationalEquivalenceReport"
+        },
+        {
+          "init_signature": "(lhs: 'bool', rhs: 'bool') -> None",
+          "kind": "class",
+          "name": "OutputMismatch"
+        },
+        {
+          "init_signature": "(equivalent: 'bool', checked_outputs: 'list[str]', checked_states: 'list[str]', counterexample_inputs: 'dict[str, bool]', counterexample_present_states: 'dict[str, bool]', counterexample_outputs: 'dict[str, OutputMismatch]', counterexample_states: 'dict[str, StateTransitionMismatch]', sat_recursive_calls: 'int', sat_decisions: 'int', sat_backtracks: 'int', sat_restarts: 'int', sat_elapsed_ns: 'int') -> None",
+          "kind": "class",
+          "name": "SingleStepSequentialEquivalenceReport"
+        },
+        {
+          "init_signature": "(lhs_next: 'bool', rhs_next: 'bool', lhs_clock: 'bool', rhs_clock: 'bool') -> None",
+          "kind": "class",
+          "name": "StateTransitionMismatch"
+        },
+        {
+          "init_signature": "(checked_routes: 'int', checked_ptl_routes: 'int', structural_violations: 'int', ptl_macro_boundary_violations: 'int', ptl_forbidden_length_violations: 'int', simulation_backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "kind": "class",
+          "name": "VerificationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "check_bounded_sequential_equivalence",
+          "signature": "(lhs, rhs, depth: int = 2) -> rflux._types.BoundedSequentialEquivalenceReport"
+        },
+        {
+          "kind": "callable",
+          "name": "check_equivalence",
+          "signature": "(lhs, rhs) -> rflux._types.CombinationalEquivalenceReport"
+        },
+        {
+          "kind": "callable",
+          "name": "check_single_step_sequential_equivalence",
+          "signature": "(lhs, rhs) -> rflux._types.SingleStepSequentialEquivalenceReport"
+        },
+        {
+          "kind": "callable",
+          "name": "verify_layout",
+          "signature": "(circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.VerificationReport"
+        }
+      ]
+    }
+  },
+  "schema_version": 1
+}

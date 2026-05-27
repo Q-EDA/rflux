@@ -107,6 +107,30 @@ jobs:
         run: |
           uv run pytest python/tests/test_prepare_release_artifacts.py -q
 
+      - name: Python API surface contract smoke
+        run: |
+          uv run pytest python/tests/test_python_api_surface_contract.py -q
+
+      - name: Python API surface contract gate
+        run: |
+          uv run python python/scripts/export_python_api_surface.py --check
+
+      - name: CLI command surface contract smoke
+        run: |
+          uv run pytest python/tests/test_cli_command_surface_contract.py -q
+
+      - name: CLI command surface contract gate
+        run: |
+          uv run python python/scripts/export_cli_command_surface.py --check
+
+      - name: Report schema surface contract smoke
+        run: |
+          uv run pytest python/tests/test_report_schema_surface_contract.py -q
+
+      - name: Report schema surface contract gate
+        run: |
+          uv run python python/scripts/export_report_schema_surface.py --check
+
       - name: Upload SAT and synth metric artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -115,6 +139,27 @@ jobs:
           path: |
             target/dimacs_sat_metrics.csv
             target/quaigh_fixture_sat_metrics.csv
+
+  core-smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: CLI minimal chain smoke on Windows
+        shell: pwsh
+        run: |
+          $env:PYO3_PYTHON = (uv python find).Trim()
+          cargo test -p rflux-cli run_lint_input_reports_versioned_ir_contract -- --nocapture
+          cargo test -p rflux-cli run_with_diagnostics_executes_compile_netlist_and_writes_bundle -- --nocapture
+          cargo test -p rflux-cli run_check_equivalence_accepts_checked_in_sequential_bench_fixtures -- --nocapture
+
+      - name: Python minimal chain smoke on Windows
+        run: |
+          uv run pytest python/tests/test_basic.py -k "python_package_version or structured_submodules_reexport_top_level_api or simulate_file_accepts_path_objects" -q
 
   waveform-compare-gate:
     runs-on: windows-latest

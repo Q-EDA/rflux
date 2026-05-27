@@ -1,0 +1,74 @@
+{
+  "cli": {
+    "report_kind_count": 22,
+    "report_kinds": [
+      "bounded_sequential",
+      "combinational",
+      "compile_layout",
+      "compile_netlist",
+      "demo",
+      "diagnostics_bundle",
+      "dimacs_sat",
+      "false-path",
+      "false_path",
+      "find",
+      "lint_input",
+      "lint_timing_constraints",
+      "pdk_cell_library",
+      "pdk_validation",
+      "rflux_ir_netlist",
+      "rflux_pdk",
+      "rms",
+      "setup",
+      "simulate_file",
+      "single_step_sequential",
+      "timing_analysis",
+      "verify_layout"
+    ],
+    "schema_version_constant": 1,
+    "source": "crates/cli/src/main.rs"
+  },
+  "kind": "report_schema_surface",
+  "python_artifact_manifests": {
+    "manifest_count": 7,
+    "manifests": [
+      {
+        "kind": "cli_command_surface",
+        "schema_version": 1,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/export_cli_command_surface.py"
+      },
+      {
+        "kind": "module",
+        "schema_version": 1,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/export_python_api_surface.py"
+      },
+      {
+        "kind": "report_schema_surface",
+        "schema_version": 1,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/export_report_schema_surface.py"
+      },
+      {
+        "kind": "external-warning-artifacts",
+        "schema_version": 1,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/prepare_external_warning_artifacts.py"
+      },
+      {
+        "kind": "release-candidate-artifacts",
+        "schema_version": 1,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/prepare_release_artifacts.py"
+      },
+      {
+        "kind": "security-compliance-artifacts",
+        "schema_version": 1,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/prepare_security_compliance_artifacts.py"
+      },
+      {
+        "kind": "waveform-compare-artifacts",
+        "schema_version": 8,
+        "script": "C:/Users/lilu/works/rflux/python/scripts/prepare_waveform_compare_artifacts.py"
+      }
+    ],
+    "scripts_dir": "python/scripts"
+  },
+  "schema_version": 1
+}

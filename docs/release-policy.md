@@ -125,6 +125,9 @@
 - 变更有对应测试或文档说明。
 - 发布说明已生成。
 - 已知限制已更新。
+- CLI 公共命令/参数变更必须附带 `python/tests/contracts/cli_command_surface.json` 契约基线差异结论；若更新基线，必须在发布说明中记录新增/删除/参数变化并说明兼容影响。
+- Python facade 公共接口变更必须附带 `python/tests/contracts/python_api_surface.json` 契约基线差异结论；若更新基线，必须在发布说明中记录新增/删除/签名变化并说明兼容影响。
+- JSON report kind/schema surface 变更必须附带 `python/tests/contracts/report_schema_surface.json` 契约基线差异结论；若更新基线，必须在发布说明中记录新增/删除/版本变化并说明兼容影响。
 - 若发布涉及 PDK schema、PDK 默认行为或新接入 PDK，必须附带 `pdk-validate` 结果或等价结构校验记录。
 - 主 CI 与进入发布评审的可选 workflow 必须复用仓库内共享的环境 bootstrap 路径，避免 Rust/Python/uv 初始化在不同 job 之间发生未审查漂移。
 
@@ -214,7 +217,24 @@
 7. 文档、示例或发布门禁中出现的新命令，必须落到已有 CI smoke job 或新增受控 workflow step，不能只停留在说明文字里。
 8. 候选发布产物当前应通过手动触发的 `release-artifacts-optional` workflow job 生成，统一产出当前 runner 上的 CLI 候选二进制、Python wheel、构建输入副本和 manifest，而不是临时手工拼接命令。
 9. 候选发布产物评审应按 [release-artifact-readiness-checklist.md](./release-artifact-readiness-checklist.md) 留存 go / no-go 记录。
+10. 触及 Python facade 公共接口的候选版本，评审前必须运行 `uv run python python/scripts/export_python_api_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
+11. 触及 CLI 命令/参数面的候选版本，评审前必须运行 `uv run python python/scripts/export_cli_command_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
+12. 触及 JSON report kind/schema surface 的候选版本，评审前必须运行 `uv run python python/scripts/export_report_schema_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 
 当前候选发布构建也已有显式 CI smoke anchor：
 
 - `uv run pytest python/tests/test_prepare_release_artifacts.py -q`
+- `uv run pytest python/tests/test_python_api_surface_contract.py -q`
+- `uv run pytest python/tests/test_cli_command_surface_contract.py -q`
+- `uv run pytest python/tests/test_report_schema_surface_contract.py -q`
+
+当前跨平台最小质量门也已有显式 CI smoke anchor：
+
+- Ubuntu 默认主检查 job：`checks`
+- Windows 核心 smoke job：`core-smoke-windows`
+- Windows CLI 最小链路锚点：
+  - `cargo test -p rflux-cli run_lint_input_reports_versioned_ir_contract -- --nocapture`
+  - `cargo test -p rflux-cli run_with_diagnostics_executes_compile_netlist_and_writes_bundle -- --nocapture`
+  - `cargo test -p rflux-cli run_check_equivalence_accepts_checked_in_sequential_bench_fixtures -- --nocapture`
+- Windows Python 最小链路锚点：
+  - `uv run pytest python/tests/test_basic.py -k "python_package_version or structured_submodules_reexport_top_level_api or simulate_file_accepts_path_objects" -q`
