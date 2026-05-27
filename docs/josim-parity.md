@@ -143,7 +143,8 @@ Linux gate path (workflow_dispatch):
 
 1. Run workflow `CI` with input `run_waveform_compare_linux=true`.
 2. Provide `josim_command_linux` pointing to a Linux-available JoSIM binary/command.
-3. Optional: provide `previous_summary_json_linux` and set `validate_no_regression_linux=true` after Linux approved baseline is promoted.
+3. The Linux gate now defaults `validate_no_regression_linux=true`; during first bootstrap runs, if no explicit baseline and no repo-tracked Linux approved baseline exist yet, the workflow auto-downgrades no-regression for that run and emits a notice.
+4. Optional: provide `previous_summary_json_linux` to force a specific history baseline source.
 4. Review artifact `waveform-compare-results-linux` and, for green runs, promote `waveform_compare_summary.candidate-baseline.{json,md}` via `python/scripts/promote_waveform_approved_baseline.py --platform linux`.
 
 The summary helper path also has an explicit CI smoke anchor now instead of relying only on the broad Python suite:

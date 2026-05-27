@@ -58,7 +58,7 @@ on:
       validate_no_regression_linux:
         description: "Fail Linux waveform gate when current summary regresses relative to baseline"
         required: false
-        default: false
+        default: true
         type: boolean
       regression_tolerance_v_linux:
         description: "Allowed positive worst_max_abs_v drift for Linux waveform no-regression checks"
@@ -397,10 +397,22 @@ jobs:
             echo "error=josim_command_linux is required for Linux waveform gate" >&2
             exit 1
           fi
+
+          previous_summary="${{ inputs.previous_summary_json_linux }}"
+          validate_no_regression="${{ inputs.validate_no_regression_linux }}"
+          repo_linux_baseline="python/tests/benchmarks/phase6/waveform_compare_summary.linux-approved-baseline.json"
+
+          # Keep strict mode as default, but auto-downgrade on first Linux bootstrap runs
+          # when no explicit or repo-tracked baseline exists yet.
+          if [ "$validate_no_regression" = "true" ] && [ -z "$previous_summary" ] && [ ! -f "$repo_linux_baseline" ]; then
+            echo "notice=Linux no-regression auto-disabled because no baseline is available yet" >&2
+            validate_no_regression="false"
+          fi
+
           echo "RFLOW_JOSIM_COMMAND=${{ inputs.josim_command_linux }}" >> "$GITHUB_ENV"
-          echo "RFLOW_PREVIOUS_SUMMARY_JSON=${{ inputs.previous_summary_json_linux }}" >> "$GITHUB_ENV"
+          echo "RFLOW_PREVIOUS_SUMMARY_JSON=$previous_summary" >> "$GITHUB_ENV"
           echo "RFLOW_BASELINE_PLATFORM=linux" >> "$GITHUB_ENV"
-          echo "RFLOW_VALIDATE_NO_REGRESSION=${{ inputs.validate_no_regression_linux }}" >> "$GITHUB_ENV"
+          echo "RFLOW_VALIDATE_NO_REGRESSION=$validate_no_regression" >> "$GITHUB_ENV"
           echo "RFLOW_REGRESSION_TOLERANCE_V=${{ inputs.regression_tolerance_v_linux }}" >> "$GITHUB_ENV"
 
       - name: Build Python extension
