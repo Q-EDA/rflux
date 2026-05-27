@@ -63,3 +63,7 @@ Interpretation:
 1. For each changed item, update status evidence in PR description with item ID.
 2. If a `must` item is intentionally waived, document reason and owner in release review record.
 3. Recompute domain and total scores at least once per week.
+
+Weekly report template:
+
+- `docs/alignment-scorecard-weekly-template.md`
