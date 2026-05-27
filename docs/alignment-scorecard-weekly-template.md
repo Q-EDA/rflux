@@ -73,3 +73,4 @@ Action 3:
 - Scorecard: `docs/alignment-scorecard.md`
 - Full plan: `docs/full-alignment-plan.md`
 - PR template: `.github/PULL_REQUEST_TEMPLATE.md`
+- Baseline status artifact: `waveform-baseline-status/linux.json` and `waveform-baseline-status/windows.json`

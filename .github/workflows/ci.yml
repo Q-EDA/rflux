@@ -122,6 +122,11 @@ jobs:
         run: |
           uv run pytest python/tests/test_check_waveform_baseline_status.py -q
 
+      - name: Snapshot waveform baseline readiness status
+        run: |
+          uv run python python/scripts/check_waveform_baseline_status.py --platform windows --json-output target/waveform-baseline-status/windows.json
+          uv run python python/scripts/check_waveform_baseline_status.py --platform linux --json-output target/waveform-baseline-status/linux.json
+
       - name: External warning helper smoke
         run: |
           uv run pytest python/tests/test_external_warning_manifest_runner.py -q
@@ -226,6 +231,15 @@ jobs:
           path: |
             target/dimacs_sat_metrics.csv
             target/quaigh_fixture_sat_metrics.csv
+
+      - name: Upload waveform baseline status snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveform-baseline-status
+          if-no-files-found: error
+          path: |
+            target/waveform-baseline-status/windows.json
+            target/waveform-baseline-status/linux.json
 
   core-smoke-windows:
     runs-on: windows-latest
@@ -474,6 +488,11 @@ jobs:
           fi
           uv run python "${artifact_args[@]}"
 
+      - name: Snapshot Linux baseline readiness status
+        shell: bash
+        run: |
+          uv run python python/scripts/check_waveform_baseline_status.py --platform linux --json-output target/waveform-compare-linux/linux-baseline-status.json
+
       - name: Prepare Linux external warning review artifacts
         shell: bash
         run: |
@@ -500,6 +519,7 @@ jobs:
             target/external-warning-review-linux/selected_external_warning_contracts.json
             target/external-warning-review-linux/manifest.json
             target/external-warning-review-linux/README.txt
+            target/waveform-compare-linux/linux-baseline-status.json
             python/tests/benchmarks/phase6/waveform_thresholds.json
 
   security-compliance-optional:
