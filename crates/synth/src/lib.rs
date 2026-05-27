@@ -19,7 +19,9 @@ pub enum SynthError {
     UnsupportedBoolOptNodeKind(NodeKind),
     #[error("boolean optimization requires a driving source for node {0}")]
     MissingBoolOptDriver(usize),
-    #[error("boolean optimization expected node {node} to have {expected} input(s), found {actual}")]
+    #[error(
+        "boolean optimization expected node {node} to have {expected} input(s), found {actual}"
+    )]
     UnexpectedBoolOptInputCount {
         node: usize,
         expected: usize,
@@ -32,10 +34,7 @@ pub enum SynthError {
     #[error("sat interface mismatch: {0}")]
     SatInterfaceMismatch(String),
     #[error("sat check does not support node {node} kind {kind:?}")]
-    SatUnsupportedNodeKind {
-        node: usize,
-        kind: NodeKind,
-    },
+    SatUnsupportedNodeKind { node: usize, kind: NodeKind },
     #[error("sat check expected node {node} to have {expected} input(s), found {actual}")]
     SatUnexpectedInputCount {
         node: usize,
@@ -326,9 +325,9 @@ impl<'a> TechMapper<'a> {
                     .find_by_name(&node.name)
                     .or_else(|| self.pdk.cell_library.find_by_kind(kind))
                     .map(|cell| TechMappedNode {
-                    node_name: &node.name,
-                    cell,
-                })
+                        node_name: &node.name,
+                        cell,
+                    })
             })
             .collect()
     }
@@ -353,7 +352,12 @@ impl Compiler {
         Self::default()
     }
 
-    pub fn compile(&mut self, netlist: &mut Netlist, from: PinRef, to: PinRef) -> Result<(), SynthError> {
+    pub fn compile(
+        &mut self,
+        netlist: &mut Netlist,
+        from: PinRef,
+        to: PinRef,
+    ) -> Result<(), SynthError> {
         self.connect_with_splitter(netlist, from, to).map(|_| ())
     }
 
@@ -365,7 +369,8 @@ impl Compiler {
         let mut report = CompileReport::default();
 
         for connection in &plan.connections {
-            let inserted_splitter = self.connect_with_splitter(netlist, connection.from, connection.to)?;
+            let inserted_splitter =
+                self.connect_with_splitter(netlist, connection.from, connection.to)?;
             report.connections_applied += 1;
             if inserted_splitter {
                 report.splitters_inserted += 1;
@@ -495,7 +500,10 @@ impl Compiler {
         Ok(inserted)
     }
 
-    pub fn analyze_path_balancing(&self, netlist: &Netlist) -> Result<PathBalanceReport, SynthError> {
+    pub fn analyze_path_balancing(
+        &self,
+        netlist: &Netlist,
+    ) -> Result<PathBalanceReport, SynthError> {
         let levels = self.compute_node_levels(netlist)?;
         let mut incoming_by_sink: std::collections::BTreeMap<usize, Vec<(PinRef, usize)>> =
             std::collections::BTreeMap::new();
@@ -615,7 +623,7 @@ impl Compiler {
                     counterexample_outputs: Some(output_mismatch),
                     sat_stats: aggregated_stats,
                     sat_elapsed_ns: aggregated_elapsed_ns,
-                })
+                });
             } else {
                 continue;
             }
@@ -669,21 +677,21 @@ impl Compiler {
 
                 let mut present_state_assignment = BTreeMap::new();
                 for (name, var) in &problem.shared_state_vars {
-                    present_state_assignment.insert(name.clone(), model.value(*var).unwrap_or(false));
+                    present_state_assignment
+                        .insert(name.clone(), model.value(*var).unwrap_or(false));
                 }
 
                 let mut output_mismatch = BTreeMap::new();
-                for (name, lhs_var, rhs_var) in problem
-                    .lhs_outputs
-                    .iter()
-                    .map(|(name, lhs_var)| {
-                        (
-                            name.clone(),
-                            *lhs_var,
-                            *problem.rhs_outputs.get(name).expect("rhs output must exist"),
-                        )
-                    })
-                {
+                for (name, lhs_var, rhs_var) in problem.lhs_outputs.iter().map(|(name, lhs_var)| {
+                    (
+                        name.clone(),
+                        *lhs_var,
+                        *problem
+                            .rhs_outputs
+                            .get(name)
+                            .expect("rhs output must exist"),
+                    )
+                }) {
                     output_mismatch.insert(
                         name,
                         SatOutputMismatch {
@@ -694,13 +702,15 @@ impl Compiler {
                 }
 
                 let mut state_mismatch = BTreeMap::new();
-                for (name, lhs_state, rhs_state) in problem.lhs_states.iter().map(|(name, lhs_state)| {
-                    (
-                        name.clone(),
-                        lhs_state,
-                        problem.rhs_states.get(name).expect("rhs state must exist"),
-                    )
-                }) {
+                for (name, lhs_state, rhs_state) in
+                    problem.lhs_states.iter().map(|(name, lhs_state)| {
+                        (
+                            name.clone(),
+                            lhs_state,
+                            problem.rhs_states.get(name).expect("rhs state must exist"),
+                        )
+                    })
+                {
                     state_mismatch.insert(
                         name,
                         SatStateTransitionMismatch {
@@ -1046,8 +1056,14 @@ fn build_sequential_equivalence_problem_data(
     let mut checks = Vec::<EquivalenceCheckTarget>::new();
 
     for output in lhs_encoded.outputs.keys() {
-        let lhs_var = *lhs_encoded.outputs.get(output).expect("lhs output key must exist");
-        let rhs_var = *rhs_encoded.outputs.get(output).expect("rhs output key must exist");
+        let lhs_var = *lhs_encoded
+            .outputs
+            .get(output)
+            .expect("lhs output key must exist");
+        let rhs_var = *rhs_encoded
+            .outputs
+            .get(output)
+            .expect("rhs output key must exist");
         let diff_var = formula.add_var();
         encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
         checks.push(EquivalenceCheckTarget {
@@ -1058,14 +1074,34 @@ fn build_sequential_equivalence_problem_data(
     }
 
     for state_name in lhs_encoded.states.keys() {
-        let lhs_state = lhs_encoded.states.get(state_name).expect("lhs state must exist");
-        let rhs_state = rhs_encoded.states.get(state_name).expect("rhs state must exist");
+        let lhs_state = lhs_encoded
+            .states
+            .get(state_name)
+            .expect("lhs state must exist");
+        let rhs_state = rhs_encoded
+            .states
+            .get(state_name)
+            .expect("rhs state must exist");
         let next_diff_var = formula.add_var();
-        encode_xor_eq(&mut formula, next_diff_var, lhs_state.next_var, rhs_state.next_var)?;
+        encode_xor_eq(
+            &mut formula,
+            next_diff_var,
+            lhs_state.next_var,
+            rhs_state.next_var,
+        )?;
         let clock_diff_var = formula.add_var();
-        encode_xor_eq(&mut formula, clock_diff_var, lhs_state.clock_var, rhs_state.clock_var)?;
+        encode_xor_eq(
+            &mut formula,
+            clock_diff_var,
+            lhs_state.clock_var,
+            rhs_state.clock_var,
+        )?;
         let state_diff_var = formula.add_var();
-        encode_or_eq(&mut formula, state_diff_var, &[next_diff_var, clock_diff_var])?;
+        encode_or_eq(
+            &mut formula,
+            state_diff_var,
+            &[next_diff_var, clock_diff_var],
+        )?;
         checks.push(EquivalenceCheckTarget {
             kind: EquivalenceCheckKind::State,
             name: state_name.clone(),
@@ -1154,8 +1190,14 @@ fn build_bounded_sequential_equivalence_problem_data(
         }
 
         for output in lhs_encoded.outputs.keys() {
-            let lhs_var = *lhs_encoded.outputs.get(output).expect("lhs output key must exist");
-            let rhs_var = *rhs_encoded.outputs.get(output).expect("rhs output key must exist");
+            let lhs_var = *lhs_encoded
+                .outputs
+                .get(output)
+                .expect("lhs output key must exist");
+            let rhs_var = *rhs_encoded
+                .outputs
+                .get(output)
+                .expect("rhs output key must exist");
             let diff_var = formula.add_var();
             encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
             checks.push(BoundedSequentialCheck {
@@ -1167,14 +1209,34 @@ fn build_bounded_sequential_equivalence_problem_data(
         }
 
         for state_name in lhs_encoded.states.keys() {
-            let lhs_state = lhs_encoded.states.get(state_name).expect("lhs state must exist");
-            let rhs_state = rhs_encoded.states.get(state_name).expect("rhs state must exist");
+            let lhs_state = lhs_encoded
+                .states
+                .get(state_name)
+                .expect("lhs state must exist");
+            let rhs_state = rhs_encoded
+                .states
+                .get(state_name)
+                .expect("rhs state must exist");
             let next_diff_var = formula.add_var();
-            encode_xor_eq(&mut formula, next_diff_var, lhs_state.next_var, rhs_state.next_var)?;
+            encode_xor_eq(
+                &mut formula,
+                next_diff_var,
+                lhs_state.next_var,
+                rhs_state.next_var,
+            )?;
             let clock_diff_var = formula.add_var();
-            encode_xor_eq(&mut formula, clock_diff_var, lhs_state.clock_var, rhs_state.clock_var)?;
+            encode_xor_eq(
+                &mut formula,
+                clock_diff_var,
+                lhs_state.clock_var,
+                rhs_state.clock_var,
+            )?;
             let state_diff_var = formula.add_var();
-            encode_or_eq(&mut formula, state_diff_var, &[next_diff_var, clock_diff_var])?;
+            encode_or_eq(
+                &mut formula,
+                state_diff_var,
+                &[next_diff_var, clock_diff_var],
+            )?;
             checks.push(BoundedSequentialCheck {
                 step,
                 diff_var: state_diff_var,
@@ -1330,19 +1392,35 @@ fn encode_netlist_for_sequential_sat(
         let present_var = node_var[node.id.0].expect("dff present state var must exist");
         let (next_var, clock_var) = match node.logic_op {
             Some(rflux_ir::LogicOp::DffEnable) => {
-                if incoming.len() != 3 || incoming[0].0 != 0 || incoming[1].0 != 1 || incoming[2].0 != 2 {
+                if incoming.len() != 3
+                    || incoming[0].0 != 0
+                    || incoming[1].0 != 1
+                    || incoming[2].0 != 2
+                {
                     return Err(SynthError::SatUnexpectedInputCount {
                         node: node.id.0,
                         expected: 3,
                         actual: incoming.len(),
                     });
                 }
-                let data_var = node_var[incoming[0].1.node.0]
-                    .ok_or_else(|| SynthError::SatEncoding(format!("missing DffEnable data var for node {}", node.id.0)))?;
-                let enable_var = node_var[incoming[1].1.node.0]
-                    .ok_or_else(|| SynthError::SatEncoding(format!("missing DffEnable enable var for node {}", node.id.0)))?;
-                let clock_var = node_var[incoming[2].1.node.0]
-                    .ok_or_else(|| SynthError::SatEncoding(format!("missing DffEnable clock var for node {}", node.id.0)))?;
+                let data_var = node_var[incoming[0].1.node.0].ok_or_else(|| {
+                    SynthError::SatEncoding(format!(
+                        "missing DffEnable data var for node {}",
+                        node.id.0
+                    ))
+                })?;
+                let enable_var = node_var[incoming[1].1.node.0].ok_or_else(|| {
+                    SynthError::SatEncoding(format!(
+                        "missing DffEnable enable var for node {}",
+                        node.id.0
+                    ))
+                })?;
+                let clock_var = node_var[incoming[2].1.node.0].ok_or_else(|| {
+                    SynthError::SatEncoding(format!(
+                        "missing DffEnable clock var for node {}",
+                        node.id.0
+                    ))
+                })?;
                 let next_var = formula.add_var();
                 encode_mux2_eq(formula, next_var, enable_var, present_var, data_var)?;
                 (next_var, clock_var)
@@ -1355,10 +1433,12 @@ fn encode_netlist_for_sequential_sat(
                         actual: incoming.len(),
                     });
                 }
-                let data_var = node_var[incoming[0].1.node.0]
-                    .ok_or_else(|| SynthError::SatEncoding(format!("missing Dff data var for node {}", node.id.0)))?;
-                let clock_var = node_var[incoming[1].1.node.0]
-                    .ok_or_else(|| SynthError::SatEncoding(format!("missing Dff clock var for node {}", node.id.0)))?;
+                let data_var = node_var[incoming[0].1.node.0].ok_or_else(|| {
+                    SynthError::SatEncoding(format!("missing Dff data var for node {}", node.id.0))
+                })?;
+                let clock_var = node_var[incoming[1].1.node.0].ok_or_else(|| {
+                    SynthError::SatEncoding(format!("missing Dff clock var for node {}", node.id.0))
+                })?;
                 (data_var, clock_var)
             }
             Some(_) => {
@@ -1728,10 +1808,7 @@ mod tests {
         let a = netlist.add_node(NodeKind::CellInstance, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
 
-        let src_out = PinRef {
-            node: src,
-            port: 0,
-        };
+        let src_out = PinRef { node: src, port: 0 };
         let a_in = PinRef { node: a, port: 0 };
         let b_in = PinRef { node: b, port: 0 };
 
@@ -1885,14 +1962,20 @@ mod tests {
         let plan = CompilePlan {
             connections: vec![
                 ConnectionSpec {
-                    from: PinRef { node: src_a, port: 0 },
+                    from: PinRef {
+                        node: src_a,
+                        port: 0,
+                    },
                     to: PinRef {
                         node: sink_a,
                         port: 0,
                     },
                 },
                 ConnectionSpec {
-                    from: PinRef { node: src_b, port: 0 },
+                    from: PinRef {
+                        node: src_b,
+                        port: 0,
+                    },
                     to: PinRef {
                         node: sink_b,
                         port: 0,
@@ -1923,10 +2006,22 @@ mod tests {
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
 
         netlist
-            .connect(PinRef { node: a, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("port to gate should connect");
         netlist
-            .connect(PinRef { node: b, port: 0 }, PinRef { node: gate, port: 1 })
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: gate,
+                    port: 1,
+                },
+            )
             .expect("port to gate should connect");
 
         let report = compiler.analyze_bool_opt_compatibility(&netlist);
@@ -1966,22 +2061,64 @@ mod tests {
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
         netlist
-            .connect(PinRef { node: a, port: 0 }, PinRef { node: gate0, port: 0 })
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: gate0,
+                    port: 0,
+                },
+            )
             .expect("port to gate should connect");
         netlist
-            .connect(PinRef { node: b, port: 0 }, PinRef { node: gate0, port: 1 })
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: gate0,
+                    port: 1,
+                },
+            )
             .expect("port to gate should connect");
         netlist
-            .connect(PinRef { node: a, port: 1 }, PinRef { node: gate1, port: 0 })
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: gate1,
+                    port: 0,
+                },
+            )
             .expect("port to gate should connect");
         netlist
-            .connect(PinRef { node: b, port: 1 }, PinRef { node: gate1, port: 1 })
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: gate1,
+                    port: 1,
+                },
+            )
             .expect("port to gate should connect");
         netlist
-            .connect(PinRef { node: gate0, port: 0 }, PinRef { node: out0, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
             .expect("gate to output should connect");
         netlist
-            .connect(PinRef { node: gate1, port: 0 }, PinRef { node: out1, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
             .expect("gate to output should connect");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
@@ -2009,12 +2146,66 @@ mod tests {
         let out0 = netlist.add_node(NodeKind::Port, "out0");
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: xor0, port: 0 }).expect("a to xor0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: xor0, port: 1 }).expect("b to xor0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: xor1, port: 0 }).expect("a to xor1");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: xor1, port: 1 }).expect("b to xor1");
-        netlist.connect(PinRef { node: xor0, port: 0 }, PinRef { node: out0, port: 0 }).expect("xor0 to out0");
-        netlist.connect(PinRef { node: xor1, port: 0 }, PinRef { node: out1, port: 0 }).expect("xor1 to out1");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: xor0,
+                    port: 0,
+                },
+            )
+            .expect("a to xor0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: xor0,
+                    port: 1,
+                },
+            )
+            .expect("b to xor0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: xor1,
+                    port: 0,
+                },
+            )
+            .expect("a to xor1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: xor1,
+                    port: 1,
+                },
+            )
+            .expect("b to xor1");
+        netlist
+            .connect(
+                PinRef {
+                    node: xor0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
+            .expect("xor0 to out0");
+        netlist
+            .connect(
+                PinRef {
+                    node: xor1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
+            .expect("xor1 to out1");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2042,14 +2233,84 @@ mod tests {
         let out0 = netlist.add_node(NodeKind::Port, "out0");
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
-        netlist.connect(PinRef { node: sel, port: 0 }, PinRef { node: mux0, port: 0 }).expect("sel to mux0");
-        netlist.connect(PinRef { node: d0, port: 0 }, PinRef { node: mux0, port: 1 }).expect("d0 to mux0");
-        netlist.connect(PinRef { node: d1, port: 0 }, PinRef { node: mux0, port: 2 }).expect("d1 to mux0");
-        netlist.connect(PinRef { node: sel, port: 1 }, PinRef { node: mux1, port: 0 }).expect("sel to mux1");
-        netlist.connect(PinRef { node: d0, port: 1 }, PinRef { node: mux1, port: 1 }).expect("d0 to mux1");
-        netlist.connect(PinRef { node: d1, port: 1 }, PinRef { node: mux1, port: 2 }).expect("d1 to mux1");
-        netlist.connect(PinRef { node: mux0, port: 0 }, PinRef { node: out0, port: 0 }).expect("mux0 to out0");
-        netlist.connect(PinRef { node: mux1, port: 0 }, PinRef { node: out1, port: 0 }).expect("mux1 to out1");
+        netlist
+            .connect(
+                PinRef { node: sel, port: 0 },
+                PinRef {
+                    node: mux0,
+                    port: 0,
+                },
+            )
+            .expect("sel to mux0");
+        netlist
+            .connect(
+                PinRef { node: d0, port: 0 },
+                PinRef {
+                    node: mux0,
+                    port: 1,
+                },
+            )
+            .expect("d0 to mux0");
+        netlist
+            .connect(
+                PinRef { node: d1, port: 0 },
+                PinRef {
+                    node: mux0,
+                    port: 2,
+                },
+            )
+            .expect("d1 to mux0");
+        netlist
+            .connect(
+                PinRef { node: sel, port: 1 },
+                PinRef {
+                    node: mux1,
+                    port: 0,
+                },
+            )
+            .expect("sel to mux1");
+        netlist
+            .connect(
+                PinRef { node: d0, port: 1 },
+                PinRef {
+                    node: mux1,
+                    port: 1,
+                },
+            )
+            .expect("d0 to mux1");
+        netlist
+            .connect(
+                PinRef { node: d1, port: 1 },
+                PinRef {
+                    node: mux1,
+                    port: 2,
+                },
+            )
+            .expect("d1 to mux1");
+        netlist
+            .connect(
+                PinRef {
+                    node: mux0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
+            .expect("mux0 to out0");
+        netlist
+            .connect(
+                PinRef {
+                    node: mux1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
+            .expect("mux1 to out1");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2077,14 +2338,102 @@ mod tests {
         let out0 = netlist.add_node(NodeKind::Port, "out0");
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
-        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: dff0, port: 0 }).expect("data to dff0");
-        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: dff0, port: 1 }).expect("enable to dff0");
-        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff0, port: 2 }).expect("clock to dff0");
-        netlist.connect(PinRef { node: data, port: 1 }, PinRef { node: dff1, port: 0 }).expect("data to dff1");
-        netlist.connect(PinRef { node: enable, port: 1 }, PinRef { node: dff1, port: 1 }).expect("enable to dff1");
-        netlist.connect(PinRef { node: clock, port: 1 }, PinRef { node: dff1, port: 2 }).expect("clock to dff1");
-        netlist.connect(PinRef { node: dff0, port: 0 }, PinRef { node: out0, port: 0 }).expect("dff0 to out0");
-        netlist.connect(PinRef { node: dff1, port: 0 }, PinRef { node: out1, port: 0 }).expect("dff1 to out1");
+        netlist
+            .connect(
+                PinRef {
+                    node: data,
+                    port: 0,
+                },
+                PinRef {
+                    node: dff0,
+                    port: 0,
+                },
+            )
+            .expect("data to dff0");
+        netlist
+            .connect(
+                PinRef {
+                    node: enable,
+                    port: 0,
+                },
+                PinRef {
+                    node: dff0,
+                    port: 1,
+                },
+            )
+            .expect("enable to dff0");
+        netlist
+            .connect(
+                PinRef {
+                    node: clock,
+                    port: 0,
+                },
+                PinRef {
+                    node: dff0,
+                    port: 2,
+                },
+            )
+            .expect("clock to dff0");
+        netlist
+            .connect(
+                PinRef {
+                    node: data,
+                    port: 1,
+                },
+                PinRef {
+                    node: dff1,
+                    port: 0,
+                },
+            )
+            .expect("data to dff1");
+        netlist
+            .connect(
+                PinRef {
+                    node: enable,
+                    port: 1,
+                },
+                PinRef {
+                    node: dff1,
+                    port: 1,
+                },
+            )
+            .expect("enable to dff1");
+        netlist
+            .connect(
+                PinRef {
+                    node: clock,
+                    port: 1,
+                },
+                PinRef {
+                    node: dff1,
+                    port: 2,
+                },
+            )
+            .expect("clock to dff1");
+        netlist
+            .connect(
+                PinRef {
+                    node: dff0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
+            .expect("dff0 to out0");
+        netlist
+            .connect(
+                PinRef {
+                    node: dff1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
+            .expect("dff1 to out1");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2094,7 +2443,8 @@ mod tests {
             netlist
                 .nodes()
                 .iter()
-                .filter(|node| matches!(node.kind, NodeKind::Dff) && node.logic_op == Some(LogicOp::DffEnable))
+                .filter(|node| matches!(node.kind, NodeKind::Dff)
+                    && node.logic_op == Some(LogicOp::DffEnable))
                 .count(),
             1
         );
@@ -2109,16 +2459,67 @@ mod tests {
         let clock = netlist.add_node(NodeKind::Port, "clock");
         let dff = netlist.add_node(NodeKind::Dff, "state");
         let feedback = netlist.add_node(NodeKind::Splitter, "feedback_split");
-        let mux = netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
+        let mux =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: feedback, port: 0 }).expect("dff to splitter");
-        netlist.connect(PinRef { node: feedback, port: 1 }, PinRef { node: mux, port: 1 }).expect("feedback hold arm");
-        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: mux, port: 0 }).expect("enable to mux select");
-        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: mux, port: 2 }).expect("data to mux update arm");
-        netlist.connect(PinRef { node: mux, port: 0 }, PinRef { node: dff, port: 0 }).expect("mux to dff data");
-        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff, port: 1 }).expect("clock to dff");
-        netlist.connect(PinRef { node: feedback, port: 2 }, PinRef { node: out, port: 0 }).expect("feedback to out");
+        netlist
+            .connect(
+                PinRef { node: dff, port: 0 },
+                PinRef {
+                    node: feedback,
+                    port: 0,
+                },
+            )
+            .expect("dff to splitter");
+        netlist
+            .connect(
+                PinRef {
+                    node: feedback,
+                    port: 1,
+                },
+                PinRef { node: mux, port: 1 },
+            )
+            .expect("feedback hold arm");
+        netlist
+            .connect(
+                PinRef {
+                    node: enable,
+                    port: 0,
+                },
+                PinRef { node: mux, port: 0 },
+            )
+            .expect("enable to mux select");
+        netlist
+            .connect(
+                PinRef {
+                    node: data,
+                    port: 0,
+                },
+                PinRef { node: mux, port: 2 },
+            )
+            .expect("data to mux update arm");
+        netlist
+            .connect(PinRef { node: mux, port: 0 }, PinRef { node: dff, port: 0 })
+            .expect("mux to dff data");
+        netlist
+            .connect(
+                PinRef {
+                    node: clock,
+                    port: 0,
+                },
+                PinRef { node: dff, port: 1 },
+            )
+            .expect("clock to dff");
+        netlist
+            .connect(
+                PinRef {
+                    node: feedback,
+                    port: 2,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("feedback to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2132,12 +2533,10 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            !netlist
-                .nodes()
-                .iter()
-                .any(|node| node.logic_op == Some(LogicOp::Mux2))
-        );
+        assert!(!netlist
+            .nodes()
+            .iter()
+            .any(|node| node.logic_op == Some(LogicOp::Mux2)));
     }
 
     #[test]
@@ -2149,16 +2548,67 @@ mod tests {
         let clock = netlist.add_node(NodeKind::Port, "clock");
         let dff = netlist.add_node(NodeKind::Dff, "state");
         let feedback = netlist.add_node(NodeKind::Splitter, "feedback_split");
-        let mux = netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
+        let mux =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: feedback, port: 0 }).expect("dff to splitter");
-        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: mux, port: 1 }).expect("data to mux arm a");
-        netlist.connect(PinRef { node: feedback, port: 1 }, PinRef { node: mux, port: 2 }).expect("feedback hold arm");
-        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: mux, port: 0 }).expect("enable to mux select");
-        netlist.connect(PinRef { node: mux, port: 0 }, PinRef { node: dff, port: 0 }).expect("mux to dff data");
-        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff, port: 1 }).expect("clock to dff");
-        netlist.connect(PinRef { node: feedback, port: 2 }, PinRef { node: out, port: 0 }).expect("feedback to out");
+        netlist
+            .connect(
+                PinRef { node: dff, port: 0 },
+                PinRef {
+                    node: feedback,
+                    port: 0,
+                },
+            )
+            .expect("dff to splitter");
+        netlist
+            .connect(
+                PinRef {
+                    node: data,
+                    port: 0,
+                },
+                PinRef { node: mux, port: 1 },
+            )
+            .expect("data to mux arm a");
+        netlist
+            .connect(
+                PinRef {
+                    node: feedback,
+                    port: 1,
+                },
+                PinRef { node: mux, port: 2 },
+            )
+            .expect("feedback hold arm");
+        netlist
+            .connect(
+                PinRef {
+                    node: enable,
+                    port: 0,
+                },
+                PinRef { node: mux, port: 0 },
+            )
+            .expect("enable to mux select");
+        netlist
+            .connect(PinRef { node: mux, port: 0 }, PinRef { node: dff, port: 0 })
+            .expect("mux to dff data");
+        netlist
+            .connect(
+                PinRef {
+                    node: clock,
+                    port: 0,
+                },
+                PinRef { node: dff, port: 1 },
+            )
+            .expect("clock to dff");
+        netlist
+            .connect(
+                PinRef {
+                    node: feedback,
+                    port: 2,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("feedback to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2180,12 +2630,10 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            !netlist
-                .nodes()
-                .iter()
-                .any(|node| node.logic_op == Some(LogicOp::Mux2))
-        );
+        assert!(!netlist
+            .nodes()
+            .iter()
+            .any(|node| node.logic_op == Some(LogicOp::Mux2)));
     }
 
     #[test]
@@ -2197,18 +2645,83 @@ mod tests {
         let clock = netlist.add_node(NodeKind::Port, "clock");
         let dff = netlist.add_node(NodeKind::Dff, "state");
         let feedback = netlist.add_node(NodeKind::Splitter, "feedback_split");
-        let mux = netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
+        let mux =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "state_mux", Some(LogicOp::Mux2));
         let data_pipe = netlist.add_node(NodeKind::Jtl, "data_pipe");
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: feedback, port: 0 }).expect("dff to splitter");
-        netlist.connect(PinRef { node: feedback, port: 1 }, PinRef { node: mux, port: 1 }).expect("feedback hold arm");
-        netlist.connect(PinRef { node: enable, port: 0 }, PinRef { node: mux, port: 0 }).expect("enable to mux select");
-        netlist.connect(PinRef { node: data, port: 0 }, PinRef { node: mux, port: 2 }).expect("data to mux update arm");
-        netlist.connect(PinRef { node: mux, port: 0 }, PinRef { node: data_pipe, port: 0 }).expect("mux to data pipe");
-        netlist.connect(PinRef { node: data_pipe, port: 0 }, PinRef { node: dff, port: 0 }).expect("data pipe to dff");
-        netlist.connect(PinRef { node: clock, port: 0 }, PinRef { node: dff, port: 1 }).expect("clock to dff");
-        netlist.connect(PinRef { node: feedback, port: 2 }, PinRef { node: out, port: 0 }).expect("feedback to out");
+        netlist
+            .connect(
+                PinRef { node: dff, port: 0 },
+                PinRef {
+                    node: feedback,
+                    port: 0,
+                },
+            )
+            .expect("dff to splitter");
+        netlist
+            .connect(
+                PinRef {
+                    node: feedback,
+                    port: 1,
+                },
+                PinRef { node: mux, port: 1 },
+            )
+            .expect("feedback hold arm");
+        netlist
+            .connect(
+                PinRef {
+                    node: enable,
+                    port: 0,
+                },
+                PinRef { node: mux, port: 0 },
+            )
+            .expect("enable to mux select");
+        netlist
+            .connect(
+                PinRef {
+                    node: data,
+                    port: 0,
+                },
+                PinRef { node: mux, port: 2 },
+            )
+            .expect("data to mux update arm");
+        netlist
+            .connect(
+                PinRef { node: mux, port: 0 },
+                PinRef {
+                    node: data_pipe,
+                    port: 0,
+                },
+            )
+            .expect("mux to data pipe");
+        netlist
+            .connect(
+                PinRef {
+                    node: data_pipe,
+                    port: 0,
+                },
+                PinRef { node: dff, port: 0 },
+            )
+            .expect("data pipe to dff");
+        netlist
+            .connect(
+                PinRef {
+                    node: clock,
+                    port: 0,
+                },
+                PinRef { node: dff, port: 1 },
+            )
+            .expect("clock to dff");
+        netlist
+            .connect(
+                PinRef {
+                    node: feedback,
+                    port: 2,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("feedback to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2222,18 +2735,14 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            !netlist
-                .nodes()
-                .iter()
-                .any(|node| matches!(node.kind, NodeKind::Jtl))
-        );
-        assert!(
-            !netlist
-                .nodes()
-                .iter()
-                .any(|node| node.logic_op == Some(LogicOp::Mux2))
-        );
+        assert!(!netlist
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.kind, NodeKind::Jtl)));
+        assert!(!netlist
+            .nodes()
+            .iter()
+            .any(|node| node.logic_op == Some(LogicOp::Mux2)));
     }
 
     #[test]
@@ -2242,15 +2751,60 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let or_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "or_gate", Some(LogicOp::Or));
-        let and_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "and_gate", Some(LogicOp::And));
+        let or_gate =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "or_gate", Some(LogicOp::Or));
+        let and_gate =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_gate", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or_gate, port: 0 }).expect("a to or");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or_gate, port: 1 }).expect("b to or");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and_gate, port: 0 }).expect("a to and");
-        netlist.connect(PinRef { node: or_gate, port: 0 }, PinRef { node: and_gate, port: 1 }).expect("or to and");
-        netlist.connect(PinRef { node: and_gate, port: 0 }, PinRef { node: out, port: 0 }).expect("and to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: or_gate,
+                    port: 0,
+                },
+            )
+            .expect("a to or");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: or_gate,
+                    port: 1,
+                },
+            )
+            .expect("b to or");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and_gate,
+                    port: 0,
+                },
+            )
+            .expect("a to and");
+        netlist
+            .connect(
+                PinRef {
+                    node: or_gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: and_gate,
+                    port: 1,
+                },
+            )
+            .expect("or to and");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_gate,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2272,15 +2826,60 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let and_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "and_gate", Some(LogicOp::And));
-        let or_gate = netlist.add_node_with_logic(NodeKind::CellInstance, "or_gate", Some(LogicOp::Or));
+        let and_gate =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_gate", Some(LogicOp::And));
+        let or_gate =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "or_gate", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and_gate, port: 0 }).expect("a to and");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and_gate, port: 1 }).expect("b to and");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or_gate, port: 0 }).expect("a to or");
-        netlist.connect(PinRef { node: and_gate, port: 0 }, PinRef { node: or_gate, port: 1 }).expect("and to or");
-        netlist.connect(PinRef { node: or_gate, port: 0 }, PinRef { node: out, port: 0 }).expect("or to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and_gate,
+                    port: 0,
+                },
+            )
+            .expect("a to and");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and_gate,
+                    port: 1,
+                },
+            )
+            .expect("b to and");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: or_gate,
+                    port: 0,
+                },
+            )
+            .expect("a to or");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: or_gate,
+                    port: 1,
+                },
+            )
+            .expect("and to or");
+        netlist
+            .connect(
+                PinRef {
+                    node: or_gate,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("or to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2308,14 +2907,48 @@ mod tests {
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 }).expect("a to or0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 }).expect("a to or1");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: or1, port: 1 }).expect("b to or1");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 2 }).expect("c to or1");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 })
+            .expect("a to or0");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 })
+            .expect("b to or0");
+        netlist
+            .connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 })
+            .expect("a to or1");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: or1, port: 1 })
+            .expect("b to or1");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 2 })
+            .expect("c to or1");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2351,14 +2984,72 @@ mod tests {
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 0 }).expect("a to and0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and0, port: 1 }).expect("b to and0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and1, port: 0 }).expect("a to and1");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and1, port: 1 }).expect("b to and1");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and1, port: 2 }).expect("c to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("b to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("a to and1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("b to and1");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and1,
+                    port: 2,
+                },
+            )
+            .expect("c to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2389,22 +3080,84 @@ mod tests {
 
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
-        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let not_a =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or0, port: 0 }).expect("a to or0");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: or0, port: 1 }).expect("b to or0");
-        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: or1, port: 0 }).expect("not_a to or1");
-        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: or1, port: 1 }).expect("not_b to or1");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+            )
+            .expect("a to not_a");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+            )
+            .expect("b to not_b");
+        netlist
+            .connect(PinRef { node: a, port: 1 }, PinRef { node: or0, port: 0 })
+            .expect("a to or0");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: or0, port: 1 })
+            .expect("b to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+                PinRef { node: or1, port: 0 },
+            )
+            .expect("not_a to or1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+                PinRef { node: or1, port: 1 },
+            )
+            .expect("not_b to or1");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2428,20 +3181,67 @@ mod tests {
         let s = netlist.add_node(NodeKind::Port, "s");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let not_s =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
-        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: or0, port: 0 }).expect("s to or0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
-        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: or1, port: 0 }).expect("not_s to or1");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or1, port: 1 }).expect("a to or1");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(
+                PinRef { node: s, port: 0 },
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+            )
+            .expect("s to not_s");
+        netlist
+            .connect(PinRef { node: s, port: 1 }, PinRef { node: or0, port: 0 })
+            .expect("s to or0");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 })
+            .expect("b to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+                PinRef { node: or1, port: 0 },
+            )
+            .expect("not_s to or1");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: or1, port: 1 })
+            .expect("a to or1");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2465,24 +3265,114 @@ mod tests {
         let c = netlist.add_node(NodeKind::Port, "c");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
-        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let not_a =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and0, port: 0 }).expect("c to and0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and0, port: 1 }).expect("a to and0");
-        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: and0, port: 2 }).expect("not_b to and0");
-        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and1, port: 0 }).expect("c to and1");
-        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: and1, port: 1 }).expect("not_a to and1");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and1, port: 2 }).expect("b to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+            )
+            .expect("a to not_a");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+            )
+            .expect("b to not_b");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("c to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+                PinRef {
+                    node: and0,
+                    port: 2,
+                },
+            )
+            .expect("not_b to and0");
+        netlist
+            .connect(
+                PinRef { node: c, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("c to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("not_a to and1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 2,
+                },
+            )
+            .expect("b to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2515,22 +3405,100 @@ mod tests {
         let s = netlist.add_node(NodeKind::Port, "s");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let not_s =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and0, port: 0 }).expect("c to and0");
-        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: and0, port: 1 }).expect("s to and0");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 2 }).expect("a to and0");
-        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and1, port: 0 }).expect("c to and1");
-        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: and1, port: 1 }).expect("not_s to and1");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and1, port: 2 }).expect("b to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: s, port: 0 },
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+            )
+            .expect("s to not_s");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("c to and0");
+        netlist
+            .connect(
+                PinRef { node: s, port: 1 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("s to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 2,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef { node: c, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("c to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("not_s to and1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and1,
+                    port: 2,
+                },
+            )
+            .expect("b to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2562,24 +3530,90 @@ mod tests {
         let c = netlist.add_node(NodeKind::Port, "c");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
-        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let not_a =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or0, port: 0 }).expect("c to or0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or0, port: 1 }).expect("a to or0");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: or0, port: 2 }).expect("b to or0");
-        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: or1, port: 0 }).expect("c to or1");
-        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: or1, port: 1 }).expect("not_a to or1");
-        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: or1, port: 2 }).expect("not_b to or1");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+            )
+            .expect("a to not_a");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+            )
+            .expect("b to not_b");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: or0, port: 0 })
+            .expect("c to or0");
+        netlist
+            .connect(PinRef { node: a, port: 1 }, PinRef { node: or0, port: 1 })
+            .expect("a to or0");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: or0, port: 2 })
+            .expect("b to or0");
+        netlist
+            .connect(PinRef { node: c, port: 1 }, PinRef { node: or1, port: 0 })
+            .expect("c to or1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+                PinRef { node: or1, port: 1 },
+            )
+            .expect("not_a to or1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+                PinRef { node: or1, port: 2 },
+            )
+            .expect("not_b to or1");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2612,22 +3646,73 @@ mod tests {
         let s = netlist.add_node(NodeKind::Port, "s");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let not_s =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let or1 = netlist.add_node_with_logic(NodeKind::CellInstance, "or1", Some(LogicOp::Or));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or0, port: 0 }).expect("c to or0");
-        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: or0, port: 1 }).expect("s to or0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 2 }).expect("b to or0");
-        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: or1, port: 0 }).expect("c to or1");
-        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: or1, port: 1 }).expect("not_s to or1");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or1, port: 2 }).expect("a to or1");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(
+                PinRef { node: s, port: 0 },
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+            )
+            .expect("s to not_s");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: or0, port: 0 })
+            .expect("c to or0");
+        netlist
+            .connect(PinRef { node: s, port: 1 }, PinRef { node: or0, port: 1 })
+            .expect("s to or0");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 2 })
+            .expect("b to or0");
+        netlist
+            .connect(PinRef { node: c, port: 1 }, PinRef { node: or1, port: 0 })
+            .expect("c to or1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+                PinRef { node: or1, port: 1 },
+            )
+            .expect("not_s to or1");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: or1, port: 2 })
+            .expect("a to or1");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2660,22 +3745,100 @@ mod tests {
         let s = netlist.add_node(NodeKind::Port, "s");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let not_s =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and0, port: 0 }).expect("c to and0");
-        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: and0, port: 1 }).expect("s to and0");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 2 }).expect("a to and0");
-        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and1, port: 0 }).expect("c to and1");
-        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: and1, port: 1 }).expect("not_s to and1");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and1, port: 2 }).expect("b to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: s, port: 0 },
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+            )
+            .expect("s to not_s");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("c to and0");
+        netlist
+            .connect(
+                PinRef { node: s, port: 1 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("s to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 2,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef { node: c, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("c to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("not_s to and1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and1,
+                    port: 2,
+                },
+            )
+            .expect("b to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let once = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
         let after_once = netlist.clone();
@@ -2698,24 +3861,113 @@ mod tests {
         let x = netlist.add_node(NodeKind::Port, "x");
         let y = netlist.add_node(NodeKind::Port, "y");
         let z = netlist.add_node(NodeKind::Port, "z");
-        let not_x = netlist.add_node_with_logic(NodeKind::CellInstance, "not_x", Some(LogicOp::Not));
-        let and_xy = netlist.add_node_with_logic(NodeKind::CellInstance, "and_xy", Some(LogicOp::And));
-        let and_nxz = netlist.add_node_with_logic(NodeKind::CellInstance, "and_nxz", Some(LogicOp::And));
-        let and_yz = netlist.add_node_with_logic(NodeKind::CellInstance, "and_yz", Some(LogicOp::And));
+        let not_x =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_x", Some(LogicOp::Not));
+        let and_xy =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_xy", Some(LogicOp::And));
+        let and_nxz =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_nxz", Some(LogicOp::And));
+        let and_yz =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_yz", Some(LogicOp::And));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: x, port: 0 }, PinRef { node: not_x, port: 0 }).expect("x to not_x");
-        netlist.connect(PinRef { node: x, port: 1 }, PinRef { node: and_xy, port: 0 }).expect("x to and_xy");
-        netlist.connect(PinRef { node: y, port: 0 }, PinRef { node: and_xy, port: 1 }).expect("y to and_xy");
-        netlist.connect(PinRef { node: not_x, port: 0 }, PinRef { node: and_nxz, port: 0 }).expect("not_x to and_nxz");
-        netlist.connect(PinRef { node: z, port: 0 }, PinRef { node: and_nxz, port: 1 }).expect("z to and_nxz");
-        netlist.connect(PinRef { node: y, port: 1 }, PinRef { node: and_yz, port: 0 }).expect("y to and_yz");
-        netlist.connect(PinRef { node: z, port: 1 }, PinRef { node: and_yz, port: 1 }).expect("z to and_yz");
-        netlist.connect(PinRef { node: and_xy, port: 0 }, PinRef { node: or0, port: 0 }).expect("and_xy to or0");
-        netlist.connect(PinRef { node: and_nxz, port: 0 }, PinRef { node: or0, port: 1 }).expect("and_nxz to or0");
-        netlist.connect(PinRef { node: and_yz, port: 0 }, PinRef { node: or0, port: 2 }).expect("and_yz to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: x, port: 0 },
+                PinRef {
+                    node: not_x,
+                    port: 0,
+                },
+            )
+            .expect("x to not_x");
+        netlist
+            .connect(
+                PinRef { node: x, port: 1 },
+                PinRef {
+                    node: and_xy,
+                    port: 0,
+                },
+            )
+            .expect("x to and_xy");
+        netlist
+            .connect(
+                PinRef { node: y, port: 0 },
+                PinRef {
+                    node: and_xy,
+                    port: 1,
+                },
+            )
+            .expect("y to and_xy");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_x,
+                    port: 0,
+                },
+                PinRef {
+                    node: and_nxz,
+                    port: 0,
+                },
+            )
+            .expect("not_x to and_nxz");
+        netlist
+            .connect(
+                PinRef { node: z, port: 0 },
+                PinRef {
+                    node: and_nxz,
+                    port: 1,
+                },
+            )
+            .expect("z to and_nxz");
+        netlist
+            .connect(
+                PinRef { node: y, port: 1 },
+                PinRef {
+                    node: and_yz,
+                    port: 0,
+                },
+            )
+            .expect("y to and_yz");
+        netlist
+            .connect(
+                PinRef { node: z, port: 1 },
+                PinRef {
+                    node: and_yz,
+                    port: 1,
+                },
+            )
+            .expect("z to and_yz");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_xy,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and_xy to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_nxz,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and_nxz to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_yz,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 2 },
+            )
+            .expect("and_yz to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2738,24 +3990,126 @@ mod tests {
         let x = netlist.add_node(NodeKind::Port, "x");
         let y = netlist.add_node(NodeKind::Port, "y");
         let z = netlist.add_node(NodeKind::Port, "z");
-        let not_x = netlist.add_node_with_logic(NodeKind::CellInstance, "not_x", Some(LogicOp::Not));
+        let not_x =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_x", Some(LogicOp::Not));
         let or_xy = netlist.add_node_with_logic(NodeKind::CellInstance, "or_xy", Some(LogicOp::Or));
-        let or_nxz = netlist.add_node_with_logic(NodeKind::CellInstance, "or_nxz", Some(LogicOp::Or));
+        let or_nxz =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "or_nxz", Some(LogicOp::Or));
         let or_yz = netlist.add_node_with_logic(NodeKind::CellInstance, "or_yz", Some(LogicOp::Or));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: x, port: 0 }, PinRef { node: not_x, port: 0 }).expect("x to not_x");
-        netlist.connect(PinRef { node: x, port: 1 }, PinRef { node: or_xy, port: 0 }).expect("x to or_xy");
-        netlist.connect(PinRef { node: y, port: 0 }, PinRef { node: or_xy, port: 1 }).expect("y to or_xy");
-        netlist.connect(PinRef { node: not_x, port: 0 }, PinRef { node: or_nxz, port: 0 }).expect("not_x to or_nxz");
-        netlist.connect(PinRef { node: z, port: 0 }, PinRef { node: or_nxz, port: 1 }).expect("z to or_nxz");
-        netlist.connect(PinRef { node: y, port: 1 }, PinRef { node: or_yz, port: 0 }).expect("y to or_yz");
-        netlist.connect(PinRef { node: z, port: 1 }, PinRef { node: or_yz, port: 1 }).expect("z to or_yz");
-        netlist.connect(PinRef { node: or_xy, port: 0 }, PinRef { node: and0, port: 0 }).expect("or_xy to and0");
-        netlist.connect(PinRef { node: or_nxz, port: 0 }, PinRef { node: and0, port: 1 }).expect("or_nxz to and0");
-        netlist.connect(PinRef { node: or_yz, port: 0 }, PinRef { node: and0, port: 2 }).expect("or_yz to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(
+                PinRef { node: x, port: 0 },
+                PinRef {
+                    node: not_x,
+                    port: 0,
+                },
+            )
+            .expect("x to not_x");
+        netlist
+            .connect(
+                PinRef { node: x, port: 1 },
+                PinRef {
+                    node: or_xy,
+                    port: 0,
+                },
+            )
+            .expect("x to or_xy");
+        netlist
+            .connect(
+                PinRef { node: y, port: 0 },
+                PinRef {
+                    node: or_xy,
+                    port: 1,
+                },
+            )
+            .expect("y to or_xy");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_x,
+                    port: 0,
+                },
+                PinRef {
+                    node: or_nxz,
+                    port: 0,
+                },
+            )
+            .expect("not_x to or_nxz");
+        netlist
+            .connect(
+                PinRef { node: z, port: 0 },
+                PinRef {
+                    node: or_nxz,
+                    port: 1,
+                },
+            )
+            .expect("z to or_nxz");
+        netlist
+            .connect(
+                PinRef { node: y, port: 1 },
+                PinRef {
+                    node: or_yz,
+                    port: 0,
+                },
+            )
+            .expect("y to or_yz");
+        netlist
+            .connect(
+                PinRef { node: z, port: 1 },
+                PinRef {
+                    node: or_yz,
+                    port: 1,
+                },
+            )
+            .expect("z to or_yz");
+        netlist
+            .connect(
+                PinRef {
+                    node: or_xy,
+                    port: 0,
+                },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or_xy to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: or_nxz,
+                    port: 0,
+                },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or_nxz to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: or_yz,
+                    port: 0,
+                },
+                PinRef {
+                    node: and0,
+                    port: 2,
+                },
+            )
+            .expect("or_yz to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2772,33 +4126,169 @@ mod tests {
         let c = netlist.add_node(NodeKind::Port, "c");
         let d = netlist.add_node(NodeKind::Port, "d");
 
-        let and_ab0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_ab0", Some(LogicOp::And));
-        let and_cd0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_cd0", Some(LogicOp::And));
-        let and_top0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_top0", Some(LogicOp::And));
+        let and_ab0 =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_ab0", Some(LogicOp::And));
+        let and_cd0 =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_cd0", Some(LogicOp::And));
+        let and_top0 =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_top0", Some(LogicOp::And));
 
-        let and_ab1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_ab1", Some(LogicOp::And));
-        let and_cd1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_cd1", Some(LogicOp::And));
-        let and_top1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and_top1", Some(LogicOp::And));
+        let and_ab1 =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_ab1", Some(LogicOp::And));
+        let and_cd1 =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_cd1", Some(LogicOp::And));
+        let and_top1 =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "and_top1", Some(LogicOp::And));
 
         let out0 = netlist.add_node(NodeKind::Port, "out0");
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and_ab0, port: 0 }).expect("a to and_ab0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and_ab0, port: 1 }).expect("b to and_ab0");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and_cd0, port: 0 }).expect("c to and_cd0");
-        netlist.connect(PinRef { node: d, port: 0 }, PinRef { node: and_cd0, port: 1 }).expect("d to and_cd0");
-        netlist.connect(PinRef { node: and_ab0, port: 0 }, PinRef { node: and_top0, port: 0 }).expect("ab0 to top0");
-        netlist.connect(PinRef { node: and_cd0, port: 0 }, PinRef { node: and_top0, port: 1 }).expect("cd0 to top0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and_ab0,
+                    port: 0,
+                },
+            )
+            .expect("a to and_ab0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and_ab0,
+                    port: 1,
+                },
+            )
+            .expect("b to and_ab0");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and_cd0,
+                    port: 0,
+                },
+            )
+            .expect("c to and_cd0");
+        netlist
+            .connect(
+                PinRef { node: d, port: 0 },
+                PinRef {
+                    node: and_cd0,
+                    port: 1,
+                },
+            )
+            .expect("d to and_cd0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_ab0,
+                    port: 0,
+                },
+                PinRef {
+                    node: and_top0,
+                    port: 0,
+                },
+            )
+            .expect("ab0 to top0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_cd0,
+                    port: 0,
+                },
+                PinRef {
+                    node: and_top0,
+                    port: 1,
+                },
+            )
+            .expect("cd0 to top0");
 
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and_ab1, port: 0 }).expect("b to and_ab1");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and_ab1, port: 1 }).expect("a to and_ab1");
-        netlist.connect(PinRef { node: d, port: 1 }, PinRef { node: and_cd1, port: 0 }).expect("d to and_cd1");
-        netlist.connect(PinRef { node: c, port: 1 }, PinRef { node: and_cd1, port: 1 }).expect("c to and_cd1");
-        netlist.connect(PinRef { node: and_cd1, port: 0 }, PinRef { node: and_top1, port: 0 }).expect("cd1 to top1");
-        netlist.connect(PinRef { node: and_ab1, port: 0 }, PinRef { node: and_top1, port: 1 }).expect("ab1 to top1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: and_ab1,
+                    port: 0,
+                },
+            )
+            .expect("b to and_ab1");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and_ab1,
+                    port: 1,
+                },
+            )
+            .expect("a to and_ab1");
+        netlist
+            .connect(
+                PinRef { node: d, port: 1 },
+                PinRef {
+                    node: and_cd1,
+                    port: 0,
+                },
+            )
+            .expect("d to and_cd1");
+        netlist
+            .connect(
+                PinRef { node: c, port: 1 },
+                PinRef {
+                    node: and_cd1,
+                    port: 1,
+                },
+            )
+            .expect("c to and_cd1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_cd1,
+                    port: 0,
+                },
+                PinRef {
+                    node: and_top1,
+                    port: 0,
+                },
+            )
+            .expect("cd1 to top1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_ab1,
+                    port: 0,
+                },
+                PinRef {
+                    node: and_top1,
+                    port: 1,
+                },
+            )
+            .expect("ab1 to top1");
 
-        netlist.connect(PinRef { node: and_top0, port: 0 }, PinRef { node: out0, port: 0 }).expect("top0 to out0");
-        netlist.connect(PinRef { node: and_top1, port: 0 }, PinRef { node: out1, port: 0 }).expect("top1 to out1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_top0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
+            .expect("top0 to out0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and_top1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
+            .expect("top1 to out1");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2827,16 +4317,86 @@ mod tests {
         let out0 = netlist.add_node(NodeKind::Port, "out0");
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
-        netlist.connect(PinRef { node: sel, port: 0 }, PinRef { node: mux0, port: 0 }).expect("sel to mux0");
-        netlist.connect(PinRef { node: d0, port: 0 }, PinRef { node: mux0, port: 1 }).expect("d0 to mux0");
-        netlist.connect(PinRef { node: d1, port: 0 }, PinRef { node: mux0, port: 2 }).expect("d1 to mux0");
+        netlist
+            .connect(
+                PinRef { node: sel, port: 0 },
+                PinRef {
+                    node: mux0,
+                    port: 0,
+                },
+            )
+            .expect("sel to mux0");
+        netlist
+            .connect(
+                PinRef { node: d0, port: 0 },
+                PinRef {
+                    node: mux0,
+                    port: 1,
+                },
+            )
+            .expect("d0 to mux0");
+        netlist
+            .connect(
+                PinRef { node: d1, port: 0 },
+                PinRef {
+                    node: mux0,
+                    port: 2,
+                },
+            )
+            .expect("d1 to mux0");
 
-        netlist.connect(PinRef { node: sel, port: 1 }, PinRef { node: mux1, port: 0 }).expect("sel to mux1");
-        netlist.connect(PinRef { node: d1, port: 1 }, PinRef { node: mux1, port: 1 }).expect("d1 to mux1");
-        netlist.connect(PinRef { node: d0, port: 1 }, PinRef { node: mux1, port: 2 }).expect("d0 to mux1");
+        netlist
+            .connect(
+                PinRef { node: sel, port: 1 },
+                PinRef {
+                    node: mux1,
+                    port: 0,
+                },
+            )
+            .expect("sel to mux1");
+        netlist
+            .connect(
+                PinRef { node: d1, port: 1 },
+                PinRef {
+                    node: mux1,
+                    port: 1,
+                },
+            )
+            .expect("d1 to mux1");
+        netlist
+            .connect(
+                PinRef { node: d0, port: 1 },
+                PinRef {
+                    node: mux1,
+                    port: 2,
+                },
+            )
+            .expect("d0 to mux1");
 
-        netlist.connect(PinRef { node: mux0, port: 0 }, PinRef { node: out0, port: 0 }).expect("mux0 to out0");
-        netlist.connect(PinRef { node: mux1, port: 0 }, PinRef { node: out1, port: 0 }).expect("mux1 to out1");
+        netlist
+            .connect(
+                PinRef {
+                    node: mux0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
+            .expect("mux0 to out0");
+        netlist
+            .connect(
+                PinRef {
+                    node: mux1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
+            .expect("mux1 to out1");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2864,12 +4424,66 @@ mod tests {
         let out0 = netlist.add_node(NodeKind::Port, "out0");
         let out1 = netlist.add_node(NodeKind::Port, "out1");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: xor0, port: 0 }).expect("a to xor0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: xor0, port: 1 }).expect("b to xor0");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: xor1, port: 0 }).expect("b to xor1");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: xor1, port: 1 }).expect("a to xor1");
-        netlist.connect(PinRef { node: xor0, port: 0 }, PinRef { node: out0, port: 0 }).expect("xor0 to out0");
-        netlist.connect(PinRef { node: xor1, port: 0 }, PinRef { node: out1, port: 0 }).expect("xor1 to out1");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: xor0,
+                    port: 0,
+                },
+            )
+            .expect("a to xor0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: xor0,
+                    port: 1,
+                },
+            )
+            .expect("b to xor0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: xor1,
+                    port: 0,
+                },
+            )
+            .expect("b to xor1");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: xor1,
+                    port: 1,
+                },
+            )
+            .expect("a to xor1");
+        netlist
+            .connect(
+                PinRef {
+                    node: xor0,
+                    port: 0,
+                },
+                PinRef {
+                    node: out0,
+                    port: 0,
+                },
+            )
+            .expect("xor0 to out0");
+        netlist
+            .connect(
+                PinRef {
+                    node: xor1,
+                    port: 0,
+                },
+                PinRef {
+                    node: out1,
+                    port: 0,
+                },
+            )
+            .expect("xor1 to out1");
 
         let report = compiler.optimize_boolean_network(
             &mut netlist,
@@ -2897,13 +4511,63 @@ mod tests {
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 0 }).expect("a to and0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and0, port: 1 }).expect("b to and0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and1, port: 0 }).expect("a to and1");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and1, port: 1 }).expect("c to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("b to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("a to and1");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("c to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2942,16 +4606,90 @@ mod tests {
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 0 }).expect("a to and0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and0, port: 1 }).expect("b to and0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and1, port: 0 }).expect("a to and1");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: and1, port: 1 }).expect("c to and1");
-        netlist.connect(PinRef { node: a, port: 2 }, PinRef { node: and2, port: 0 }).expect("a to and2");
-        netlist.connect(PinRef { node: d, port: 0 }, PinRef { node: and2, port: 1 }).expect("d to and2");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: and2, port: 0 }, PinRef { node: or0, port: 2 }).expect("and2 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("b to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("a to and1");
+        netlist
+            .connect(
+                PinRef { node: c, port: 0 },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("c to and1");
+        netlist
+            .connect(
+                PinRef { node: a, port: 2 },
+                PinRef {
+                    node: and2,
+                    port: 0,
+                },
+            )
+            .expect("a to and2");
+        netlist
+            .connect(
+                PinRef { node: d, port: 0 },
+                PinRef {
+                    node: and2,
+                    port: 1,
+                },
+            )
+            .expect("d to and2");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and2,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 2 },
+            )
+            .expect("and2 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -2988,13 +4726,45 @@ mod tests {
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 }).expect("a to or0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 }).expect("a to or1");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 1 }).expect("c to or1");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 })
+            .expect("a to or0");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 })
+            .expect("b to or0");
+        netlist
+            .connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 })
+            .expect("a to or1");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 1 })
+            .expect("c to or1");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -3033,16 +4803,60 @@ mod tests {
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 }).expect("a to or0");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 }).expect("b to or0");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 }).expect("a to or1");
-        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 1 }).expect("c to or1");
-        netlist.connect(PinRef { node: a, port: 2 }, PinRef { node: or2, port: 0 }).expect("a to or2");
-        netlist.connect(PinRef { node: d, port: 0 }, PinRef { node: or2, port: 1 }).expect("d to or2");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: and0, port: 0 }).expect("or0 to and0");
-        netlist.connect(PinRef { node: or1, port: 0 }, PinRef { node: and0, port: 1 }).expect("or1 to and0");
-        netlist.connect(PinRef { node: or2, port: 0 }, PinRef { node: and0, port: 2 }).expect("or2 to and0");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: out, port: 0 }).expect("and0 to out");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: or0, port: 0 })
+            .expect("a to or0");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: or0, port: 1 })
+            .expect("b to or0");
+        netlist
+            .connect(PinRef { node: a, port: 1 }, PinRef { node: or1, port: 0 })
+            .expect("a to or1");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: or1, port: 1 })
+            .expect("c to or1");
+        netlist
+            .connect(PinRef { node: a, port: 2 }, PinRef { node: or2, port: 0 })
+            .expect("a to or2");
+        netlist
+            .connect(PinRef { node: d, port: 0 }, PinRef { node: or2, port: 1 })
+            .expect("d to or2");
+        netlist
+            .connect(
+                PinRef { node: or0, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("or0 to and0");
+        netlist
+            .connect(
+                PinRef { node: or1, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("or1 to and0");
+        netlist
+            .connect(
+                PinRef { node: or2, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 2,
+                },
+            )
+            .expect("or2 to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .expect("and0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -3073,22 +4887,96 @@ mod tests {
 
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_a = netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
-        let not_b = netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
+        let not_a =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_a", Some(LogicOp::Not));
+        let not_b =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_b", Some(LogicOp::Not));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: not_a, port: 0 }).expect("a to not_a");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: not_b, port: 0 }).expect("b to not_b");
-        netlist.connect(PinRef { node: a, port: 1 }, PinRef { node: and0, port: 0 }).expect("a to and0");
-        netlist.connect(PinRef { node: not_b, port: 0 }, PinRef { node: and0, port: 1 }).expect("not_b to and0");
-        netlist.connect(PinRef { node: not_a, port: 0 }, PinRef { node: and1, port: 0 }).expect("not_a to and1");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: and1, port: 1 }).expect("b to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+            )
+            .expect("a to not_a");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+            )
+            .expect("b to not_b");
+        netlist
+            .connect(
+                PinRef { node: a, port: 1 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_b,
+                    port: 0,
+                },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("not_b to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_a,
+                    port: 0,
+                },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("not_a to and1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 1 },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("b to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -3112,20 +5000,82 @@ mod tests {
         let s = netlist.add_node(NodeKind::Port, "s");
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::Port, "b");
-        let not_s = netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
+        let not_s =
+            netlist.add_node_with_logic(NodeKind::CellInstance, "not_s", Some(LogicOp::Not));
         let and0 = netlist.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
         let and1 = netlist.add_node_with_logic(NodeKind::CellInstance, "and1", Some(LogicOp::And));
         let or0 = netlist.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
         let out = netlist.add_node(NodeKind::Port, "out");
 
-        netlist.connect(PinRef { node: s, port: 0 }, PinRef { node: not_s, port: 0 }).expect("s to not_s");
-        netlist.connect(PinRef { node: s, port: 1 }, PinRef { node: and0, port: 0 }).expect("s to and0");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: and0, port: 1 }).expect("a to and0");
-        netlist.connect(PinRef { node: not_s, port: 0 }, PinRef { node: and1, port: 0 }).expect("not_s to and1");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: and1, port: 1 }).expect("b to and1");
-        netlist.connect(PinRef { node: and0, port: 0 }, PinRef { node: or0, port: 0 }).expect("and0 to or0");
-        netlist.connect(PinRef { node: and1, port: 0 }, PinRef { node: or0, port: 1 }).expect("and1 to or0");
-        netlist.connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 }).expect("or0 to out");
+        netlist
+            .connect(
+                PinRef { node: s, port: 0 },
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+            )
+            .expect("s to not_s");
+        netlist
+            .connect(
+                PinRef { node: s, port: 1 },
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+            )
+            .expect("s to and0");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: and0,
+                    port: 1,
+                },
+            )
+            .expect("a to and0");
+        netlist
+            .connect(
+                PinRef {
+                    node: not_s,
+                    port: 0,
+                },
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+            )
+            .expect("not_s to and1");
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef {
+                    node: and1,
+                    port: 1,
+                },
+            )
+            .expect("b to and1");
+        netlist
+            .connect(
+                PinRef {
+                    node: and0,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 0 },
+            )
+            .expect("and0 to or0");
+        netlist
+            .connect(
+                PinRef {
+                    node: and1,
+                    port: 0,
+                },
+                PinRef { node: or0, port: 1 },
+            )
+            .expect("and1 to or0");
+        netlist
+            .connect(PinRef { node: or0, port: 0 }, PinRef { node: out, port: 0 })
+            .expect("or0 to out");
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
@@ -3150,18 +5100,66 @@ mod tests {
         let b_l = lhs.add_node(NodeKind::Port, "b");
         let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
-        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
-        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let b_r = rhs.add_node(NodeKind::Port, "b");
         let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_and", Some(LogicOp::And));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("b->and");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("a->and");
-        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("and->out");
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .expect("b->and");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .expect("a->and");
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let report = compiler
             .check_boolean_equivalence_sat(&lhs, &rhs)
@@ -3184,18 +5182,66 @@ mod tests {
         let b_l = lhs.add_node(NodeKind::Port, "b");
         let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
-        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
-        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let b_r = rhs.add_node(NodeKind::Port, "b");
         let xor_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_xor", Some(LogicOp::Xor));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: xor_r, port: 0 }).expect("a->xor");
-        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: xor_r, port: 1 }).expect("b->xor");
-        rhs.connect(PinRef { node: xor_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("xor->out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: xor_r,
+                port: 0,
+            },
+        )
+        .expect("a->xor");
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: xor_r,
+                port: 1,
+            },
+        )
+        .expect("b->xor");
+        rhs.connect(
+            PinRef {
+                node: xor_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("xor->out");
 
         let report = compiler
             .check_boolean_equivalence_sat(&lhs, &rhs)
@@ -3227,12 +5273,60 @@ mod tests {
         let xor_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_xor", Some(LogicOp::Xor));
         let out_and_l = lhs.add_node(NodeKind::Port, "out_and");
         let out_xor_l = lhs.add_node(NodeKind::Port, "out_xor");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
-        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
-        lhs.connect(PinRef { node: a_l, port: 1 }, PinRef { node: xor_l, port: 0 }).expect("a->xor");
-        lhs.connect(PinRef { node: b_l, port: 1 }, PinRef { node: xor_l, port: 1 }).expect("b->xor");
-        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_and_l, port: 0 }).expect("and->out_and");
-        lhs.connect(PinRef { node: xor_l, port: 0 }, PinRef { node: out_xor_l, port: 0 }).expect("xor->out_xor");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        lhs.connect(
+            PinRef { node: a_l, port: 1 },
+            PinRef {
+                node: xor_l,
+                port: 0,
+            },
+        )
+        .expect("a->xor");
+        lhs.connect(
+            PinRef { node: b_l, port: 1 },
+            PinRef {
+                node: xor_l,
+                port: 1,
+            },
+        )
+        .expect("b->xor");
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_and_l,
+                port: 0,
+            },
+        )
+        .expect("and->out_and");
+        lhs.connect(
+            PinRef {
+                node: xor_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_xor_l,
+                port: 0,
+            },
+        )
+        .expect("xor->out_xor");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
@@ -3241,12 +5335,60 @@ mod tests {
         let or_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_or", Some(LogicOp::Or));
         let out_and_r = rhs.add_node(NodeKind::Port, "out_and");
         let out_xor_r = rhs.add_node(NodeKind::Port, "out_xor");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("a->and");
-        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("b->and");
-        rhs.connect(PinRef { node: a_r, port: 1 }, PinRef { node: or_r, port: 0 }).expect("a->or");
-        rhs.connect(PinRef { node: b_r, port: 1 }, PinRef { node: or_r, port: 1 }).expect("b->or");
-        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_and_r, port: 0 }).expect("and->out_and");
-        rhs.connect(PinRef { node: or_r, port: 0 }, PinRef { node: out_xor_r, port: 0 }).expect("or->out_xor");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        rhs.connect(
+            PinRef { node: a_r, port: 1 },
+            PinRef {
+                node: or_r,
+                port: 0,
+            },
+        )
+        .expect("a->or");
+        rhs.connect(
+            PinRef { node: b_r, port: 1 },
+            PinRef {
+                node: or_r,
+                port: 1,
+            },
+        )
+        .expect("b->or");
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_and_r,
+                port: 0,
+            },
+        )
+        .expect("and->out_and");
+        rhs.connect(
+            PinRef {
+                node: or_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_xor_r,
+                port: 0,
+            },
+        )
+        .expect("or->out_xor");
 
         let report = compiler
             .check_boolean_equivalence_sat(&lhs, &rhs)
@@ -3278,9 +5420,39 @@ mod tests {
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "state");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
-        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
@@ -3288,10 +5460,50 @@ mod tests {
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node_with_logic(NodeKind::Dff, "state", Some(LogicOp::DffEnable));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dffe");
-        rhs.connect(PinRef { node: enable_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("enable->dffe");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 2 }).expect("clock->dffe");
-        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dffe->out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dffe");
+        rhs.connect(
+            PinRef {
+                node: enable_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("enable->dffe");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 2,
+            },
+        )
+        .expect("clock->dffe");
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("dffe->out");
 
         let report = compiler
             .check_sequential_equivalence_sat(&lhs, &rhs)
@@ -3320,18 +5532,78 @@ mod tests {
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "state");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
-        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node(NodeKind::Dff, "state");
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dff");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("clock->dff");
-        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dff->out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let report = compiler
             .check_bounded_sequential_equivalence_sat(&lhs, &rhs, 3)
@@ -3352,15 +5624,55 @@ mod tests {
         let data_l = lhs.add_node(NodeKind::Port, "data");
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "lhs_state");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node(NodeKind::Dff, "rhs_state");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dff");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("clock->dff");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
 
         let error = compiler
             .check_sequential_equivalence_sat(&lhs, &rhs)
@@ -3389,11 +5701,17 @@ mod tests {
                 connections: vec![
                     ConnectionSpec {
                         from: PinRef { node: a, port: 0 },
-                        to: PinRef { node: gate, port: 0 },
+                        to: PinRef {
+                            node: gate,
+                            port: 0,
+                        },
                     },
                     ConnectionSpec {
                         from: PinRef { node: b, port: 0 },
-                        to: PinRef { node: gate, port: 1 },
+                        to: PinRef {
+                            node: gate,
+                            port: 1,
+                        },
                     },
                 ],
                 balance_strategy: BalanceStrategy::None,
@@ -3410,7 +5728,10 @@ mod tests {
             .compile_netlist(&mut netlist, &pdk, &config)
             .expect("synthesis pipeline should succeed");
 
-        assert_eq!(report.bool_opt.gate_count_before, report.bool_opt.gate_count_after);
+        assert_eq!(
+            report.bool_opt.gate_count_before,
+            report.bool_opt.gate_count_after
+        );
         assert_eq!(report.node_count, 3);
         assert_eq!(report.edge_count, 2);
         assert!(matches!(netlist.nodes()[0].kind, NodeKind::Port));
@@ -3440,14 +5761,20 @@ mod tests {
                 },
                 ConnectionSpec {
                     from: PinRef { node: mid, port: 0 },
-                    to: PinRef { node: sink, port: 0 },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
                 },
                 ConnectionSpec {
                     from: PinRef {
                         node: src_fast,
                         port: 0,
                     },
-                    to: PinRef { node: sink, port: 1 },
+                    to: PinRef {
+                        node: sink,
+                        port: 1,
+                    },
                 },
             ],
             balance_strategy: BalanceStrategy::BySinkLevel,
@@ -3478,7 +5805,10 @@ mod tests {
         netlist
             .connect(
                 PinRef { node: mid, port: 0 },
-                PinRef { node: sink, port: 0 },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
             )
             .expect("mid to sink should connect");
         netlist
@@ -3487,7 +5817,10 @@ mod tests {
                     node: src_fast,
                     port: 0,
                 },
-                PinRef { node: sink, port: 1 },
+                PinRef {
+                    node: sink,
+                    port: 1,
+                },
             )
             .expect("fast to sink should connect");
         netlist
@@ -3525,7 +5858,10 @@ mod tests {
         netlist
             .connect(
                 PinRef { node: mid, port: 0 },
-                PinRef { node: sink, port: 0 },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
             )
             .expect("mid to sink should connect");
         netlist
@@ -3534,7 +5870,10 @@ mod tests {
                     node: src_fast,
                     port: 0,
                 },
-                PinRef { node: sink, port: 1 },
+                PinRef {
+                    node: sink,
+                    port: 1,
+                },
             )
             .expect("fast to sink should connect");
         netlist
@@ -3571,11 +5910,17 @@ mod tests {
                 connections: vec![
                     ConnectionSpec {
                         from: PinRef { node: a, port: 0 },
-                        to: PinRef { node: gate, port: 0 },
+                        to: PinRef {
+                            node: gate,
+                            port: 0,
+                        },
                     },
                     ConnectionSpec {
                         from: PinRef { node: b, port: 0 },
-                        to: PinRef { node: gate, port: 1 },
+                        to: PinRef {
+                            node: gate,
+                            port: 1,
+                        },
                     },
                 ],
                 balance_strategy: BalanceStrategy::BySinkLevel,

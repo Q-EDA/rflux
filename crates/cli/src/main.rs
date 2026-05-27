@@ -2,23 +2,35 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{collections::BTreeMap, env};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rflux_flow::{FlowConfig, FlowRunner, SimulationConfig, SimulationMode};
 use rflux_io::{
-    detect_netlist_input_format, read_netlist, read_netlist_as, read_pdk_json,
-    write_pdk_json, IoError, NetlistInputFormat,
+    detect_netlist_input_format, read_netlist, read_netlist_as, read_pdk_json, write_pdk_json,
+    IoError, NetlistInputFormat,
 };
-use rflux_sat::{solve_with_metrics, CnfFormula, IncrementalSolver, Lit, SolveResult, SolveStats};
 use rflux_ir::NodeKind;
+use rflux_sat::{solve_with_metrics, CnfFormula, IncrementalSolver, Lit, SolveResult, SolveStats};
 use rflux_sim::{simulate_file, SimulationError, SimulationReport};
 use rflux_tech::Pdk;
+use rflux_timing::{
+    ClockDomainConstraint, CrossingConstraint, CrossingConstraintKind, NodeTimingConstraint,
+    PinTimingConstraint,
+};
 use rflux_verify::{SynthError, Verifier};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 const CLI_SCHEMA_VERSION: u64 = 1;
+const FLOW_CONFIG_KIND: &str = "rflux_flow_config";
+const FLOW_CONFIG_SCHEMA_VERSION: u64 = 1;
+const TIMING_CONSTRAINTS_KIND: &str = "rflux_timing_constraints";
+const TIMING_CONSTRAINTS_SCHEMA_VERSION: u64 = 1;
 const PDK_CELL_LIBRARY_ARTIFACT_KIND: &str = "rflux_cell_library";
 const PDK_CELL_LIBRARY_MANIFEST_SCHEMA: &str = "rflux_cell_library_manifest";
 const PDK_CELL_LIBRARY_MANIFEST_SCHEMA_VERSION: u64 = 1;
@@ -36,6 +48,7 @@ enum Commands {
     PdkValidate(PdkValidateArgs),
     PdkCellLibrary(PdkCellLibraryArgs),
     LintInput(LintInputArgs),
+    LintTimingConstraints(LintTimingConstraintsArgs),
     CollectDiagnostics(CollectDiagnosticsArgs),
     RunWithDiagnostics(RunWithDiagnosticsArgs),
     CompileNetlist(CompileNetlistArgs),
@@ -86,6 +99,18 @@ struct LintInputArgs {
 }
 
 #[derive(Debug, Args)]
+struct LintTimingConstraintsArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    netlist: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
+    netlist_format: CliNetlistInputFormat,
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct CollectDiagnosticsArgs {
     #[arg(long)]
     output_dir: PathBuf,
@@ -116,6 +141,10 @@ struct RunWithDiagnosticsArgs {
     #[arg(long)]
     pdk: Option<PathBuf>,
     #[arg(long)]
+    netlist: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
+    netlist_format: CliNetlistInputFormat,
+    #[arg(long)]
     rhs: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = CliSimulationMode::Auto)]
     mode: CliSimulationMode,
@@ -141,6 +170,18 @@ struct RunWithDiagnosticsArgs {
     input_format: CliNetlistInputFormat,
     #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
     rhs_format: CliNetlistInputFormat,
+    #[arg(long)]
+    clock_period_ps: Option<f64>,
+    #[arg(long)]
+    input_arrival_ps: Option<f64>,
+    #[arg(long)]
+    sfq_phase_count: Option<usize>,
+    #[arg(long)]
+    sfq_pulse_window_ps: Option<f64>,
+    #[arg(long)]
+    flow_config: Option<PathBuf>,
+    #[arg(long)]
+    timing_constraints: Option<PathBuf>,
     #[arg(long)]
     min_hold_jtl_length_um: Option<f64>,
     #[arg(long)]
@@ -173,6 +214,20 @@ struct LayoutCommandArgs {
     pdk: Option<PathBuf>,
     #[arg(long)]
     output: Option<PathBuf>,
+    #[arg(long)]
+    flow_config_patch_output: Option<PathBuf>,
+    #[arg(long)]
+    clock_period_ps: Option<f64>,
+    #[arg(long)]
+    input_arrival_ps: Option<f64>,
+    #[arg(long)]
+    sfq_phase_count: Option<usize>,
+    #[arg(long)]
+    sfq_pulse_window_ps: Option<f64>,
+    #[arg(long)]
+    flow_config: Option<PathBuf>,
+    #[arg(long)]
+    timing_constraints: Option<PathBuf>,
     #[arg(long)]
     min_hold_jtl_length_um: Option<f64>,
     #[arg(long)]
@@ -297,6 +352,8 @@ enum DiagnosticsCommandKind {
     CompileLayout,
     #[value(name = "lint-input")]
     LintInput,
+    #[value(name = "lint-timing-constraints")]
+    LintTimingConstraints,
     #[value(name = "pdk-validate")]
     PdkValidate,
     #[value(name = "pdk-cell-library")]
@@ -452,11 +509,31 @@ fn cli_error_detail(error: &anyhow::Error) -> String {
 }
 
 fn flow_config_with_cli_closure_options(
+    flow_config: Option<&Path>,
+    clock_period_ps: Option<f64>,
+    input_arrival_ps: Option<f64>,
+    sfq_phase_count: Option<usize>,
+    sfq_pulse_window_ps: Option<f64>,
     min_hold_jtl_length_um: Option<f64>,
     prefer_ptl_from_length_um: Option<f64>,
     detour_margin_um: Option<f64>,
-) -> FlowConfig {
+) -> Result<FlowConfig> {
     let mut config = FlowConfig::default();
+    if let Some(path) = flow_config {
+        apply_cli_flow_config_file(&mut config, path)?;
+    }
+    if let Some(period_ps) = clock_period_ps {
+        config.timing.clock_period_ps = period_ps;
+    }
+    if let Some(arrival_ps) = input_arrival_ps {
+        config.timing.input_arrival_ps = arrival_ps;
+    }
+    if let Some(phase_count) = sfq_phase_count {
+        config.timing.sfq_phase_count = phase_count;
+    }
+    if let Some(window_ps) = sfq_pulse_window_ps {
+        config.timing.sfq_pulse_window_ps = window_ps;
+    }
     if let Some(length_um) = min_hold_jtl_length_um {
         config.min_hold_jtl_length_um = length_um;
     }
@@ -466,7 +543,459 @@ fn flow_config_with_cli_closure_options(
     if let Some(margin_um) = detour_margin_um {
         config.routing.detour_margin_um = margin_um;
     }
-    config
+    Ok(config)
+}
+
+#[derive(Debug, Deserialize)]
+struct CliFlowConfigFile {
+    #[serde(default)]
+    timing: CliFlowTimingConfig,
+    #[serde(default)]
+    routing: CliFlowRoutingConfig,
+    #[serde(default)]
+    clock_period_ps: Option<f64>,
+    #[serde(default)]
+    input_arrival_ps: Option<f64>,
+    #[serde(default)]
+    sfq_phase_count: Option<usize>,
+    #[serde(default)]
+    sfq_pulse_window_ps: Option<f64>,
+    #[serde(default)]
+    min_hold_jtl_length_um: Option<f64>,
+    #[serde(default)]
+    prefer_ptl_from_length_um: Option<f64>,
+    #[serde(default)]
+    detour_margin_um: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CliFlowTimingConfig {
+    #[serde(default)]
+    clock_period_ps: Option<f64>,
+    #[serde(default)]
+    input_arrival_ps: Option<f64>,
+    #[serde(default)]
+    sfq_phase_count: Option<usize>,
+    #[serde(default)]
+    sfq_pulse_window_ps: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CliFlowRoutingConfig {
+    #[serde(default)]
+    prefer_ptl_from_length_um: Option<f64>,
+    #[serde(default)]
+    detour_margin_um: Option<f64>,
+    #[serde(default)]
+    min_hold_jtl_length_um: Option<f64>,
+}
+
+fn apply_cli_flow_config_file(config: &mut FlowConfig, path: &Path) -> Result<()> {
+    let flow_config = read_cli_flow_config_file(path)?;
+    if let Some(period_ps) = flow_config
+        .timing
+        .clock_period_ps
+        .or(flow_config.clock_period_ps)
+    {
+        config.timing.clock_period_ps = period_ps;
+    }
+    if let Some(arrival_ps) = flow_config
+        .timing
+        .input_arrival_ps
+        .or(flow_config.input_arrival_ps)
+    {
+        config.timing.input_arrival_ps = arrival_ps;
+    }
+    if let Some(phase_count) = flow_config
+        .timing
+        .sfq_phase_count
+        .or(flow_config.sfq_phase_count)
+    {
+        config.timing.sfq_phase_count = phase_count;
+    }
+    if let Some(window_ps) = flow_config
+        .timing
+        .sfq_pulse_window_ps
+        .or(flow_config.sfq_pulse_window_ps)
+    {
+        config.timing.sfq_pulse_window_ps = window_ps;
+    }
+    if let Some(length_um) = flow_config
+        .routing
+        .min_hold_jtl_length_um
+        .or(flow_config.min_hold_jtl_length_um)
+    {
+        config.min_hold_jtl_length_um = length_um;
+    }
+    if let Some(threshold_um) = flow_config
+        .routing
+        .prefer_ptl_from_length_um
+        .or(flow_config.prefer_ptl_from_length_um)
+    {
+        config.routing.prefer_ptl_from_length_um = threshold_um;
+    }
+    if let Some(margin_um) = flow_config
+        .routing
+        .detour_margin_um
+        .or(flow_config.detour_margin_um)
+    {
+        config.routing.detour_margin_um = margin_um;
+    }
+    Ok(())
+}
+
+fn read_cli_flow_config_file(path: &Path) -> Result<CliFlowConfigFile> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read flow config from {}", path.display()))?;
+    let json: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse flow config JSON from {}", path.display()))?;
+    let payload = flow_config_payload(&json)?;
+    serde_json::from_value(payload)
+        .with_context(|| format!("failed to decode flow config JSON from {}", path.display()))
+}
+
+fn flow_config_payload(json: &Value) -> Result<Value> {
+    let Some(object) = json.as_object() else {
+        bail!("flow config JSON must be an object");
+    };
+    let looks_like_envelope = object.contains_key("schema_version")
+        || object.contains_key("kind")
+        || object.contains_key("payload");
+    if !looks_like_envelope {
+        return Ok(json.clone());
+    }
+
+    let schema_version = object
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("flow config envelope is missing numeric schema_version"))?;
+    if schema_version != FLOW_CONFIG_SCHEMA_VERSION {
+        bail!(
+            "unsupported flow config schema_version {}; expected {}",
+            schema_version,
+            FLOW_CONFIG_SCHEMA_VERSION
+        );
+    }
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("flow config envelope is missing string kind"))?;
+    if kind != FLOW_CONFIG_KIND {
+        bail!(
+            "unexpected flow config kind '{}'; expected '{}'",
+            kind,
+            FLOW_CONFIG_KIND
+        );
+    }
+    object
+        .get("payload")
+        .cloned()
+        .ok_or_else(|| anyhow!("flow config envelope is missing payload"))
+}
+
+#[derive(Debug, Deserialize)]
+struct TimingConstraintsFile {
+    #[serde(default, alias = "nodes")]
+    node_constraints: Vec<CliNodeTimingConstraint>,
+    #[serde(default, alias = "pins")]
+    pin_constraints: Vec<CliPinTimingConstraint>,
+    #[serde(default, alias = "domains")]
+    clock_domains: Vec<CliClockDomainConstraint>,
+    #[serde(default, alias = "crossings")]
+    crossing_constraints: Vec<CliCrossingConstraint>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CliNodeRef {
+    Id(usize),
+    Name(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct CliNodeTimingConstraint {
+    node: CliNodeRef,
+    #[serde(default)]
+    input_arrival_ps: Option<f64>,
+    #[serde(default)]
+    required_ps: Option<f64>,
+    #[serde(default)]
+    clock_domain: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliPinTimingConstraint {
+    node: CliNodeRef,
+    port: u16,
+    #[serde(default)]
+    input_arrival_ps: Option<f64>,
+    #[serde(default)]
+    required_ps: Option<f64>,
+    #[serde(default)]
+    clock_domain: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliClockDomainConstraint {
+    id: usize,
+    period_ps: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliCrossingConstraint {
+    from_domain: usize,
+    to_domain: usize,
+    kind: String,
+    #[serde(default)]
+    value_ps: Option<f64>,
+    #[serde(default)]
+    cycles: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimingConstraintSummary {
+    node_constraints: usize,
+    pin_constraints: usize,
+    clock_domains: usize,
+    crossing_constraints: usize,
+}
+
+impl TimingConstraintSummary {
+    fn to_json(self) -> Value {
+        json!({
+            "node_constraints": self.node_constraints,
+            "pin_constraints": self.pin_constraints,
+            "clock_domains": self.clock_domains,
+            "crossing_constraints": self.crossing_constraints,
+        })
+    }
+}
+
+fn apply_timing_constraints_file(
+    config: &mut FlowConfig,
+    netlist: &rflux_ir::Netlist,
+    path: &Path,
+) -> Result<TimingConstraintSummary> {
+    let constraints = read_timing_constraints_file(path)?;
+    validate_cli_timing_constraints(&constraints)?;
+    let summary = summarize_timing_constraints(&constraints);
+
+    config.timing.node_constraints = constraints
+        .node_constraints
+        .iter()
+        .map(|constraint| {
+            Ok(NodeTimingConstraint {
+                node: resolve_cli_node_ref(netlist, &constraint.node)?,
+                input_arrival_ps: constraint.input_arrival_ps,
+                required_ps: constraint.required_ps,
+                clock_domain: constraint.clock_domain,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    config.timing.pin_constraints = constraints
+        .pin_constraints
+        .iter()
+        .map(|constraint| {
+            Ok(PinTimingConstraint {
+                pin: rflux_ir::PinRef {
+                    node: resolve_cli_node_ref(netlist, &constraint.node)?,
+                    port: constraint.port,
+                },
+                input_arrival_ps: constraint.input_arrival_ps,
+                required_ps: constraint.required_ps,
+                clock_domain: constraint.clock_domain,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    config.timing.clock_domains = constraints
+        .clock_domains
+        .iter()
+        .map(|domain| ClockDomainConstraint {
+            id: domain.id,
+            period_ps: domain.period_ps,
+        })
+        .collect();
+    config.timing.crossing_constraints = constraints
+        .crossing_constraints
+        .iter()
+        .map(|constraint| {
+            Ok(CrossingConstraint {
+                from_domain: constraint.from_domain,
+                to_domain: constraint.to_domain,
+                kind: parse_cli_crossing_constraint_kind(&constraint.kind)?,
+                value_ps: constraint.value_ps,
+                cycles: constraint.cycles,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(summary)
+}
+
+fn read_timing_constraints_file(path: &Path) -> Result<TimingConstraintsFile> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read timing constraints from {}", path.display()))?;
+    let json: Value = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse timing constraints JSON from {}",
+            path.display()
+        )
+    })?;
+    let payload = timing_constraints_payload(&json)?;
+    serde_json::from_value(payload).with_context(|| {
+        format!(
+            "failed to decode timing constraints JSON from {}",
+            path.display()
+        )
+    })
+}
+
+fn timing_constraints_payload(json: &Value) -> Result<Value> {
+    let Some(object) = json.as_object() else {
+        bail!("timing constraints JSON must be an object");
+    };
+    let looks_like_envelope = object.contains_key("schema_version")
+        || object.contains_key("kind")
+        || object.contains_key("payload");
+    if !looks_like_envelope {
+        return Ok(json.clone());
+    }
+
+    let schema_version = object
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("timing constraints envelope is missing numeric schema_version"))?;
+    if schema_version != TIMING_CONSTRAINTS_SCHEMA_VERSION {
+        bail!(
+            "unsupported timing constraints schema_version {}; expected {}",
+            schema_version,
+            TIMING_CONSTRAINTS_SCHEMA_VERSION
+        );
+    }
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("timing constraints envelope is missing string kind"))?;
+    if kind != TIMING_CONSTRAINTS_KIND {
+        bail!(
+            "unexpected timing constraints kind '{}'; expected '{}'",
+            kind,
+            TIMING_CONSTRAINTS_KIND
+        );
+    }
+    object
+        .get("payload")
+        .cloned()
+        .ok_or_else(|| anyhow!("timing constraints envelope is missing payload"))
+}
+
+fn validate_cli_timing_constraints(constraints: &TimingConstraintsFile) -> Result<()> {
+    let mut domain_ids = BTreeSet::new();
+    for domain in &constraints.clock_domains {
+        if domain.period_ps <= 0.0 {
+            bail!(
+                "timing constraints clock domain {} must have a positive period_ps",
+                domain.id
+            );
+        }
+        if !domain_ids.insert(domain.id) {
+            bail!(
+                "timing constraints define duplicate clock domain {}",
+                domain.id
+            );
+        }
+    }
+
+    for crossing in &constraints.crossing_constraints {
+        if !domain_ids.contains(&crossing.from_domain) {
+            bail!(
+                "timing constraints crossing references unknown from_domain {}",
+                crossing.from_domain
+            );
+        }
+        if !domain_ids.contains(&crossing.to_domain) {
+            bail!(
+                "timing constraints crossing references unknown to_domain {}",
+                crossing.to_domain
+            );
+        }
+        parse_cli_crossing_constraint_kind(&crossing.kind)?;
+    }
+
+    Ok(())
+}
+
+fn summarize_timing_constraints(constraints: &TimingConstraintsFile) -> TimingConstraintSummary {
+    TimingConstraintSummary {
+        node_constraints: constraints.node_constraints.len(),
+        pin_constraints: constraints.pin_constraints.len(),
+        clock_domains: constraints.clock_domains.len(),
+        crossing_constraints: constraints.crossing_constraints.len(),
+    }
+}
+
+fn resolve_cli_node_ref(
+    netlist: &rflux_ir::Netlist,
+    node_ref: &CliNodeRef,
+) -> Result<rflux_ir::NodeId> {
+    match node_ref {
+        CliNodeRef::Id(index) => {
+            if *index < netlist.node_count() {
+                Ok(rflux_ir::NodeId(*index))
+            } else {
+                bail!(
+                    "timing constraints reference node id {} but netlist has {} nodes",
+                    index,
+                    netlist.node_count()
+                )
+            }
+        }
+        CliNodeRef::Name(name) => {
+            let mut matches = netlist
+                .nodes()
+                .iter()
+                .filter(|node| node.name == *name)
+                .map(|node| node.id);
+            let Some(node_id) = matches.next() else {
+                bail!("timing constraints reference unknown node name '{name}'");
+            };
+            if matches.next().is_some() {
+                bail!("timing constraints reference ambiguous node name '{name}'");
+            }
+            Ok(node_id)
+        }
+    }
+}
+
+fn parse_cli_crossing_constraint_kind(kind: &str) -> Result<CrossingConstraintKind> {
+    match kind {
+        "false_path" | "false-path" => Ok(CrossingConstraintKind::FalsePath),
+        "max_delay" | "max-delay" => Ok(CrossingConstraintKind::MaxDelay),
+        "multicycle" => Ok(CrossingConstraintKind::Multicycle),
+        _ => bail!("unknown crossing constraint kind: {kind}"),
+    }
+}
+
+fn diagnostics_flow_config_json(args: &RunWithDiagnosticsArgs) -> Value {
+    json!({
+        "uses_default_flow_config": args.clock_period_ps.is_none()
+            && args.input_arrival_ps.is_none()
+            && args.sfq_phase_count.is_none()
+            && args.sfq_pulse_window_ps.is_none()
+            && args.flow_config.is_none()
+            && args.timing_constraints.is_none()
+            && args.min_hold_jtl_length_um.is_none()
+            && args.prefer_ptl_from_length_um.is_none()
+            && args.detour_margin_um.is_none(),
+        "clock_period_ps": args.clock_period_ps,
+        "input_arrival_ps": args.input_arrival_ps,
+        "sfq_phase_count": args.sfq_phase_count,
+        "sfq_pulse_window_ps": args.sfq_pulse_window_ps,
+        "flow_config": args.flow_config.as_ref().map(|path| display_path(path)),
+        "timing_constraints": args.timing_constraints.as_ref().map(|path| display_path(path)),
+        "min_hold_jtl_length_um": args.min_hold_jtl_length_um,
+        "prefer_ptl_from_length_um": args.prefer_ptl_from_length_um,
+        "detour_margin_um": args.detour_margin_um,
+    })
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -475,6 +1004,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::PdkValidate(args) => run_pdk_validate(args),
         Commands::PdkCellLibrary(args) => run_pdk_cell_library(args),
         Commands::LintInput(args) => run_lint_input(args),
+        Commands::LintTimingConstraints(args) => run_lint_timing_constraints(args),
         Commands::CollectDiagnostics(args) => run_collect_diagnostics(args),
         Commands::RunWithDiagnostics(args) => run_with_diagnostics(args),
         Commands::CompileNetlist(args) => run_compile_netlist(args),
@@ -496,7 +1026,10 @@ fn run_pdk_minimal(args: PdkMinimalArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", pdk.to_json().context("failed to serialize minimal PDK")?);
+    println!(
+        "{}",
+        pdk.to_json().context("failed to serialize minimal PDK")?
+    );
     Ok(())
 }
 
@@ -506,7 +1039,8 @@ fn run_pdk_validate(args: PdkValidateArgs) -> Result<()> {
 }
 
 fn run_pdk_cell_library(args: PdkCellLibraryArgs) -> Result<()> {
-    let report = build_pdk_cell_library_report(&args.input, args.cell.as_deref(), args.kind.as_deref())?;
+    let report =
+        build_pdk_cell_library_report(&args.input, args.cell.as_deref(), args.kind.as_deref())?;
     emit_json(&with_schema_version(report), args.output.as_deref())
 }
 
@@ -516,12 +1050,30 @@ fn run_lint_input(args: LintInputArgs) -> Result<()> {
     emit_json(&with_schema_version(report), args.output.as_deref())
 }
 
+fn run_lint_timing_constraints(args: LintTimingConstraintsArgs) -> Result<()> {
+    let report = build_lint_timing_constraints_report(
+        &args.input,
+        args.netlist.as_deref(),
+        args.netlist_format,
+    )?;
+
+    emit_json(&with_schema_version(report), args.output.as_deref())
+}
+
 fn run_collect_diagnostics(args: CollectDiagnosticsArgs) -> Result<()> {
-    fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("failed to create diagnostics directory {}", args.output_dir.display()))?;
+    fs::create_dir_all(&args.output_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics directory {}",
+            args.output_dir.display()
+        )
+    })?;
     let inputs_dir = args.output_dir.join("inputs");
-    fs::create_dir_all(&inputs_dir)
-        .with_context(|| format!("failed to create diagnostics inputs directory {}", inputs_dir.display()))?;
+    fs::create_dir_all(&inputs_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics inputs directory {}",
+            inputs_dir.display()
+        )
+    })?;
     let event_log_path = args.output_dir.join("events.jsonl");
     let mut event_log = Vec::new();
     event_log.push(diagnostics_event(
@@ -555,8 +1107,12 @@ fn run_collect_diagnostics(args: CollectDiagnosticsArgs) -> Result<()> {
     let mut captured_reports = Vec::new();
     if let Some(report) = args.report.as_deref() {
         let reports_dir = args.output_dir.join("reports");
-        fs::create_dir_all(&reports_dir)
-            .with_context(|| format!("failed to create diagnostics reports directory {}", reports_dir.display()))?;
+        fs::create_dir_all(&reports_dir).with_context(|| {
+            format!(
+                "failed to create diagnostics reports directory {}",
+                reports_dir.display()
+            )
+        })?;
         captured_reports.push(capture_diagnostics_report(&reports_dir, report)?);
         event_log.push(diagnostics_event(
             "report_captured",
@@ -565,7 +1121,8 @@ fn run_collect_diagnostics(args: CollectDiagnosticsArgs) -> Result<()> {
             }),
         )?);
     }
-    let summary = build_diagnostics_summary(args.command.as_deref(), &captured_inputs, &captured_reports);
+    let summary =
+        build_diagnostics_summary(args.command.as_deref(), &captured_inputs, &captured_reports);
     let configuration = build_diagnostics_configuration(&args);
     event_log.push(diagnostics_event(
         "manifest_prepared",
@@ -615,7 +1172,10 @@ fn run_collect_diagnostics(args: CollectDiagnosticsArgs) -> Result<()> {
         "captured_reports": captured_reports,
     }));
 
-    emit_json(&manifest, Some(args.output_dir.join("manifest.json").as_path()))
+    emit_json(
+        &manifest,
+        Some(args.output_dir.join("manifest.json").as_path()),
+    )
 }
 
 fn run_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
@@ -625,6 +1185,9 @@ fn run_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
         DiagnosticsCommandKind::CompileNetlist => run_compile_netlist_with_diagnostics(args),
         DiagnosticsCommandKind::CompileLayout => run_compile_layout_with_diagnostics(args),
         DiagnosticsCommandKind::LintInput => run_lint_input_with_diagnostics(args),
+        DiagnosticsCommandKind::LintTimingConstraints => {
+            run_lint_timing_constraints_with_diagnostics(args)
+        }
         DiagnosticsCommandKind::PdkValidate => run_pdk_validate_with_diagnostics(args),
         DiagnosticsCommandKind::PdkCellLibrary => run_pdk_cell_library_with_diagnostics(args),
         DiagnosticsCommandKind::SolveDimacs => run_solve_dimacs_with_diagnostics(args),
@@ -637,14 +1200,26 @@ fn prepare_diagnostics_bundle(
     output_dir: &Path,
     kind: DiagnosticsCommandKind,
 ) -> Result<(PathBuf, PathBuf, PathBuf, Vec<Value>)> {
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("failed to create diagnostics directory {}", output_dir.display()))?;
+    fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics directory {}",
+            output_dir.display()
+        )
+    })?;
     let inputs_dir = output_dir.join("inputs");
     let reports_dir = output_dir.join("reports");
-    fs::create_dir_all(&inputs_dir)
-        .with_context(|| format!("failed to create diagnostics inputs directory {}", inputs_dir.display()))?;
-    fs::create_dir_all(&reports_dir)
-        .with_context(|| format!("failed to create diagnostics reports directory {}", reports_dir.display()))?;
+    fs::create_dir_all(&inputs_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics inputs directory {}",
+            inputs_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&reports_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics reports directory {}",
+            reports_dir.display()
+        )
+    })?;
 
     let event_log_path = output_dir.join("events.jsonl");
     let event_log = vec![diagnostics_event(
@@ -665,17 +1240,11 @@ fn capture_input_and_optional_pdk_for_bundle(
     pdk: Option<&Path>,
 ) -> Result<Vec<Value>> {
     let mut captured_inputs = vec![capture_diagnostics_input_for_bundle(
-        event_log,
-        inputs_dir,
-        "input",
-        input,
+        event_log, inputs_dir, "input", input,
     )?];
     if let Some(pdk) = pdk {
         captured_inputs.push(capture_diagnostics_input_for_bundle(
-            event_log,
-            inputs_dir,
-            "pdk",
-            pdk,
+            event_log, inputs_dir, "pdk", pdk,
         )?);
     }
     Ok(captured_inputs)
@@ -737,7 +1306,9 @@ fn diagnostics_input_pdk_command_configuration(
         },
     });
 
-    if let (Value::Object(configuration_map), Value::Object(extra_map)) = (&mut configuration, extra) {
+    if let (Value::Object(configuration_map), Value::Object(extra_map)) =
+        (&mut configuration, extra)
+    {
         configuration_map.extend(extra_map);
     }
 
@@ -745,19 +1316,15 @@ fn diagnostics_input_pdk_command_configuration(
 }
 
 fn run_lint_input_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
-    let input_kind = args
-        .input_kind
-        .ok_or_else(|| anyhow!("run-with-diagnostics --kind lint-input requires --input-kind ir|bench|pdk"))?;
+    let input_kind = args.input_kind.ok_or_else(|| {
+        anyhow!("run-with-diagnostics --kind lint-input requires --input-kind ir|bench|pdk")
+    })?;
     let input_role = lint_input_role(input_kind);
 
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
-    let captured_input = capture_diagnostics_input_for_bundle(
-        &mut event_log,
-        &inputs_dir,
-        input_role,
-        &args.input,
-    )?;
+    let captured_input =
+        capture_diagnostics_input_for_bundle(&mut event_log, &inputs_dir, input_role, &args.input)?;
 
     event_log.push(diagnostics_event(
         "command_started",
@@ -820,18 +1387,97 @@ fn run_lint_input_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
         &event_log_path,
         &mut event_log,
     )
+}
 
+fn run_lint_timing_constraints_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
+    let (inputs_dir, reports_dir, event_log_path, mut event_log) =
+        prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
+    let mut captured_inputs = vec![capture_diagnostics_input_for_bundle(
+        &mut event_log,
+        &inputs_dir,
+        "timing_constraints",
+        &args.input,
+    )?];
+    if let Some(netlist) = args.netlist.as_deref() {
+        captured_inputs.push(capture_diagnostics_input_for_bundle(
+            &mut event_log,
+            &inputs_dir,
+            "input",
+            netlist,
+        )?);
+    }
+
+    event_log.push(diagnostics_event(
+        "command_started",
+        json!({
+            "kind": diagnostics_command_kind_name(args.kind),
+            "input": args.input.display().to_string(),
+            "netlist": args.netlist.as_ref().map(|path| path.display().to_string()),
+            "netlist_format": cli_netlist_input_format_name(args.netlist_format),
+        }),
+    )?);
+
+    let run_result = build_lint_timing_constraints_report(
+        &args.input,
+        args.netlist.as_deref(),
+        args.netlist_format,
+    )
+    .map(with_schema_version);
+
+    let (captured_reports, execution, completion_event) = match run_result {
+        Ok(report_json) => diagnostics_success_outcome(
+            &reports_dir,
+            "lint-timing-constraints-report.json",
+            &report_json,
+            json!({
+                "status": "succeeded",
+                "report_kind": "lint_timing_constraints",
+                "valid": report_json["valid"].clone(),
+                "constraint_summary": report_json["constraint_summary"].clone(),
+            }),
+        )?,
+        Err(error) => diagnostics_failure_outcome(error)?,
+    };
+    event_log.push(completion_event);
+
+    let summary = build_diagnostics_summary(
+        Some(diagnostics_command_kind_name(args.kind)),
+        &captured_inputs,
+        &captured_reports,
+    );
+    let configuration = json!({
+        "command": diagnostics_command_kind_name(args.kind),
+        "notes": args.notes,
+        "paths": {
+            "input": display_path(&args.input),
+            "netlist": args.netlist.as_ref().map(|path| display_path(path)),
+            "output_dir": display_path(&args.output_dir),
+        },
+        "lint_timing_constraints": {
+            "netlist_format": cli_netlist_input_format_name(args.netlist_format),
+        },
+    });
+    write_diagnostics_bundle_manifest(
+        &args.output_dir,
+        diagnostics_command_kind_name(args.kind),
+        Value::Null,
+        Value::Null,
+        args.notes.as_deref(),
+        configuration,
+        summary,
+        execution,
+        captured_inputs,
+        captured_reports,
+        &event_log_path,
+        &mut event_log,
+    )
 }
 
 fn run_pdk_validate_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
-    let captured_input = capture_diagnostics_input_for_bundle(
-        &mut event_log,
-        &inputs_dir,
-        "pdk",
-        &args.input,
-    )?;
+    let captured_input =
+        capture_diagnostics_input_for_bundle(&mut event_log, &inputs_dir, "pdk", &args.input)?;
 
     event_log.push(diagnostics_event(
         "command_started",
@@ -894,12 +1540,8 @@ fn run_pdk_validate_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()>
 fn run_pdk_cell_library_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
-    let captured_input = capture_diagnostics_input_for_bundle(
-        &mut event_log,
-        &inputs_dir,
-        "pdk",
-        &args.input,
-    )?;
+    let captured_input =
+        capture_diagnostics_input_for_bundle(&mut event_log, &inputs_dir, "pdk", &args.input)?;
 
     event_log.push(diagnostics_event(
         "command_started",
@@ -909,7 +1551,8 @@ fn run_pdk_cell_library_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result
         }),
     )?);
 
-    let run_result = build_pdk_cell_library_report(&args.input, None, None).map(with_schema_version);
+    let run_result =
+        build_pdk_cell_library_report(&args.input, None, None).map(with_schema_version);
 
     let (captured_reports, execution, completion_event) = match run_result {
         Ok(report_json) => diagnostics_success_outcome(
@@ -961,11 +1604,12 @@ fn run_pdk_cell_library_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result
 }
 
 fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
-    let rhs = args
-        .rhs
-        .as_deref()
-        .ok_or_else(|| anyhow!("run-with-diagnostics --kind check-equivalence requires --rhs PATH"))?;
-    let equivalence_kind = args.equivalence_kind.unwrap_or(CliEquivalenceKind::Combinational);
+    let rhs = args.rhs.as_deref().ok_or_else(|| {
+        anyhow!("run-with-diagnostics --kind check-equivalence requires --rhs PATH")
+    })?;
+    let equivalence_kind = args
+        .equivalence_kind
+        .unwrap_or(CliEquivalenceKind::Combinational);
 
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
@@ -998,12 +1642,8 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
     )?);
 
     let run_result = (|| -> Result<Value> {
-        let (lhs_netlist, rhs_netlist) = load_equivalence_netlists(
-            &args.input,
-            args.input_format,
-            rhs,
-            args.rhs_format,
-        )?;
+        let (lhs_netlist, rhs_netlist) =
+            load_equivalence_netlists(&args.input, args.input_format, rhs, args.rhs_format)?;
         let verifier = Verifier::new();
 
         match equivalence_kind {
@@ -1035,7 +1675,10 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
                     .as_deref()
                     .map(|path| {
                         verifier
-                            .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
+                            .build_single_step_sequential_equivalence_problem(
+                                &lhs_netlist,
+                                &rhs_netlist,
+                            )
                             .context("single-step sequential equivalence DIMACS export failed")
                             .and_then(|problem| write_equivalence_dimacs_bundle(path, &problem))
                     })
@@ -1045,7 +1688,11 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
             }
             CliEquivalenceKind::BoundedSequential => {
                 let report = verifier
-                    .check_bounded_sequential_equivalence(&lhs_netlist, &rhs_netlist, args.equivalence_depth)
+                    .check_bounded_sequential_equivalence(
+                        &lhs_netlist,
+                        &rhs_netlist,
+                        args.equivalence_depth,
+                    )
                     .context("bounded sequential equivalence check failed")?;
                 let mut report_json = bounded_sequential_equivalence_report_to_json(&report);
                 let dimacs_export = args
@@ -1053,7 +1700,10 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
                     .as_deref()
                     .map(|path| {
                         verifier
-                            .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
+                            .build_single_step_sequential_equivalence_problem(
+                                &lhs_netlist,
+                                &rhs_netlist,
+                            )
                             .context("bounded sequential equivalence DIMACS export failed")
                             .and_then(|problem| write_equivalence_dimacs_bundle(path, &problem))
                     })
@@ -1150,9 +1800,14 @@ fn run_solve_dimacs_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()>
         let raw = fs::read_to_string(&args.input)
             .with_context(|| format!("failed to read DIMACS from {}", args.input.display()))?;
         let cnf = CnfFormula::from_dimacs(&raw).map_err(|error| {
-            anyhow!("failed to parse DIMACS from {}: {:?}", args.input.display(), error)
+            anyhow!(
+                "failed to parse DIMACS from {}: {:?}",
+                args.input.display(),
+                error
+            )
         })?;
-        let mut assumptions = parse_assumptions_option(args.assumptions.as_deref(), cnf.var_count())?;
+        let mut assumptions =
+            parse_assumptions_option(args.assumptions.as_deref(), cnf.var_count())?;
         let metadata_selection = load_equivalence_check_selection(
             args.equivalence_metadata.as_deref(),
             args.check_ref.as_deref(),
@@ -1271,7 +1926,10 @@ fn run_solve_dimacs_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()>
         "captured_reports": captured_reports,
     }));
 
-    emit_json(&manifest, Some(args.output_dir.join("manifest.json").as_path()))
+    emit_json(
+        &manifest,
+        Some(args.output_dir.join("manifest.json").as_path()),
+    )
 }
 
 fn run_compile_netlist_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
@@ -1292,12 +1950,13 @@ fn run_compile_netlist_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<
         args.pdk.as_deref(),
     )?;
 
-    let run_result = load_cli_netlist_and_pdk(&args.input, args.input_format, args.pdk.clone()).and_then(|(mut netlist, pdk)| {
-        with_flow_runner(|flow| {
-            flow.compile_artifacts_for_cli_netlist(&mut netlist, &pdk)
-                .context("compile-netlist failed")
-        })
-    });
+    let run_result = load_cli_netlist_and_pdk(&args.input, args.input_format, args.pdk.clone())
+        .and_then(|(mut netlist, pdk)| {
+            with_flow_runner(|flow| {
+                flow.compile_artifacts_for_cli_netlist(&mut netlist, &pdk)
+                    .context("compile-netlist failed")
+            })
+        });
 
     let (captured_reports, execution, completion_event) = match run_result {
         Ok(report) => {
@@ -1334,9 +1993,7 @@ fn run_compile_netlist_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<
         args.pdk.as_deref(),
         &args.output_dir,
         json!({
-            "flow": {
-                "uses_default_flow_config": true,
-            },
+            "flow": diagnostics_flow_config_json(&args),
             "input_format": cli_netlist_input_format_name(args.input_format),
         }),
     );
@@ -1360,12 +2017,28 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
 
-    let captured_inputs = capture_input_and_optional_pdk_for_bundle(
+    let mut captured_inputs = capture_input_and_optional_pdk_for_bundle(
         &mut event_log,
         &inputs_dir,
         &args.input,
         args.pdk.as_deref(),
     )?;
+    if let Some(flow_config) = args.flow_config.as_deref() {
+        captured_inputs.push(capture_diagnostics_input_for_bundle(
+            &mut event_log,
+            &inputs_dir,
+            "flow_config",
+            flow_config,
+        )?);
+    }
+    if let Some(timing_constraints) = args.timing_constraints.as_deref() {
+        captured_inputs.push(capture_diagnostics_input_for_bundle(
+            &mut event_log,
+            &inputs_dir,
+            "timing_constraints",
+            timing_constraints,
+        )?);
+    }
 
     push_input_and_optional_pdk_command_started_event(
         &mut event_log,
@@ -1374,17 +2047,53 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.pdk.as_deref(),
     )?;
 
-    let flow_config = flow_config_with_cli_closure_options(None, None, None);
-    let run_result = with_loaded_flow_inputs(&args.input, args.input_format, args.pdk.clone(), |flow, netlist, pdk| {
-        flow.analyze_timing(netlist, pdk, &flow_config)
-            .context("analyze-timing failed")
-    });
+    let mut flow_config = flow_config_with_cli_closure_options(
+        args.flow_config.as_deref(),
+        args.clock_period_ps,
+        args.input_arrival_ps,
+        args.sfq_phase_count,
+        args.sfq_pulse_window_ps,
+        args.min_hold_jtl_length_um,
+        args.prefer_ptl_from_length_um,
+        args.detour_margin_um,
+    )?;
+    let timing_constraints = args.timing_constraints.clone();
+    let mut timing_constraint_summary = None;
+    let run_result = with_loaded_flow_inputs(
+        &args.input,
+        args.input_format,
+        args.pdk.clone(),
+        |flow, netlist, pdk| {
+            if let Some(path) = timing_constraints.as_deref() {
+                timing_constraint_summary = Some(apply_timing_constraints_file(
+                    &mut flow_config,
+                    netlist,
+                    path,
+                )?);
+            }
+            flow.analyze_timing(netlist, pdk, &flow_config)
+                .context("analyze-timing failed")
+        },
+    );
 
     let (captured_reports, execution, completion_event) = match run_result {
         Ok(report) => {
+            let multi_corner = with_loaded_flow_inputs(
+                &args.input,
+                args.input_format,
+                args.pdk.clone(),
+                |flow, netlist, pdk| {
+                    flow.analyze_timing_corners(netlist, pdk, &flow_config)
+                        .context("analyze-timing multi-corner failed")
+                },
+            )?;
             let mut report_json = timing_analysis_to_json(&report);
             if let Value::Object(ref mut object) = report_json {
                 object.insert("kind".to_string(), json!("timing_analysis"));
+                object.insert(
+                    "multi_corner".to_string(),
+                    multi_corner_timing_analysis_to_json(&multi_corner),
+                );
             }
             let report_json = with_schema_version(report_json);
             diagnostics_success_outcome(
@@ -1416,9 +2125,8 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.pdk.as_deref(),
         &args.output_dir,
         json!({
-            "flow": {
-                "uses_default_flow_config": true,
-            },
+            "flow": diagnostics_flow_config_json(&args),
+            "timing_constraint_summary": timing_constraint_summary.map(TimingConstraintSummary::to_json),
             "input_format": cli_netlist_input_format_name(args.input_format),
         }),
     );
@@ -1442,12 +2150,28 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
 
-    let captured_inputs = capture_input_and_optional_pdk_for_bundle(
+    let mut captured_inputs = capture_input_and_optional_pdk_for_bundle(
         &mut event_log,
         &inputs_dir,
         &args.input,
         args.pdk.as_deref(),
     )?;
+    if let Some(flow_config) = args.flow_config.as_deref() {
+        captured_inputs.push(capture_diagnostics_input_for_bundle(
+            &mut event_log,
+            &inputs_dir,
+            "flow_config",
+            flow_config,
+        )?);
+    }
+    if let Some(timing_constraints) = args.timing_constraints.as_deref() {
+        captured_inputs.push(capture_diagnostics_input_for_bundle(
+            &mut event_log,
+            &inputs_dir,
+            "timing_constraints",
+            timing_constraints,
+        )?);
+    }
 
     push_input_and_optional_pdk_command_started_event(
         &mut event_log,
@@ -1456,24 +2180,47 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.pdk.as_deref(),
     )?;
 
-    let flow_config = flow_config_with_cli_closure_options(
+    let mut flow_config = flow_config_with_cli_closure_options(
+        args.flow_config.as_deref(),
+        args.clock_period_ps,
+        args.input_arrival_ps,
+        args.sfq_phase_count,
+        args.sfq_pulse_window_ps,
         args.min_hold_jtl_length_um,
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
+    )?;
+    let timing_constraints = args.timing_constraints.clone();
+    let mut timing_constraint_summary = None;
+    let run_result = with_loaded_flow_inputs(
+        &args.input,
+        args.input_format,
+        args.pdk.clone(),
+        |flow, netlist, pdk| {
+            if let Some(path) = timing_constraints.as_deref() {
+                timing_constraint_summary = Some(apply_timing_constraints_file(
+                    &mut flow_config,
+                    netlist,
+                    path,
+                )?);
+            }
+            flow.compile_layout(netlist, pdk, &flow_config)
+                .context("compile-layout failed")
+        },
     );
-    let run_result = with_loaded_flow_inputs(&args.input, args.input_format, args.pdk.clone(), |flow, netlist, pdk| {
-        flow.compile_layout(netlist, pdk, &flow_config)
-            .context("compile-layout failed")
-    });
 
     let (captured_reports, execution, completion_event) = match run_result {
         Ok(report) => {
-            let mut report_json = layout_report_to_json(&report);
+            let mut report_json = layout_report_to_json_with_flow_config(&report, &flow_config);
             if let Value::Object(ref mut object) = report_json {
                 object.insert("kind".to_string(), json!("compile_layout"));
             }
+            let flow_config_patch = report_json
+                .get("flow_config_patch")
+                .cloned()
+                .unwrap_or_else(|| layout_flow_config_patch(&report, &flow_config));
             let report_json = with_schema_version(report_json);
-            diagnostics_success_outcome(
+            let (mut captured_reports, execution, completion_event) = diagnostics_success_outcome(
                 &reports_dir,
                 "compile-layout-report.json",
                 &report_json,
@@ -1484,7 +2231,13 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
                     "routed_nets": report.routing.routed_nets,
                     "timing_closure_status": report.timing_closure.status,
                 }),
-            )
+            )?;
+            captured_reports.push(write_generated_diagnostics_report(
+                &reports_dir,
+                "flow-config-patch.json",
+                &flow_config_patch,
+            )?);
+            Ok((captured_reports, execution, completion_event))
         }
         Err(error) => diagnostics_failure_outcome(error),
     }?;
@@ -1502,14 +2255,8 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.pdk.as_deref(),
         &args.output_dir,
         json!({
-            "flow": {
-                "uses_default_flow_config": args.min_hold_jtl_length_um.is_none()
-                    && args.prefer_ptl_from_length_um.is_none()
-                    && args.detour_margin_um.is_none(),
-                "min_hold_jtl_length_um": args.min_hold_jtl_length_um,
-                "prefer_ptl_from_length_um": args.prefer_ptl_from_length_um,
-                "detour_margin_um": args.detour_margin_um,
-            },
+            "flow": diagnostics_flow_config_json(&args),
+            "timing_constraint_summary": timing_constraint_summary.map(TimingConstraintSummary::to_json),
             "input_format": cli_netlist_input_format_name(args.input_format),
         }),
     );
@@ -1533,7 +2280,8 @@ fn run_simulate_file_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()
     let (inputs_dir, reports_dir, event_log_path, mut event_log) =
         prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
 
-    let captured_input = capture_diagnostics_input_for_bundle(&mut event_log, &inputs_dir, "input", &args.input)?;
+    let captured_input =
+        capture_diagnostics_input_for_bundle(&mut event_log, &inputs_dir, "input", &args.input)?;
     let captured_inputs = vec![captured_input];
     event_log.push(diagnostics_event(
         "command_started",
@@ -1631,10 +2379,15 @@ fn run_verify_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()
     )?;
 
     let simulation_config = build_simulation_config(args.mode, args.external_command.clone());
-    let run_result = with_loaded_flow_inputs(&args.input, args.input_format, args.pdk.clone(), |flow, netlist, pdk| {
-        flow.verify_layout(netlist, pdk, &FlowConfig::default(), &simulation_config)
-            .context("verify-layout failed")
-    });
+    let run_result = with_loaded_flow_inputs(
+        &args.input,
+        args.input_format,
+        args.pdk.clone(),
+        |flow, netlist, pdk| {
+            flow.verify_layout(netlist, pdk, &FlowConfig::default(), &simulation_config)
+                .context("verify-layout failed")
+        },
+    );
 
     let (captured_reports, execution, completion_event) = match run_result {
         Ok(report) => {
@@ -1788,11 +2541,19 @@ fn capture_diagnostics_report(reports_dir: &Path, source: &Path) -> Result<Value
     }))
 }
 
-fn write_generated_diagnostics_report(reports_dir: &Path, file_name: &str, report: &Value) -> Result<Value> {
+fn write_generated_diagnostics_report(
+    reports_dir: &Path,
+    file_name: &str,
+    report: &Value,
+) -> Result<Value> {
     let destination = reports_dir.join(file_name);
     emit_json(report, Some(destination.as_path()))?;
-    let metadata = fs::metadata(&destination)
-        .with_context(|| format!("failed to stat generated diagnostics report {}", destination.display()))?;
+    let metadata = fs::metadata(&destination).with_context(|| {
+        format!(
+            "failed to stat generated diagnostics report {}",
+            destination.display()
+        )
+    })?;
 
     Ok(json!({
         "source_path": Value::Null,
@@ -1862,9 +2623,15 @@ fn collect_present_prefixed_env_var_names() -> Value {
 
     for (name, _) in env::vars() {
         if name.starts_with("RFLOW_") {
-            grouped.get_mut("RFLOW_*").expect("group should exist").push(name);
+            grouped
+                .get_mut("RFLOW_*")
+                .expect("group should exist")
+                .push(name);
         } else if name.starts_with("JOSIM_") {
-            grouped.get_mut("JOSIM_*").expect("group should exist").push(name);
+            grouped
+                .get_mut("JOSIM_*")
+                .expect("group should exist")
+                .push(name);
         }
     }
 
@@ -1905,6 +2672,8 @@ fn build_diagnostics_summary(
     let mut measurement_detail_count = 0usize;
     let mut measurement_warning_count = 0usize;
     let mut violation_detail_count = 0usize;
+    let mut recommended_next_flow_config = Value::Null;
+    let mut recommended_next_flow_config_kind = Value::Null;
 
     for captured_input in captured_inputs {
         let role = captured_input
@@ -1931,8 +2700,13 @@ fn build_diagnostics_summary(
         let report = captured_report.get("report").unwrap_or(&Value::Null);
         if let Some(kind) = report.get("kind").and_then(Value::as_str) {
             report_kinds.push(kind.to_string());
+            if kind == FLOW_CONFIG_KIND && recommended_next_flow_config.is_null() {
+                recommended_next_flow_config = captured_report["bundle_path"].clone();
+                recommended_next_flow_config_kind = json!(kind);
+            }
         }
-        delay_detail_count += diagnostics_report_detail_count(report, "delay_details", "delay_detail_count");
+        delay_detail_count +=
+            diagnostics_report_detail_count(report, "delay_details", "delay_detail_count");
         measurement_detail_count += diagnostics_report_detail_count(
             report,
             "measurement_details",
@@ -1943,11 +2717,8 @@ fn build_diagnostics_summary(
             "measurement_warnings",
             "measurement_warning_count",
         );
-        violation_detail_count += diagnostics_report_detail_count(
-            report,
-            "violation_details",
-            "violation_detail_count",
-        );
+        violation_detail_count +=
+            diagnostics_report_detail_count(report, "violation_details", "violation_detail_count");
         if let Some(error) = report.get("inspection_error").and_then(Value::as_str) {
             report_inspection_failures.push(json!({
                 "source_path": captured_report["source_path"].clone(),
@@ -1968,6 +2739,8 @@ fn build_diagnostics_summary(
         "measurement_detail_count": measurement_detail_count,
         "measurement_warning_count": measurement_warning_count,
         "violation_detail_count": violation_detail_count,
+        "recommended_next_flow_config": recommended_next_flow_config,
+        "recommended_next_flow_config_kind": recommended_next_flow_config_kind,
         "report_inspection_failure_count": report_inspection_failures.len(),
         "report_inspection_failures": report_inspection_failures,
     })
@@ -1984,9 +2757,9 @@ fn diagnostics_report_detail_count(report: &Value, details_key: &str, count_key:
                 .and_then(|count| usize::try_from(count).ok())
         })
         .or_else(|| {
-            report
-                .get("simulation")
-                .map(|simulation| diagnostics_report_detail_count(simulation, details_key, count_key))
+            report.get("simulation").map(|simulation| {
+                diagnostics_report_detail_count(simulation, details_key, count_key)
+            })
         })
         .unwrap_or(0)
 }
@@ -1998,6 +2771,7 @@ fn diagnostics_command_kind_name(kind: DiagnosticsCommandKind) -> &'static str {
         DiagnosticsCommandKind::CompileNetlist => "compile-netlist",
         DiagnosticsCommandKind::CompileLayout => "compile-layout",
         DiagnosticsCommandKind::LintInput => "lint-input",
+        DiagnosticsCommandKind::LintTimingConstraints => "lint-timing-constraints",
         DiagnosticsCommandKind::PdkValidate => "pdk-validate",
         DiagnosticsCommandKind::PdkCellLibrary => "pdk-cell-library",
         DiagnosticsCommandKind::SolveDimacs => "solve-dimacs",
@@ -2053,8 +2827,8 @@ fn write_diagnostics_event_log(path: &Path, events: &[Value]) -> Result<()> {
     let mut file = fs::File::create(path)
         .with_context(|| format!("failed to create diagnostics event log {}", path.display()))?;
     for event in events {
-        let rendered = serde_json::to_string(event)
-            .context("failed to serialize diagnostics event")?;
+        let rendered =
+            serde_json::to_string(event).context("failed to serialize diagnostics event")?;
         writeln!(file, "{rendered}")
             .with_context(|| format!("failed to write diagnostics event log {}", path.display()))?;
     }
@@ -2140,7 +2914,11 @@ fn empty_stream_summary() -> Value {
 }
 
 fn stream_summary_from_text(text: &str) -> Value {
-    let preview = text.lines().take(20).map(str::to_string).collect::<Vec<_>>();
+    let preview = text
+        .lines()
+        .take(20)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     json!({
         "line_count": text.lines().count(),
         "preview": preview,
@@ -2152,6 +2930,13 @@ fn diagnostics_error_code(error: &anyhow::Error) -> String {
 }
 
 fn diagnostics_contract_snapshot(role: &str, source: &Path) -> Value {
+    if role == "flow_config" {
+        return diagnostics_flow_config_contract_snapshot(source);
+    }
+    if role == "timing_constraints" {
+        return diagnostics_timing_constraints_contract_snapshot(source);
+    }
+
     let extension = source
         .extension()
         .and_then(|ext| ext.to_str())
@@ -2197,6 +2982,86 @@ fn diagnostics_contract_snapshot(role: &str, source: &Path) -> Value {
             "legacy_compatibility_used": Value::Null,
             "inspection_error": error.to_string(),
         }),
+    }
+}
+
+fn diagnostics_flow_config_contract_snapshot(source: &Path) -> Value {
+    match read_cli_flow_config_file(source) {
+        Ok(_) => {
+            let contract_format = inspect_versioned_json_contract(source);
+            json!({
+                "input_kind": "flow_config",
+                "contract_kind": "rflux_flow_config",
+                "schema_format": contract_format
+                    .as_ref()
+                    .map(|(schema_format, _)| *schema_format)
+                    .unwrap_or("legacy_raw_json"),
+                "input_schema_version": contract_format.as_ref().and_then(|(_, version)| *version),
+                "legacy_compatibility_used": contract_format
+                    .as_ref()
+                    .map(|(schema_format, _)| *schema_format == "legacy_raw_json")
+                    .unwrap_or(false),
+                "inspection_error": Value::Null,
+            })
+        }
+        Err(error) => json!({
+            "input_kind": "flow_config",
+            "contract_kind": "rflux_flow_config",
+            "schema_format": Value::Null,
+            "input_schema_version": Value::Null,
+            "legacy_compatibility_used": Value::Null,
+            "inspection_error": error.to_string(),
+        }),
+    }
+}
+
+fn diagnostics_timing_constraints_contract_snapshot(source: &Path) -> Value {
+    let contract_format = inspect_versioned_json_contract(source);
+    match read_timing_constraints_file(source).and_then(|constraints| {
+        validate_cli_timing_constraints(&constraints)?;
+        Ok(summarize_timing_constraints(&constraints))
+    }) {
+        Ok(summary) => json!({
+            "input_kind": "timing_constraints",
+            "contract_kind": "rflux_timing_constraints",
+            "schema_format": contract_format
+                .as_ref()
+                .map(|(schema_format, _)| *schema_format)
+                .unwrap_or("timing_constraints_json"),
+            "input_schema_version": contract_format.as_ref().and_then(|(_, version)| *version),
+            "legacy_compatibility_used": contract_format
+                .as_ref()
+                .map(|(schema_format, _)| *schema_format == "legacy_raw_json")
+                .unwrap_or(false),
+            "constraint_summary": summary.to_json(),
+            "inspection_error": Value::Null,
+        }),
+        Err(error) => json!({
+            "input_kind": "timing_constraints",
+            "contract_kind": "rflux_timing_constraints",
+            "schema_format": Value::Null,
+            "input_schema_version": Value::Null,
+            "legacy_compatibility_used": Value::Null,
+            "constraint_summary": Value::Null,
+            "inspection_error": error.to_string(),
+        }),
+    }
+}
+
+fn inspect_versioned_json_contract(source: &Path) -> Option<(&'static str, Option<u64>)> {
+    let raw = fs::read_to_string(source).ok()?;
+    let json: Value = serde_json::from_str(&raw).ok()?;
+    let object = json.as_object()?;
+    if object.contains_key("schema_version")
+        || object.contains_key("kind")
+        || object.contains_key("payload")
+    {
+        Some((
+            "versioned_envelope",
+            object.get("schema_version").and_then(Value::as_u64),
+        ))
+    } else {
+        Some(("legacy_raw_json", None))
     }
 }
 
@@ -2275,6 +3140,8 @@ fn lint_input_report(input: &Path, input_kind: &str, contract_kind: &str) -> Res
         "schema_format": schema_format,
         "input_schema_version": input_schema_version,
         "legacy_compatibility_used": schema_format == "legacy_raw_json",
+        "schema_contract": lint_schema_contract_json(schema_format, input_schema_version, contract_kind),
+        "frontend_summary": lint_frontend_summary_json(input_kind, schema_format, contract_kind),
     }))
 }
 
@@ -2316,11 +3183,132 @@ fn lint_netlist_report(
         "schema_format": schema_format,
         "input_schema_version": input_schema_version,
         "legacy_compatibility_used": legacy_compatibility_used,
-        "netlist_summary": {
+        "schema_contract": lint_schema_contract_json(schema_format, input_schema_version, contract_kind),
+        "frontend_summary": lint_frontend_summary_json(input_kind, schema_format, contract_kind),
+        "netlist_summary": netlist_summary_json(&netlist),
+    }))
+}
+
+fn lint_schema_contract_json(
+    schema_format: &str,
+    input_schema_version: Option<u64>,
+    contract_kind: &str,
+) -> Value {
+    json!({
+        "contract_kind": contract_kind,
+        "format": schema_format,
+        "input_schema_version": input_schema_version,
+        "versioned_envelope_supported": schema_format == "versioned_envelope",
+        "legacy_raw_json_supported": schema_format == "legacy_raw_json",
+    })
+}
+
+fn lint_frontend_summary_json(input_kind: &str, schema_format: &str, contract_kind: &str) -> Value {
+    match input_kind {
+        "ir" => json!({
+            "reader": "rflux_io::read_ir_json",
+            "format_family": "json_netlist",
+            "contract_kind": contract_kind,
+            "hierarchy_support": "none",
+            "source_map_support": "none",
+            "roundtrip_write_support": true,
+            "schema_mode": schema_format,
+        }),
+        "bench" => json!({
+            "reader": "rflux_io::read_bench_netlist",
+            "format_family": "bench_text",
+            "contract_kind": contract_kind,
+            "hierarchy_support": "none",
+            "source_map_support": "line_only_diagnostics",
+            "roundtrip_write_support": false,
+            "schema_mode": schema_format,
+        }),
+        "pdk" => json!({
+            "reader": "rflux_io::read_pdk_json",
+            "format_family": "json_pdk",
+            "contract_kind": contract_kind,
+            "hierarchy_support": "not_applicable",
+            "source_map_support": "none",
+            "roundtrip_write_support": true,
+            "schema_mode": schema_format,
+        }),
+        _ => json!({
+            "reader": "unknown",
+            "format_family": "unknown",
+            "contract_kind": contract_kind,
+            "hierarchy_support": "unknown",
+            "source_map_support": "unknown",
+            "roundtrip_write_support": false,
+            "schema_mode": schema_format,
+        }),
+    }
+}
+
+fn netlist_summary_json(netlist: &rflux_ir::Netlist) -> Value {
+    let mut node_kind_counts = BTreeMap::<String, usize>::new();
+    let mut logic_op_counts = BTreeMap::<String, usize>::new();
+    for node in netlist.nodes() {
+        *node_kind_counts.entry(format!("{:?}", node.kind)).or_default() += 1;
+        if let Some(logic_op) = node.logic_op.as_ref() {
+            *logic_op_counts.entry(format!("{:?}", logic_op)).or_default() += 1;
+        }
+    }
+
+    json!({
+        "node_count": netlist.node_count(),
+        "edge_count": netlist.edge_count(),
+        "node_kind_counts": node_kind_counts,
+        "logic_op_counts": logic_op_counts,
+    })
+}
+
+fn build_lint_timing_constraints_report(
+    input: &Path,
+    netlist_path: Option<&Path>,
+    netlist_format: CliNetlistInputFormat,
+) -> Result<Value> {
+    let constraints = read_timing_constraints_file(input)?;
+    validate_cli_timing_constraints(&constraints)?;
+    let summary = summarize_timing_constraints(&constraints);
+
+    let netlist_summary = if let Some(netlist_path) = netlist_path {
+        let netlist = load_cli_netlist(netlist_path, netlist_format).with_context(|| {
+            format!(
+                "failed to validate timing constraints against {}",
+                netlist_path.display()
+            )
+        })?;
+        validate_cli_timing_constraints_against_netlist(&constraints, &netlist)?;
+        json!({
+            "path": display_path(netlist_path),
+            "format": cli_netlist_input_format_name(netlist_format),
             "node_count": netlist.node_count(),
             "edge_count": netlist.edge_count(),
-        },
+        })
+    } else {
+        Value::Null
+    };
+
+    Ok(json!({
+        "kind": "lint_timing_constraints",
+        "input": input.display().to_string(),
+        "valid": true,
+        "constraint_summary": summary.to_json(),
+        "netlist": netlist_summary,
     }))
+}
+
+fn validate_cli_timing_constraints_against_netlist(
+    constraints: &TimingConstraintsFile,
+    netlist: &rflux_ir::Netlist,
+) -> Result<()> {
+    for constraint in &constraints.node_constraints {
+        resolve_cli_node_ref(netlist, &constraint.node)?;
+    }
+    for constraint in &constraints.pin_constraints {
+        resolve_cli_node_ref(netlist, &constraint.node)?;
+    }
+    Ok(())
 }
 
 fn inspect_json_contract(input: &Path) -> Result<(&'static str, Option<u64>)> {
@@ -2353,7 +3341,10 @@ fn run_compile_netlist(args: CompileNetlistArgs) -> Result<()> {
 
     if let Some(netlist_output) = args.netlist_output.as_deref() {
         rflux_io::write_ir_json(netlist_output, &netlist).with_context(|| {
-            format!("failed to write compiled netlist JSON to {}", netlist_output.display())
+            format!(
+                "failed to write compiled netlist JSON to {}",
+                netlist_output.display()
+            )
         })?;
     }
 
@@ -2364,36 +3355,83 @@ fn run_compile_netlist(args: CompileNetlistArgs) -> Result<()> {
 }
 
 fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
-    let flow_config = flow_config_with_cli_closure_options(
+    let mut flow_config = flow_config_with_cli_closure_options(
+        args.flow_config.as_deref(),
+        args.clock_period_ps,
+        args.input_arrival_ps,
+        args.sfq_phase_count,
+        args.sfq_pulse_window_ps,
         args.min_hold_jtl_length_um,
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
-    );
-    run_flow_json_command(
+    )?;
+    let report = with_loaded_flow_inputs(
         &args.input,
         args.input_format,
-        args.pdk,
-        args.output.as_deref(),
+        args.pdk.clone(),
         |flow, netlist, pdk| {
+            if let Some(path) = args.timing_constraints.as_deref() {
+                apply_timing_constraints_file(&mut flow_config, netlist, path)?;
+            }
             flow.compile_layout(netlist, pdk, &flow_config)
                 .context("compile-layout failed")
         },
-        layout_report_to_json,
-    )
+    )?;
+    let report_json = layout_report_to_json_with_flow_config(&report, &flow_config);
+    if let Some(path) = args.flow_config_patch_output.as_deref() {
+        let patch = report_json
+            .get("flow_config_patch")
+            .cloned()
+            .unwrap_or_else(|| layout_flow_config_patch(&report, &flow_config));
+        emit_json(&patch, Some(path))?;
+    }
+    emit_json(&with_schema_version(report_json), args.output.as_deref())
 }
 
 fn run_analyze_timing(args: LayoutCommandArgs) -> Result<()> {
-    run_flow_json_command(
+    if args.flow_config_patch_output.is_some() {
+        bail!("--flow-config-patch-output is only supported by compile-layout");
+    }
+    let mut flow_config = flow_config_with_cli_closure_options(
+        args.flow_config.as_deref(),
+        args.clock_period_ps,
+        args.input_arrival_ps,
+        args.sfq_phase_count,
+        args.sfq_pulse_window_ps,
+        args.min_hold_jtl_length_um,
+        args.prefer_ptl_from_length_um,
+        args.detour_margin_um,
+    )?;
+    let pdk_path = args.pdk.clone();
+    let report = with_loaded_flow_inputs(
         &args.input,
         args.input_format,
-        args.pdk,
-        args.output.as_deref(),
+        args.pdk.clone(),
         |flow, netlist, pdk| {
-            flow.analyze_timing(netlist, pdk, &FlowConfig::default())
+            if let Some(path) = args.timing_constraints.as_deref() {
+                apply_timing_constraints_file(&mut flow_config, netlist, path)?;
+            }
+            flow.analyze_timing(netlist, pdk, &flow_config)
                 .context("analyze-timing failed")
         },
-        timing_analysis_to_json,
-    )
+    )?;
+    let multi_corner = with_loaded_flow_inputs(
+        &args.input,
+        args.input_format,
+        pdk_path,
+        |flow, netlist, pdk| {
+            flow.analyze_timing_corners(netlist, pdk, &flow_config)
+                .context("analyze-timing multi-corner failed")
+        },
+    )?;
+    let mut report_json = timing_analysis_to_json(&report);
+    if let Value::Object(ref mut object) = report_json {
+        object.insert(
+            "multi_corner".to_string(),
+            multi_corner_timing_analysis_to_json(&multi_corner),
+        );
+    }
+    emit_json(&with_schema_version(report_json), args.output.as_deref())
 }
 
 fn run_verify_layout(args: VerifyLayoutArgs) -> Result<()> {
@@ -2426,7 +3464,11 @@ fn run_solve_dimacs(args: SolveDimacsArgs) -> Result<()> {
     let raw = fs::read_to_string(&args.input)
         .with_context(|| format!("failed to read DIMACS from {}", args.input.display()))?;
     let cnf = CnfFormula::from_dimacs(&raw).map_err(|error| {
-        anyhow!("failed to parse DIMACS from {}: {:?}", args.input.display(), error)
+        anyhow!(
+            "failed to parse DIMACS from {}: {:?}",
+            args.input.display(),
+            error
+        )
     })?;
     let mut assumptions = parse_assumptions_option(args.assumptions.as_deref(), cnf.var_count())?;
     let metadata_selection = load_equivalence_check_selection(
@@ -2466,12 +3508,8 @@ fn run_solve_dimacs(args: SolveDimacsArgs) -> Result<()> {
 }
 
 fn run_check_equivalence(args: CheckEquivalenceArgs) -> Result<()> {
-    let (lhs_netlist, rhs_netlist) = load_equivalence_netlists(
-        &args.lhs,
-        args.lhs_format,
-        &args.rhs,
-        args.rhs_format,
-    )?;
+    let (lhs_netlist, rhs_netlist) =
+        load_equivalence_netlists(&args.lhs, args.lhs_format, &args.rhs, args.rhs_format)?;
     let verifier = Verifier::new();
 
     match args.kind {
@@ -2500,7 +3538,10 @@ fn run_check_equivalence(args: CheckEquivalenceArgs) -> Result<()> {
                 args.output.as_deref(),
                 || {
                     verifier
-                        .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
+                        .build_single_step_sequential_equivalence_problem(
+                            &lhs_netlist,
+                            &rhs_netlist,
+                        )
                         .context("single-step sequential equivalence DIMACS export failed")
                 },
             )
@@ -2515,7 +3556,10 @@ fn run_check_equivalence(args: CheckEquivalenceArgs) -> Result<()> {
                 args.output.as_deref(),
                 || {
                     verifier
-                        .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
+                        .build_single_step_sequential_equivalence_problem(
+                            &lhs_netlist,
+                            &rhs_netlist,
+                        )
                         .context("bounded sequential equivalence DIMACS export failed")
                 },
             )
@@ -2531,7 +3575,10 @@ fn load_pdk(path: Option<PathBuf>) -> Result<Pdk> {
     }
 }
 
-fn resolve_cli_netlist_input_format(input: &Path, format: CliNetlistInputFormat) -> NetlistInputFormat {
+fn resolve_cli_netlist_input_format(
+    input: &Path,
+    format: CliNetlistInputFormat,
+) -> NetlistInputFormat {
     match format {
         CliNetlistInputFormat::Auto => detect_netlist_input_format(input),
         CliNetlistInputFormat::Ir => NetlistInputFormat::IrJson,
@@ -2543,11 +3590,15 @@ fn load_cli_netlist(input: &Path, format: CliNetlistInputFormat) -> Result<rflux
     let resolved_format = resolve_cli_netlist_input_format(input, format);
     let load_result = match format {
         CliNetlistInputFormat::Auto => read_netlist(input),
-        CliNetlistInputFormat::Ir | CliNetlistInputFormat::Bench => read_netlist_as(input, resolved_format),
+        CliNetlistInputFormat::Ir | CliNetlistInputFormat::Bench => {
+            read_netlist_as(input, resolved_format)
+        }
     };
     load_result.with_context(|| match resolved_format {
         NetlistInputFormat::IrJson => format!("failed to read IR JSON from {}", input.display()),
-        NetlistInputFormat::Bench => format!("failed to read bench netlist from {}", input.display()),
+        NetlistInputFormat::Bench => {
+            format!("failed to read bench netlist from {}", input.display())
+        }
     })
 }
 
@@ -2602,7 +3653,8 @@ fn run_flow_json_command<T>(
 }
 
 fn emit_json(value: &Value, output: Option<&Path>) -> Result<()> {
-    let rendered = serde_json::to_string_pretty(value).context("failed to serialize JSON output")?;
+    let rendered =
+        serde_json::to_string_pretty(value).context("failed to serialize JSON output")?;
     if let Some(output) = output {
         fs::write(output, rendered)
             .with_context(|| format!("failed to write JSON output to {}", output.display()))?;
@@ -2629,7 +3681,9 @@ fn emit_equivalence_report(
     build_problem: impl FnOnce() -> Result<rflux_verify::ExportedEquivalenceSatProblem>,
 ) -> Result<()> {
     let dimacs_export = dimacs_output
-        .map(|path| build_problem().and_then(|problem| write_equivalence_dimacs_bundle(path, &problem)))
+        .map(|path| {
+            build_problem().and_then(|problem| write_equivalence_dimacs_bundle(path, &problem))
+        })
         .transpose()?;
     attach_dimacs_export(&mut report, dimacs_export);
     emit_json(&with_schema_version(report), output)
@@ -2658,7 +3712,10 @@ impl SimulateFileArgs {
     }
 }
 
-fn build_simulation_config(mode: CliSimulationMode, external_command: Option<String>) -> SimulationConfig {
+fn build_simulation_config(
+    mode: CliSimulationMode,
+    external_command: Option<String>,
+) -> SimulationConfig {
     SimulationConfig {
         mode: mode.into_simulation_mode(),
         external_command,
@@ -2703,7 +3760,10 @@ fn synthesis_report_to_json(report: &rflux_synth::SynthesisReport) -> Value {
     })
 }
 
-fn layout_report_to_json(report: &rflux_flow::LayoutReport) -> Value {
+fn layout_report_to_json_with_flow_config(
+    report: &rflux_flow::LayoutReport,
+    flow_config: &FlowConfig,
+) -> Value {
     json!({
         "synthesis": synthesis_report_to_json(&report.synthesis),
         "placement": {
@@ -2718,6 +3778,8 @@ fn layout_report_to_json(report: &rflux_flow::LayoutReport) -> Value {
             "detoured_routes": report.routing.detoured_routes,
             "jtl_routes": report.routing.jtl_routes,
             "ptl_routes": report.routing.ptl_routes,
+            "effective_prefer_ptl_from_length_um": report.routing.effective_prefer_ptl_from_length_um,
+            "effective_detour_margin_um": report.routing.effective_detour_margin_um,
         },
         "clock": {
             "clock_sinks": report.clock.clock_sinks,
@@ -2739,8 +3801,38 @@ fn layout_report_to_json(report: &rflux_flow::LayoutReport) -> Value {
             "closure": timing_closure_to_json(&report.timing_closure),
             "closure_loop": timing_closure_loop_to_json(&report.timing_closure_loop),
         },
+        "flow_config_patch": layout_flow_config_patch(report, flow_config),
         "initial_total_detour_overhead_um": report.initial_total_detour_overhead_um,
         "detour_feedback_applied": report.detour_feedback_applied,
+    })
+}
+
+fn layout_flow_config_patch(report: &rflux_flow::LayoutReport, flow_config: &FlowConfig) -> Value {
+    json!({
+        "schema_version": FLOW_CONFIG_SCHEMA_VERSION,
+        "kind": FLOW_CONFIG_KIND,
+        "metadata": {
+            "source_command": "compile_layout",
+            "source_report_kind": "compile_layout",
+            "timing_closure_status": report.timing_closure.status,
+            "route_delay_optimization_applied": report
+                .timing_closure_loop
+                .route_delay_optimization_applied,
+            "hold_fix_applied": report.timing.hold_fix_applied,
+        },
+        "payload": {
+            "timing": {
+                "clock_period_ps": flow_config.timing.clock_period_ps,
+                "input_arrival_ps": flow_config.timing.input_arrival_ps,
+                "sfq_phase_count": flow_config.timing.sfq_phase_count,
+                "sfq_pulse_window_ps": flow_config.timing.sfq_pulse_window_ps,
+            },
+            "routing": {
+                "prefer_ptl_from_length_um": report.routing.effective_prefer_ptl_from_length_um,
+                "detour_margin_um": report.routing.effective_detour_margin_um,
+                "min_hold_jtl_length_um": flow_config.min_hold_jtl_length_um,
+            },
+        },
     })
 }
 
@@ -2782,6 +3874,38 @@ fn timing_analysis_to_json(report: &rflux_flow::TimingAnalysisReport) -> Value {
     })
 }
 
+fn multi_corner_timing_analysis_to_json(
+    report: &rflux_flow::MultiCornerTimingAnalysisReport,
+) -> Value {
+    json!({
+        "active_timing_corner": report.active_timing_corner,
+        "corner_count": report.corner_count,
+        "worst_setup_corner": report.worst_setup_corner,
+        "worst_hold_corner": report.worst_hold_corner,
+        "worst_critical_path_corner": report.worst_critical_path_corner,
+        "worst_setup_slack_ps": report.worst_setup_slack_ps,
+        "worst_hold_slack_ps": report.worst_hold_slack_ps,
+        "worst_critical_path_delay_ps": report.worst_critical_path_delay_ps,
+        "corners": report
+            .corners
+            .iter()
+            .map(|corner| json!({
+                "corner_name": corner.corner_name,
+                "is_default_corner": corner.is_default_corner,
+                "is_active_corner": corner.is_active_corner,
+                "worst_setup_slack_ps": corner.worst_setup_slack_ps,
+                "worst_hold_slack_ps": corner.worst_hold_slack_ps,
+                "critical_path_delay_ps": corner.critical_path_delay_ps,
+                "analyzed_arcs": corner.analyzed_arcs,
+                "setup_violations": corner.setup_violations,
+                "hold_violations": corner.hold_violations,
+                "capture_window_violations": corner.capture_window_violations,
+                "closure": timing_closure_to_json(&corner.closure),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn timing_closure_to_json(closure: &rflux_flow::TimingClosureSummary) -> Value {
     json!({
         "closed": closure.closed,
@@ -2812,6 +3936,8 @@ fn timing_closure_loop_to_json(loop_report: &rflux_flow::TimingClosureLoopReport
         "detour_feedback_applied": loop_report.detour_feedback_applied,
         "initial_total_detour_overhead_um": loop_report.initial_total_detour_overhead_um,
         "final_total_detour_overhead_um": loop_report.final_total_detour_overhead_um,
+        "route_delay_optimization_attempted": loop_report.route_delay_optimization_attempted,
+        "route_delay_optimization_applied": loop_report.route_delay_optimization_applied,
         "reduce_route_delay_candidate_available": loop_report.reduce_route_delay_candidate_available,
         "recommended_prefer_ptl_from_length_um": loop_report.recommended_prefer_ptl_from_length_um,
         "recommended_detour_margin_um": loop_report.recommended_detour_margin_um,
@@ -2901,6 +4027,8 @@ fn verification_report_to_json(report: &rflux_flow::VerificationReport) -> Value
 fn simulation_report_to_json(report: &SimulationReport) -> Value {
     json!({
         "backend": format!("{:?}", report.backend),
+        "quality_gate": simulation_quality_gate_to_json(&report.quality_gate()),
+        "josim_quality_gate": simulation_quality_gate_to_json(&report.josim_quality_gate()),
         "simulated_events": report.simulated_events,
         "generated_deck_lines": report.generated_deck_lines,
         "generated_deck_path": report.generated_deck_path,
@@ -2932,6 +4060,21 @@ fn simulation_report_to_json(report: &SimulationReport) -> Value {
         })).collect::<Vec<_>>(),
         "external_status_code": report.external_status_code,
         "external_result": report.external_result,
+    })
+}
+
+fn simulation_quality_gate_to_json(gate: &rflux_sim::SimulationQualityGateReport) -> Value {
+    json!({
+        "passed": gate.passed,
+        "status": gate.status,
+        "required_backend": gate.required_backend,
+        "actual_backend": format!("{:?}", gate.actual_backend),
+        "alignment_level": gate.alignment_level,
+        "external_alignment_required": gate.external_alignment_required,
+        "external_alignment_available": gate.external_alignment_available,
+        "violation_count": gate.violation_count,
+        "warning_count": gate.warning_count,
+        "next_step": gate.next_step,
     })
 }
 
@@ -3011,9 +4154,15 @@ fn write_equivalence_dimacs_bundle(
     let sidecar_path = equivalence_sidecar_path(path);
     fs::write(
         &sidecar_path,
-        serde_json::to_string_pretty(&export_json).context("failed to serialize DIMACS sidecar JSON")?,
+        serde_json::to_string_pretty(&export_json)
+            .context("failed to serialize DIMACS sidecar JSON")?,
     )
-    .with_context(|| format!("failed to write DIMACS sidecar to {}", sidecar_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to write DIMACS sidecar to {}",
+            sidecar_path.display()
+        )
+    })?;
     Ok(export_json)
 }
 
@@ -3078,10 +4227,16 @@ fn load_equivalence_check_selection(
             let metadata_path = metadata_path.to_path_buf();
             let check_ref = check_ref.to_string();
             let content = fs::read_to_string(&metadata_path).with_context(|| {
-                format!("failed to read equivalence metadata from {}", metadata_path.display())
+                format!(
+                    "failed to read equivalence metadata from {}",
+                    metadata_path.display()
+                )
             })?;
             let json: Value = serde_json::from_str(&content).with_context(|| {
-                format!("failed to parse equivalence metadata JSON from {}", metadata_path.display())
+                format!(
+                    "failed to parse equivalence metadata JSON from {}",
+                    metadata_path.display()
+                )
             })?;
             let schema_version = json
                 .get("schema_version")
@@ -3101,14 +4256,18 @@ fn load_equivalence_check_selection(
             let metadata_var_count = signature
                 .get("variables")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| anyhow!("equivalence metadata formula_signature is missing variables"))?
-                as usize;
+                .ok_or_else(|| {
+                    anyhow!("equivalence metadata formula_signature is missing variables")
+                })? as usize;
             let metadata_clause_count = signature
                 .get("clauses")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| anyhow!("equivalence metadata formula_signature is missing clauses"))?
-                as usize;
-            if metadata_var_count != formula.var_count() || metadata_clause_count != formula.clauses().len() {
+                .ok_or_else(|| {
+                    anyhow!("equivalence metadata formula_signature is missing clauses")
+                })? as usize;
+            if metadata_var_count != formula.var_count()
+                || metadata_clause_count != formula.clauses().len()
+            {
                 bail!(
                     "equivalence metadata formula signature does not match loaded CNF: metadata=({}, {}), cnf=({}, {})",
                     metadata_var_count,
@@ -3124,12 +4283,21 @@ fn load_equivalence_check_selection(
 
             let matching = checks
                 .iter()
-                .find(|check| check.get("check_ref").and_then(Value::as_str) == Some(check_ref.as_str()))
-                .ok_or_else(|| anyhow!("check ref not found in equivalence metadata: {}", check_ref))?;
+                .find(|check| {
+                    check.get("check_ref").and_then(Value::as_str) == Some(check_ref.as_str())
+                })
+                .ok_or_else(|| {
+                    anyhow!("check ref not found in equivalence metadata: {}", check_ref)
+                })?;
             let assumptions_json = matching
                 .get("assumptions")
                 .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("equivalence metadata check is missing assumptions: {}", check_ref))?;
+                .ok_or_else(|| {
+                    anyhow!(
+                        "equivalence metadata check is missing assumptions: {}",
+                        check_ref
+                    )
+                })?;
             let assumptions = assumptions_json
                 .iter()
                 .map(|value| {
@@ -3337,8 +4505,9 @@ mod tests {
     use rflux_io::read_ir_json;
     use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
     use rflux_tech::{
-        CharacterizationArcDelay, CharacterizationArtifactMetadata, LengthRange,
-        NamedCharacterizationMetadata,
+        CellTimingModel, CharacterizationArcDelay, CharacterizationArtifactMetadata,
+        InterconnectTimingModel, LengthRange, NamedCharacterizationMetadata, PdkTimingCorner,
+        SfCellKind, TimingPoint,
     };
 
     fn unique_test_dir(name: &str) -> PathBuf {
@@ -3384,11 +4553,18 @@ mod tests {
             .join("bench_sequential");
         let mut paths: Vec<PathBuf> = fs::read_dir(&fixture_dir)
             .expect("sequential bench fixture directory should exist")
-            .map(|entry| entry.expect("sequential bench fixture entry should read").path())
+            .map(|entry| {
+                entry
+                    .expect("sequential bench fixture entry should read")
+                    .path()
+            })
             .filter(|path| path.extension().is_some_and(|ext| ext == "bench"))
             .collect();
         paths.sort();
-        assert!(!paths.is_empty(), "expected checked-in sequential bench fixtures");
+        assert!(
+            !paths.is_empty(),
+            "expected checked-in sequential bench fixtures"
+        );
         paths
     }
 
@@ -3403,15 +4579,8 @@ mod tests {
         let cnf = CnfFormula::from_dimacs(dimacs).expect("dimacs should parse");
         let (result, metrics) = solve_with_metrics(&cnf);
 
-        let report = dimacs_solve_report_to_json(
-            input,
-            &cnf,
-            &[Lit::pos(1)],
-            None,
-            None,
-            &result,
-            &metrics,
-        );
+        let report =
+            dimacs_solve_report_to_json(input, &cnf, &[Lit::pos(1)], None, None, &result, &metrics);
 
         assert_eq!(report["kind"], "dimacs_sat");
         assert_eq!(report["input"], "example.cnf");
@@ -3491,8 +4660,8 @@ mod tests {
 
     #[test]
     fn parse_assumptions_accepts_comma_and_whitespace_separated_literals() {
-        let assumptions = parse_assumptions_option(Some("1, -2 3"), 3)
-            .expect("assumptions should parse");
+        let assumptions =
+            parse_assumptions_option(Some("1, -2 3"), 3).expect("assumptions should parse");
 
         assert_eq!(assumptions, vec![Lit::pos(1), Lit::neg(2), Lit::pos(3)]);
     }
@@ -3527,8 +4696,8 @@ mod tests {
             Some("output:maj"),
             &formula,
         )
-            .expect("selection should load")
-            .expect("selection should exist");
+        .expect("selection should load")
+        .expect("selection should exist");
 
         assert_eq!(selection.check_ref, "output:maj");
         assert_eq!(selection.assumptions, vec![Lit::pos(14)]);
@@ -3564,9 +4733,11 @@ mod tests {
             Some("output:maj"),
             &formula,
         )
-            .expect_err("mismatched sidecar should be rejected");
+        .expect_err("mismatched sidecar should be rejected");
 
-        assert!(error.to_string().contains("formula signature does not match"));
+        assert!(error
+            .to_string()
+            .contains("formula signature does not match"));
     }
 
     #[test]
@@ -3582,18 +4753,66 @@ mod tests {
         let b_l = lhs.add_node(NodeKind::Port, "b");
         let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
-        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
-        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let b_r = rhs.add_node(NodeKind::Port, "b");
         let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_and", Some(LogicOp::And));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("b->and");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("a->and");
-        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("and->out");
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .expect("b->and");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .expect("a->and");
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         rflux_io::write_ir_json(&lhs_path, &lhs).expect("lhs should be written");
         rflux_io::write_ir_json(&rhs_path, &rhs).expect("rhs should be written");
@@ -3613,15 +4832,22 @@ mod tests {
         let dimacs = fs::read_to_string(&dimacs_path).expect("dimacs export should exist");
         let sidecar_path = PathBuf::from(format!("{}.checks.json", dimacs_path.display()));
         let sidecar = fs::read_to_string(&sidecar_path).expect("dimacs sidecar should exist");
-        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-            .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+                .expect("report should be valid json");
         let sidecar_json: Value = serde_json::from_str(&sidecar).expect("sidecar should be json");
 
         assert!(dimacs.starts_with("p cnf "));
         assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
         assert_eq!(report["dimacs_export"]["schema_version"], 1);
-        assert_eq!(report["dimacs_export"]["path"], dimacs_path.display().to_string());
-        assert_eq!(report["dimacs_export"]["sidecar_path"], sidecar_path.display().to_string());
+        assert_eq!(
+            report["dimacs_export"]["path"],
+            dimacs_path.display().to_string()
+        );
+        assert_eq!(
+            report["dimacs_export"]["sidecar_path"],
+            sidecar_path.display().to_string()
+        );
         assert_eq!(report["dimacs_export"]["checks"][0]["kind"], "output");
         assert_eq!(report["dimacs_export"]["checks"][0]["name"], "out");
         assert_eq!(sidecar_json["schema_version"], 1);
@@ -3666,8 +4892,9 @@ mod tests {
         })
         .expect("bench check-equivalence should succeed");
 
-        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-            .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+                .expect("report should be valid json");
         assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
         assert_eq!(report["kind"], "combinational");
         assert_eq!(report["equivalent"], true);
@@ -3703,8 +4930,9 @@ mod tests {
         })
         .expect("explicit bench-format check-equivalence should succeed");
 
-        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-            .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+                .expect("report should be valid json");
         assert_eq!(report["kind"], "combinational");
         assert_eq!(report["equivalent"], true);
     }
@@ -3739,8 +4967,9 @@ mod tests {
         })
         .expect("NAND/NOR bench check-equivalence should succeed");
 
-        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-            .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+                .expect("report should be valid json");
         assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
         assert_eq!(report["kind"], "combinational");
         assert_eq!(report["equivalent"], true);
@@ -3771,8 +5000,10 @@ mod tests {
             })
             .expect("checked-in bench fixture check-equivalence should succeed");
 
-            let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-                .expect("report should be valid json");
+            let report: Value = serde_json::from_str(
+                &fs::read_to_string(&report_path).expect("report should exist"),
+            )
+            .expect("report should be valid json");
             assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
             assert_eq!(report["kind"], "combinational");
             assert_eq!(report["equivalent"], true);
@@ -3804,8 +5035,10 @@ mod tests {
             })
             .expect("checked-in sequential bench fixture check-equivalence should succeed");
 
-            let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-                .expect("report should be valid json");
+            let report: Value = serde_json::from_str(
+                &fs::read_to_string(&report_path).expect("report should exist"),
+            )
+            .expect("report should be valid json");
             assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
             assert_eq!(report["kind"], "single_step_sequential");
             assert_eq!(report["equivalent"], true);
@@ -3842,8 +5075,9 @@ mod tests {
         })
         .expect("non-equivalent sequential bench check should still run");
 
-        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-            .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+                .expect("report should be valid json");
         assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
         assert_eq!(report["kind"], "single_step_sequential");
         assert_eq!(report["equivalent"], false);
@@ -3881,8 +5115,9 @@ mod tests {
         })
         .expect("bounded sequential bench check should run");
 
-        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
-            .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+                .expect("report should be valid json");
         assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
         assert_eq!(report["kind"], "bounded_sequential");
         assert_eq!(report["depth"], 3);
@@ -3890,7 +5125,13 @@ mod tests {
         assert_eq!(report["unroll_mode"], "state_unrolled");
         assert_eq!(report["equivalent"], false);
         assert_eq!(report["first_failing_step"], 0);
-        assert_eq!(report["steps"].as_array().expect("steps should be an array").len(), 1);
+        assert_eq!(
+            report["steps"]
+                .as_array()
+                .expect("steps should be an array")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -3900,22 +5141,18 @@ mod tests {
         let rhs_path = dir.join("rhs.bench");
         let output_dir = dir.join("bundle");
 
-        fs::write(
-            &lhs_path,
-            "INPUT(a)\nout = NOT(a)\nOUTPUT(out)\n",
-        )
-        .expect("lhs bench should write");
-        fs::write(
-            &rhs_path,
-            "INPUT(a)\nout = NOT(a)\nOUTPUT(out)\n",
-        )
-        .expect("rhs bench should write");
+        fs::write(&lhs_path, "INPUT(a)\nout = NOT(a)\nOUTPUT(out)\n")
+            .expect("lhs bench should write");
+        fs::write(&rhs_path, "INPUT(a)\nout = NOT(a)\nOUTPUT(out)\n")
+            .expect("rhs bench should write");
 
         run_with_diagnostics(RunWithDiagnosticsArgs {
             output_dir: output_dir.clone(),
             kind: DiagnosticsCommandKind::CheckEquivalence,
             input: lhs_path,
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: Some(rhs_path),
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -3929,6 +5166,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -3943,13 +5186,20 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "check-equivalence");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["combinational"]));
-        assert!(output_dir.join("reports").join("check-equivalence-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["combinational"])
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("check-equivalence-report.json")
+            .exists());
     }
 
     #[test]
     fn run_with_diagnostics_reports_non_equivalent_sequential_bench_inputs() {
-        let dir = unique_test_dir("run-with-diagnostics-check-equivalence-sequential-bench-mismatch");
+        let dir =
+            unique_test_dir("run-with-diagnostics-check-equivalence-sequential-bench-mismatch");
         let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("synth")
@@ -3966,6 +5216,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CheckEquivalence,
             input: lhs_path,
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: Some(rhs_path),
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -3979,6 +5231,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -3993,12 +5251,22 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "check-equivalence");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["single_step_sequential"]));
-        assert!(output_dir.join("reports").join("check-equivalence-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["single_step_sequential"])
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("check-equivalence-report.json")
+            .exists());
 
         let report: Value = serde_json::from_str(
-            &fs::read_to_string(output_dir.join("reports").join("check-equivalence-report.json"))
-                .expect("report should exist"),
+            &fs::read_to_string(
+                output_dir
+                    .join("reports")
+                    .join("check-equivalence-report.json"),
+            )
+            .expect("report should exist"),
         )
         .expect("report should be valid json");
         assert_eq!(report["kind"], "single_step_sequential");
@@ -4086,11 +5354,49 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "rflux",
-            "pdk-validate",
+            "lint-timing-constraints",
             "--input",
-            "example.pdk.json",
+            "timing.json",
+            "--netlist",
+            "example.ir.json",
         ])
-        .expect("pdk-validate args should parse");
+        .expect("lint-timing-constraints args should parse");
+
+        match cli.command {
+            Commands::LintTimingConstraints(args) => {
+                assert_eq!(args.input, PathBuf::from("timing.json"));
+                assert_eq!(args.netlist, Some(PathBuf::from("example.ir.json")));
+                assert_eq!(args.netlist_format, CliNetlistInputFormat::Auto);
+            }
+            other => panic!("expected lint-timing-constraints command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rflux",
+            "run-with-diagnostics",
+            "--output-dir",
+            "bundle",
+            "--kind",
+            "lint-timing-constraints",
+            "--input",
+            "timing.json",
+            "--netlist",
+            "example.ir.json",
+        ])
+        .expect("run-with-diagnostics lint-timing-constraints args should parse");
+
+        match cli.command {
+            Commands::RunWithDiagnostics(args) => {
+                assert_eq!(args.kind, DiagnosticsCommandKind::LintTimingConstraints);
+                assert_eq!(args.input, PathBuf::from("timing.json"));
+                assert_eq!(args.netlist, Some(PathBuf::from("example.ir.json")));
+                assert_eq!(args.netlist_format, CliNetlistInputFormat::Auto);
+            }
+            other => panic!("expected run-with-diagnostics command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["rflux", "pdk-validate", "--input", "example.pdk.json"])
+            .expect("pdk-validate args should parse");
 
         match cli.command {
             Commands::PdkValidate(args) => {
@@ -4123,6 +5429,22 @@ mod tests {
             "compile-layout",
             "--input",
             "example.ir.json",
+            "--output",
+            "layout.json",
+            "--flow-config-patch-output",
+            "flow-patch.json",
+            "--clock-period-ps",
+            "80",
+            "--input-arrival-ps",
+            "5",
+            "--sfq-phase-count",
+            "4",
+            "--sfq-pulse-window-ps",
+            "3",
+            "--flow-config",
+            "flow.json",
+            "--timing-constraints",
+            "timing.json",
             "--min-hold-jtl-length-um",
             "60",
             "--prefer-ptl-from-length-um",
@@ -4135,6 +5457,17 @@ mod tests {
         match cli.command {
             Commands::CompileLayout(args) => {
                 assert_eq!(args.input, PathBuf::from("example.ir.json"));
+                assert_eq!(args.output, Some(PathBuf::from("layout.json")));
+                assert_eq!(
+                    args.flow_config_patch_output,
+                    Some(PathBuf::from("flow-patch.json"))
+                );
+                assert_eq!(args.clock_period_ps, Some(80.0));
+                assert_eq!(args.input_arrival_ps, Some(5.0));
+                assert_eq!(args.sfq_phase_count, Some(4));
+                assert_eq!(args.sfq_pulse_window_ps, Some(3.0));
+                assert_eq!(args.flow_config, Some(PathBuf::from("flow.json")));
+                assert_eq!(args.timing_constraints, Some(PathBuf::from("timing.json")));
                 assert_eq!(args.min_hold_jtl_length_um, Some(60.0));
                 assert_eq!(args.prefer_ptl_from_length_um, Some(65.0));
                 assert_eq!(args.detour_margin_um, Some(6.0));
@@ -4271,7 +5604,10 @@ mod tests {
                 assert_eq!(args.kind, DiagnosticsCommandKind::CheckEquivalence);
                 assert_eq!(args.input, PathBuf::from("lhs.json"));
                 assert_eq!(args.rhs, Some(PathBuf::from("rhs.json")));
-                assert_eq!(args.equivalence_kind, Some(CliEquivalenceKind::SingleStepSequential));
+                assert_eq!(
+                    args.equivalence_kind,
+                    Some(CliEquivalenceKind::SingleStepSequential)
+                );
                 assert_eq!(args.dimacs_output, Some(PathBuf::from("equivalence.cnf")));
             }
             other => panic!("expected run-with-diagnostics command, got {other:?}"),
@@ -4436,6 +5772,8 @@ mod tests {
             kind: DiagnosticsCommandKind::SimulateFile,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::InternalTransient,
             external_command: None,
@@ -4449,6 +5787,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4459,8 +5803,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "simulate-file");
@@ -4468,21 +5812,39 @@ mod tests {
         assert!(manifest["execution"]["error_code"].is_null());
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["simulate_file"]));
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["simulate_file"])
+        );
         assert_eq!(manifest["summary"]["delay_detail_count"], 1);
         assert_eq!(manifest["summary"]["measurement_detail_count"], 1);
         assert_eq!(manifest["summary"]["measurement_warning_count"], 1);
         assert_eq!(manifest["summary"]["violation_detail_count"], 0);
         assert_eq!(manifest["structured_logs"]["event_count"], 5);
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "simulate_file");
-        assert_eq!(manifest["captured_reports"][0]["report"]["delay_detail_count"], 1);
-        assert_eq!(manifest["captured_reports"][0]["report"]["measurement_detail_count"], 1);
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "simulate_file"
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["delay_detail_count"],
+            1
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["measurement_detail_count"],
+            1
+        );
         assert_eq!(
             manifest["captured_reports"][0]["report"]["measurement_warning_count"],
             1
         );
-        assert_eq!(manifest["captured_reports"][0]["report"]["violation_detail_count"], 0);
-        assert!(output_dir.join("reports").join("simulate-file-report.json").exists());
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["violation_detail_count"],
+            0
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("simulate-file-report.json")
+            .exists());
         let report: Value = serde_json::from_str(
             &fs::read_to_string(output_dir.join("reports").join("simulate-file-report.json"))
                 .expect("report should exist"),
@@ -4500,9 +5862,12 @@ mod tests {
             "measurement_crossing_not_found"
         );
 
-        let first_event: Value = serde_json::from_str(event_lines[0]).expect("first event should be json");
-        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
+        let first_event: Value =
+            serde_json::from_str(event_lines[0]).expect("first event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("completed event should be json");
         assert_eq!(first_event["event"], "bundle_started");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
@@ -4563,17 +5928,41 @@ mod tests {
 
         let report_json = simulation_report_to_json(&report);
 
+        assert_eq!(report_json["quality_gate"]["passed"], false);
+        assert_eq!(
+            report_json["quality_gate"]["status"],
+            "failed_measurement_warnings"
+        );
+        assert_eq!(
+            report_json["quality_gate"]["alignment_level"],
+            "internal_transient"
+        );
+        assert_eq!(report_json["quality_gate"]["warning_count"], 1);
+        assert_eq!(report_json["josim_quality_gate"]["passed"], false);
+        assert_eq!(
+            report_json["josim_quality_gate"]["status"],
+            "failed_external_alignment_missing"
+        );
         assert_eq!(report_json["measurement_details"][0]["name"], "out_rms");
         assert_eq!(report_json["measurement_details"][0]["kind"], "rms");
-        assert_eq!(report_json["measurement_details"][0]["measured_value"], 8.5e-4);
-        assert_eq!(report_json["measurement_details"][0]["at_ref"]["node"], "out");
+        assert_eq!(
+            report_json["measurement_details"][0]["measured_value"],
+            8.5e-4
+        );
+        assert_eq!(
+            report_json["measurement_details"][0]["at_ref"]["node"],
+            "out"
+        );
         assert_eq!(report_json["measurement_warnings"][0]["name"], "missing");
         assert_eq!(report_json["measurement_warnings"][0]["kind"], "find");
         assert_eq!(
             report_json["measurement_warnings"][0]["reason"],
             "measurement_crossing_not_found"
         );
-        assert_eq!(report_json["measurement_warnings"][0]["at_ref"]["node"], "in");
+        assert_eq!(
+            report_json["measurement_warnings"][0]["at_ref"]["node"],
+            "in"
+        );
         assert_eq!(report_json["delay_details"][0]["name"], "rc_delay");
         assert_eq!(report_json["delay_details"][0]["delay_ps"], 1.25);
         assert_eq!(report_json["delay_details"][0]["from_ref"]["node"], "in");
@@ -4591,6 +5980,8 @@ mod tests {
             kind: DiagnosticsCommandKind::SimulateFile,
             input: input_path,
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::InternalTransient,
             external_command: None,
@@ -4604,6 +5995,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4635,7 +6032,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink should connect");
         rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
 
@@ -4647,6 +6053,8 @@ mod tests {
             kind: DiagnosticsCommandKind::VerifyLayout,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::InternalTransient,
             external_command: None,
@@ -4660,6 +6068,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4670,27 +6084,47 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "verify-layout");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["verify_layout"]));
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["verify_layout"])
+        );
         assert_eq!(manifest["summary"]["delay_detail_count"], 0);
         assert_eq!(manifest["summary"]["measurement_detail_count"], 0);
         assert_eq!(manifest["summary"]["violation_detail_count"], 0);
         assert_eq!(manifest["structured_logs"]["event_count"], 6);
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "verify_layout");
-        assert_eq!(manifest["captured_reports"][0]["report"]["delay_detail_count"], 0);
-        assert_eq!(manifest["captured_reports"][0]["report"]["measurement_detail_count"], 0);
-        assert_eq!(manifest["captured_reports"][0]["report"]["violation_detail_count"], 0);
-        assert!(output_dir.join("reports").join("verify-layout-report.json").exists());
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "verify_layout"
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["delay_detail_count"],
+            0
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["measurement_detail_count"],
+            0
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["violation_detail_count"],
+            0
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("verify-layout-report.json")
+            .exists());
 
-        let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[4]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[3]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[4]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
     }
@@ -4706,7 +6140,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink should connect");
         rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
 
@@ -4718,6 +6161,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CompileLayout,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -4731,6 +6176,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4741,41 +6192,106 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "compile-layout");
         assert!(manifest["invocation"]["mode"].is_null());
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
-        assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_layout"]));
+        assert_eq!(manifest["summary"]["captured_report_count"], 2);
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["compile_layout", "rflux_flow_config"])
+        );
+        assert_eq!(
+            manifest["summary"]["recommended_next_flow_config"],
+            output_dir
+                .join("reports")
+                .join("flow-config-patch.json")
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            manifest["summary"]["recommended_next_flow_config_kind"],
+            FLOW_CONFIG_KIND
+        );
         assert_eq!(manifest["structured_logs"]["event_count"], 6);
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "compile_layout");
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "compile_layout"
+        );
         assert_eq!(
             manifest["captured_reports"][0]["report"]["timing_closure_status"],
             "closed"
         );
+        assert_eq!(
+            manifest["captured_reports"][1]["report"]["kind"],
+            "rflux_flow_config"
+        );
+        assert_eq!(
+            manifest["captured_reports"][1]["report"]["schema_version"],
+            FLOW_CONFIG_SCHEMA_VERSION
+        );
         let report: Value = serde_json::from_str(
-            &fs::read_to_string(output_dir.join("reports").join("compile-layout-report.json"))
-                .expect("compile layout report should exist"),
+            &fs::read_to_string(
+                output_dir
+                    .join("reports")
+                    .join("compile-layout-report.json"),
+            )
+            .expect("compile layout report should exist"),
         )
         .expect("compile layout report should be json");
-        assert_eq!(
-            report["timing"]["closure"]["status"],
-            "closed"
-        );
+        assert_eq!(report["timing"]["closure"]["status"], "closed");
         assert_eq!(report["timing"]["closure"]["closed"], true);
         assert_eq!(report["timing"]["closure"]["action_count"], 0);
         assert!(report["timing"]["closure"]["primary_action"].is_null());
         assert_eq!(report["timing"]["closure_loop"]["status"], "closed");
+        assert_eq!(
+            report["timing"]["closure_loop"]["route_delay_optimization_attempted"],
+            false
+        );
+        assert_eq!(
+            report["timing"]["closure_loop"]["route_delay_optimization_applied"],
+            false
+        );
+        assert_eq!(
+            report["routing"]["effective_prefer_ptl_from_length_um"],
+            60.0
+        );
+        assert_eq!(report["routing"]["effective_detour_margin_um"], 12.0);
+        assert_eq!(report["flow_config_patch"]["kind"], FLOW_CONFIG_KIND);
+        assert_eq!(
+            report["flow_config_patch"]["schema_version"],
+            FLOW_CONFIG_SCHEMA_VERSION
+        );
+        assert_eq!(
+            report["flow_config_patch"]["payload"]["routing"]["prefer_ptl_from_length_um"],
+            report["routing"]["effective_prefer_ptl_from_length_um"]
+        );
+        assert_eq!(
+            report["flow_config_patch"]["payload"]["routing"]["detour_margin_um"],
+            report["routing"]["effective_detour_margin_um"]
+        );
         assert_eq!(report["timing"]["closure_loop"]["hold_fix_applied"], false);
         assert_eq!(report["timing"]["closure_loop"]["final_hold_violations"], 0);
-        assert!(output_dir.join("reports").join("compile-layout-report.json").exists());
+        assert!(output_dir
+            .join("reports")
+            .join("compile-layout-report.json")
+            .exists());
+        let flow_config_patch_path = output_dir.join("reports").join("flow-config-patch.json");
+        assert!(flow_config_patch_path.exists());
+        let flow_config_patch: Value = serde_json::from_str(
+            &fs::read_to_string(&flow_config_patch_path).expect("flow config patch should exist"),
+        )
+        .expect("flow config patch should be json");
+        assert_eq!(flow_config_patch, report["flow_config_patch"]);
 
-        let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[4]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[3]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[4]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
     }
@@ -4785,24 +6301,72 @@ mod tests {
         let dir = unique_test_dir("run-with-diagnostics-analyze-timing");
         let input_path = dir.join("example.ir.json");
         let pdk_path = dir.join("example.pdk.json");
+        let flow_config_path = dir.join("flow-config.json");
+        let constraints_path = dir.join("timing-constraints.json");
         let output_dir = dir.join("bundle");
 
         let mut netlist = Netlist::new();
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink should connect");
         rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
 
         let pdk = Pdk::minimal("diag-pdk");
         write_pdk_json(&pdk_path, &pdk).expect("pdk json should write");
+        fs::write(
+            &flow_config_path,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": FLOW_CONFIG_SCHEMA_VERSION,
+                "kind": FLOW_CONFIG_KIND,
+                "payload": {
+                    "timing": {
+                        "clock_period_ps": 120.0,
+                        "input_arrival_ps": 5.0,
+                        "sfq_phase_count": 2,
+                        "sfq_pulse_window_ps": 2.0
+                    }
+                }
+            }))
+            .expect("flow config json should render"),
+        )
+        .expect("flow config json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "nodes": [
+                    {"node": "source", "clock_domain": 1},
+                    {"node": "sink", "clock_domain": 2}
+                ],
+                "domains": [
+                    {"id": 1, "period_ps": 10.0},
+                    {"id": 2, "period_ps": 10.0}
+                ],
+                "crossings": [
+                    {"from_domain": 1, "to_domain": 2, "kind": "false-path"}
+                ]
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
 
         run_with_diagnostics(RunWithDiagnosticsArgs {
             output_dir: output_dir.clone(),
             kind: DiagnosticsCommandKind::AnalyzeTiming,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -4816,6 +6380,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: Some(20.0),
+            input_arrival_ps: Some(5.0),
+            sfq_phase_count: Some(2),
+            sfq_pulse_window_ps: Some(2.0),
+            flow_config: Some(flow_config_path.clone()),
+            timing_constraints: Some(constraints_path.clone()),
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4826,46 +6396,984 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "analyze-timing");
         assert!(manifest["invocation"]["mode"].is_null());
         assert_eq!(manifest["execution"]["status"], "succeeded");
-        assert_eq!(manifest["summary"]["captured_input_count"], 2);
+        assert_eq!(manifest["summary"]["captured_input_count"], 4);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["timing_analysis"]));
-        assert_eq!(manifest["structured_logs"]["event_count"], 6);
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "timing_analysis");
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["timing_analysis"])
+        );
+        assert_eq!(manifest["structured_logs"]["event_count"], 8);
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "timing_analysis"
+        );
+        assert_eq!(
+            manifest["configuration"]["flow"]["uses_default_flow_config"],
+            false
+        );
+        assert_eq!(manifest["configuration"]["flow"]["clock_period_ps"], 20.0);
+        assert_eq!(manifest["configuration"]["flow"]["input_arrival_ps"], 5.0);
+        assert_eq!(manifest["configuration"]["flow"]["sfq_phase_count"], 2);
+        assert_eq!(
+            manifest["configuration"]["flow"]["sfq_pulse_window_ps"],
+            2.0
+        );
+        assert_eq!(
+            manifest["configuration"]["flow"]["flow_config"],
+            display_path(&flow_config_path)
+        );
+        assert_eq!(
+            manifest["configuration"]["flow"]["timing_constraints"],
+            display_path(&constraints_path)
+        );
+        assert_eq!(
+            manifest["configuration"]["timing_constraint_summary"],
+            json!({
+                "node_constraints": 2,
+                "pin_constraints": 0,
+                "clock_domains": 2,
+                "crossing_constraints": 1,
+            })
+        );
         assert_eq!(
             manifest["captured_reports"][0]["report"]["timing_closure_status"],
             "closed"
         );
         let report: Value = serde_json::from_str(
-            &fs::read_to_string(output_dir.join("reports").join("analyze-timing-report.json"))
-                .expect("analyze timing report should exist"),
+            &fs::read_to_string(
+                output_dir
+                    .join("reports")
+                    .join("analyze-timing-report.json"),
+            )
+            .expect("analyze timing report should exist"),
         )
         .expect("analyze timing report should be json");
-        assert_eq!(
-            report["closure"]["status"],
-            "closed"
-        );
+        assert_eq!(report["closure"]["status"], "closed");
         assert_eq!(report["closure"]["closed"], true);
         assert_eq!(report["closure"]["action_count"], 0);
         assert!(report["closure"]["primary_action"].is_null());
-        assert_eq!(report["closure"]["action_summary"]["reduce_route_delay"], 0);
-        assert_eq!(
-            report["closure"]["action_summary"]["relax_constraint_or_improve_library_timing"],
-            0
-        );
         assert_eq!(report["closure"]["action_summary"]["add_hold_padding"], 0);
-        assert!(output_dir.join("reports").join("analyze-timing-report.json").exists());
+        assert_eq!(report["false_path_arcs"], 1);
+        assert_eq!(manifest["captured_inputs"][2]["role"], "flow_config");
+        assert_eq!(
+            manifest["captured_inputs"][2]["contract"]["contract_kind"],
+            "rflux_flow_config"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][2]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
+        assert_eq!(manifest["captured_inputs"][3]["role"], "timing_constraints");
+        assert_eq!(
+            manifest["captured_inputs"][3]["contract"]["contract_kind"],
+            "rflux_timing_constraints"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][3]["contract"]["constraint_summary"],
+            json!({
+                "node_constraints": 2,
+                "pin_constraints": 0,
+                "clock_domains": 2,
+                "crossing_constraints": 1,
+            })
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("analyze-timing-report.json")
+            .exists());
 
-        let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[4]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[5]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[6]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
+    }
+
+    #[test]
+    fn compile_layout_writes_flow_config_patch_output() {
+        let dir = unique_test_dir("compile-layout-flow-config-patch");
+        let input_path = dir.join("example.ir.json");
+        let output_path = dir.join("layout-report.json");
+        let patch_path = dir.join("flow-config-patch.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+
+        run_compile_layout(LayoutCommandArgs {
+            input: input_path,
+            input_format: CliNetlistInputFormat::Auto,
+            pdk: None,
+            output: Some(output_path.clone()),
+            flow_config_patch_output: Some(patch_path.clone()),
+            clock_period_ps: Some(90.0),
+            input_arrival_ps: Some(4.0),
+            sfq_phase_count: Some(2),
+            sfq_pulse_window_ps: Some(3.0),
+            flow_config: None,
+            timing_constraints: None,
+            min_hold_jtl_length_um: Some(20.0),
+            prefer_ptl_from_length_um: Some(70.0),
+            detour_margin_um: Some(8.0),
+        })
+        .expect("compile-layout should write report and patch");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("layout report should exist"),
+        )
+        .expect("layout report should be json");
+        let patch: Value =
+            serde_json::from_str(&fs::read_to_string(&patch_path).expect("patch should exist"))
+                .expect("patch should be json");
+
+        assert_eq!(patch, report["flow_config_patch"]);
+        assert_eq!(patch["kind"], FLOW_CONFIG_KIND);
+        assert_eq!(patch["schema_version"], FLOW_CONFIG_SCHEMA_VERSION);
+        assert_eq!(patch["metadata"]["source_command"], "compile_layout");
+        assert_eq!(
+            patch["metadata"]["timing_closure_status"],
+            report["timing"]["closure"]["status"]
+        );
+        assert_eq!(patch["payload"]["timing"]["clock_period_ps"], 90.0);
+        assert_eq!(patch["payload"]["timing"]["input_arrival_ps"], 4.0);
+        assert_eq!(patch["payload"]["routing"]["min_hold_jtl_length_um"], 20.0);
+        assert_eq!(
+            patch["payload"]["routing"]["prefer_ptl_from_length_um"],
+            70.0
+        );
+        assert_eq!(patch["payload"]["routing"]["detour_margin_um"], 8.0);
+
+        let replay_output_path = dir.join("layout-replay-report.json");
+        run_compile_layout(LayoutCommandArgs {
+            input: dir.join("example.ir.json"),
+            input_format: CliNetlistInputFormat::Auto,
+            pdk: None,
+            output: Some(replay_output_path.clone()),
+            flow_config_patch_output: None,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: Some(patch_path),
+            timing_constraints: None,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
+        })
+        .expect("compile-layout should replay generated flow config patch");
+
+        let replay_report: Value = serde_json::from_str(
+            &fs::read_to_string(&replay_output_path).expect("replay report should exist"),
+        )
+        .expect("replay report should be json");
+        assert_eq!(
+            replay_report["routing"]["effective_prefer_ptl_from_length_um"],
+            report["routing"]["effective_prefer_ptl_from_length_um"]
+        );
+        assert_eq!(
+            replay_report["routing"]["effective_detour_margin_um"],
+            report["routing"]["effective_detour_margin_um"]
+        );
+    }
+
+    #[test]
+    fn analyze_timing_json_reports_top_closure_actions() {
+        let dir = unique_test_dir("analyze-timing-top-closure-actions");
+        let input_path = dir.join("example.ir.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let sources = (0..4)
+            .map(|index| netlist.add_node(NodeKind::CellInstance, format!("source_{index}")))
+            .collect::<Vec<_>>();
+        let gates = (0..4)
+            .map(|index| {
+                (0..7)
+                    .map(|stage| {
+                        netlist.add_node(NodeKind::CellInstance, format!("gate_{index}_{stage}"))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let sinks = (0..4)
+            .map(|index| netlist.add_node(NodeKind::Dff, format!("sink_{index}")))
+            .collect::<Vec<_>>();
+        for (index, source) in sources.iter().enumerate() {
+            let mut from = *source;
+            for (stage, gate) in gates[index].iter().enumerate() {
+                netlist
+                    .connect(
+                        PinRef {
+                            node: from,
+                            port: stage as u16,
+                        },
+                        PinRef {
+                            node: *gate,
+                            port: 0,
+                        },
+                    )
+                    .expect("source chain should connect");
+                from = *gate;
+            }
+            netlist
+                .connect(
+                    PinRef {
+                        node: from,
+                        port: 0,
+                    },
+                    PinRef {
+                        node: sinks[index],
+                        port: 0,
+                    },
+                )
+                .expect("source to sink should connect");
+        }
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+
+        run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: None,
+                output: Some(output_path.clone()),
+                flow_config_patch_output: None,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: None,
+                sfq_pulse_window_ps: None,
+                flow_config: None,
+                timing_constraints: None,
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: Some(20.0),
+                detour_margin_um: None,
+            }),
+        })
+        .expect("analyze-timing should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("timing report should exist"),
+        )
+        .expect("timing report should be json");
+        assert_eq!(report["closure"]["status"], "open");
+        assert_eq!(report["closure"]["failing_checks"], json!(["setup"]));
+        assert_eq!(report["closure"]["action_count"], 3);
+        assert_eq!(report["closure"]["action_summary"]["reduce_route_delay"], 3);
+        assert_eq!(report["closure"]["actions"].as_array().unwrap().len(), 3);
+        assert!(report["closure"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|action| action["check"] == "setup"));
+        assert_eq!(
+            report["closure"]["primary_action"],
+            report["closure"]["actions"][0]
+        );
+        assert_eq!(report["multi_corner"]["corner_count"], 1);
+        assert_eq!(
+            report["multi_corner"]["corners"][0]["corner_name"],
+            "default"
+        );
+    }
+
+    #[test]
+    fn analyze_timing_json_reports_multi_corner_signoff() {
+        let dir = unique_test_dir("analyze-timing-multi-corner");
+        let input_path = dir.join("example.ir.json");
+        let pdk_path = dir.join("example.pdk.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
+            .expect("source to gate");
+        netlist
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("gate to sink");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+
+        let mut pdk = Pdk::minimal("corner-cli").with_active_timing_corner("slow");
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: Some("ss".to_string()),
+            voltage_v: Some(2.4),
+            temperature_k: Some(4.2),
+            cell_timing: vec![rflux_tech::CellTimingModel {
+                kind: rflux_tech::SfCellKind::GenericGate,
+                intrinsic_delay_ps: 28.0,
+                setup_ps: 8.0,
+                hold_ps: 4.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: rflux_tech::InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 8.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 24.0,
+                    },
+                ],
+            }],
+        });
+        write_pdk_json(&pdk_path, &pdk).expect("pdk json should write");
+
+        run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: Some(pdk_path),
+                output: Some(output_path.clone()),
+                flow_config_patch_output: None,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: None,
+                sfq_pulse_window_ps: None,
+                flow_config: None,
+                timing_constraints: None,
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
+            }),
+        })
+        .expect("analyze-timing should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("timing report should exist"),
+        )
+        .expect("timing report should be json");
+        assert_eq!(report["multi_corner"]["active_timing_corner"], "slow");
+        assert_eq!(report["multi_corner"]["corner_count"], 2);
+        assert_eq!(report["multi_corner"]["worst_setup_corner"], "slow");
+        assert_eq!(report["multi_corner"]["worst_critical_path_corner"], "slow");
+        assert_eq!(
+            report["multi_corner"]["corners"][0]["corner_name"],
+            "default"
+        );
+        assert_eq!(report["multi_corner"]["corners"][1]["corner_name"], "slow");
+        assert_eq!(
+            report["multi_corner"]["corners"][1]["is_active_corner"],
+            true
+        );
+        assert!(
+            report["multi_corner"]["corners"][1]["critical_path_delay_ps"]
+                .as_f64()
+                .expect("slow critical path should be numeric")
+                > report["multi_corner"]["corners"][0]["critical_path_delay_ps"]
+                    .as_f64()
+                    .expect("default critical path should be numeric")
+        );
+    }
+
+    #[test]
+    fn analyze_timing_honors_cli_timing_options() {
+        let dir = unique_test_dir("analyze-timing-cli-options");
+        let input_path = dir.join("example.ir.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+
+        run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: None,
+                output: Some(output_path.clone()),
+                flow_config_patch_output: None,
+                clock_period_ps: Some(20.0),
+                input_arrival_ps: Some(5.0),
+                sfq_phase_count: Some(2),
+                sfq_pulse_window_ps: Some(2.0),
+                flow_config: None,
+                timing_constraints: None,
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
+            }),
+        })
+        .expect("analyze-timing should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("timing report should exist"),
+        )
+        .expect("timing report should be json");
+        assert_eq!(report["closure"]["status"], "open");
+        assert_eq!(report["setup_violations"], 1);
+        assert_eq!(report["capture_window_violations"], 1);
+        assert_eq!(
+            report["closure"]["failing_checks"],
+            json!(["setup", "capture_window"])
+        );
+    }
+
+    #[test]
+    fn analyze_timing_honors_flow_config_file_and_cli_overrides() {
+        let dir = unique_test_dir("analyze-timing-flow-config");
+        let input_path = dir.join("example.ir.json");
+        let flow_config_path = dir.join("flow-config.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &flow_config_path,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": FLOW_CONFIG_SCHEMA_VERSION,
+                "kind": FLOW_CONFIG_KIND,
+                "payload": {
+                    "timing": {
+                        "clock_period_ps": 120.0,
+                        "input_arrival_ps": 5.0,
+                        "sfq_phase_count": 2,
+                        "sfq_pulse_window_ps": 2.0
+                    }
+                }
+            }))
+            .expect("flow config json should render"),
+        )
+        .expect("flow config json should write");
+
+        run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: None,
+                output: Some(output_path.clone()),
+                flow_config_patch_output: None,
+                clock_period_ps: Some(20.0),
+                input_arrival_ps: None,
+                sfq_phase_count: None,
+                sfq_pulse_window_ps: None,
+                flow_config: Some(flow_config_path),
+                timing_constraints: None,
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
+            }),
+        })
+        .expect("analyze-timing should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("timing report should exist"),
+        )
+        .expect("timing report should be json");
+        assert_eq!(report["closure"]["status"], "open");
+        assert_eq!(report["setup_violations"], 1);
+        assert_eq!(report["capture_window_violations"], 1);
+        assert_eq!(
+            report["closure"]["failing_checks"],
+            json!(["setup", "capture_window"])
+        );
+    }
+
+    #[test]
+    fn analyze_timing_honors_cli_timing_constraints_file() {
+        let dir = unique_test_dir("analyze-timing-cli-constraints");
+        let input_path = dir.join("example.ir.json");
+        let constraints_path = dir.join("timing-constraints.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "node_constraints": [
+                    {"node": "source", "clock_domain": 1},
+                    {"node": "sink", "clock_domain": 2}
+                ],
+                "clock_domains": [
+                    {"id": 1, "period_ps": 10.0},
+                    {"id": 2, "period_ps": 10.0}
+                ],
+                "crossing_constraints": [
+                    {"from_domain": 1, "to_domain": 2, "kind": "false_path"}
+                ]
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: None,
+                output: Some(output_path.clone()),
+                flow_config_patch_output: None,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: Some(2),
+                sfq_pulse_window_ps: Some(2.5),
+                flow_config: None,
+                timing_constraints: Some(constraints_path),
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
+            }),
+        })
+        .expect("analyze-timing should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("timing report should exist"),
+        )
+        .expect("timing report should be json");
+        assert_eq!(report["setup_violations"], 0);
+        assert_eq!(report["false_path_arcs"], 1);
+        assert_eq!(report["timing_arcs"][0]["from_domain"], 1);
+        assert_eq!(report["timing_arcs"][0]["to_domain"], 2);
+        assert_eq!(report["timing_arcs"][0]["is_false_path"], true);
+    }
+
+    #[test]
+    fn analyze_timing_accepts_versioned_timing_constraints_envelope() {
+        let dir = unique_test_dir("analyze-timing-cli-versioned-constraints");
+        let input_path = dir.join("example.ir.json");
+        let constraints_path = dir.join("timing-constraints.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": TIMING_CONSTRAINTS_SCHEMA_VERSION,
+                "kind": TIMING_CONSTRAINTS_KIND,
+                "payload": {
+                    "nodes": [
+                        {"node": "source", "clock_domain": 1},
+                        {"node": "sink", "clock_domain": 2}
+                    ],
+                    "domains": [
+                        {"id": 1, "period_ps": 10.0},
+                        {"id": 2, "period_ps": 10.0}
+                    ],
+                    "crossings": [
+                        {"from_domain": 1, "to_domain": 2, "kind": "false_path"}
+                    ]
+                }
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: None,
+                output: Some(output_path.clone()),
+                flow_config_patch_output: None,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: Some(2),
+                sfq_pulse_window_ps: Some(2.5),
+                flow_config: None,
+                timing_constraints: Some(constraints_path),
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
+            }),
+        })
+        .expect("analyze-timing should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("timing report should exist"),
+        )
+        .expect("timing report should be json");
+        assert_eq!(report["false_path_arcs"], 1);
+        assert_eq!(report["timing_arcs"][0]["is_false_path"], true);
+    }
+
+    #[test]
+    fn analyze_timing_rejects_timing_constraints_with_unknown_crossing_domain() {
+        let dir = unique_test_dir("analyze-timing-cli-bad-constraints");
+        let input_path = dir.join("example.ir.json");
+        let constraints_path = dir.join("timing-constraints.json");
+        let output_path = dir.join("timing-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "node_constraints": [
+                    {"node": "source", "clock_domain": 1},
+                    {"node": "sink", "clock_domain": 2}
+                ],
+                "clock_domains": [
+                    {"id": 1, "period_ps": 10.0}
+                ],
+                "crossing_constraints": [
+                    {"from_domain": 1, "to_domain": 2, "kind": "false_path"}
+                ]
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        let error = run(Cli {
+            command: Commands::AnalyzeTiming(LayoutCommandArgs {
+                input: input_path,
+                input_format: CliNetlistInputFormat::Auto,
+                pdk: None,
+                output: Some(output_path),
+                flow_config_patch_output: None,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: None,
+                sfq_pulse_window_ps: None,
+                flow_config: None,
+                timing_constraints: Some(constraints_path),
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
+            }),
+        })
+        .expect_err("bad timing constraints should fail");
+
+        assert!(error
+            .to_string()
+            .contains("timing constraints crossing references unknown to_domain 2"));
+    }
+
+    #[test]
+    fn run_lint_timing_constraints_reports_summary_and_netlist_context() {
+        let dir = unique_test_dir("lint-timing-constraints");
+        let input_path = dir.join("example.ir.json");
+        let constraints_path = dir.join("timing-constraints.json");
+        let output_path = dir.join("timing-constraints-report.json");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "node_constraints": [
+                    {"node": "source", "clock_domain": 1},
+                    {"node": "sink", "clock_domain": 2}
+                ],
+                "pin_constraints": [
+                    {"node": "sink", "port": 0, "required_ps": 12.0}
+                ],
+                "clock_domains": [
+                    {"id": 1, "period_ps": 10.0},
+                    {"id": 2, "period_ps": 10.0}
+                ],
+                "crossing_constraints": [
+                    {"from_domain": 1, "to_domain": 2, "kind": "false_path"}
+                ]
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        run(Cli {
+            command: Commands::LintTimingConstraints(LintTimingConstraintsArgs {
+                input: constraints_path.clone(),
+                netlist: Some(input_path.clone()),
+                netlist_format: CliNetlistInputFormat::Auto,
+                output: Some(output_path.clone()),
+            }),
+        })
+        .expect("lint-timing-constraints should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_path).expect("lint report should exist"),
+        )
+        .expect("lint report should be json");
+        assert_eq!(report["kind"], "lint_timing_constraints");
+        assert_eq!(report["valid"], true);
+        assert_eq!(
+            report["constraint_summary"],
+            json!({
+                "node_constraints": 2,
+                "pin_constraints": 1,
+                "clock_domains": 2,
+                "crossing_constraints": 1,
+            })
+        );
+        assert_eq!(report["netlist"]["path"], display_path(&input_path));
+        assert_eq!(report["netlist"]["node_count"], 2);
+        assert_eq!(report["netlist"]["edge_count"], 1);
+    }
+
+    #[test]
+    fn run_lint_timing_constraints_rejects_unknown_netlist_node() {
+        let dir = unique_test_dir("lint-timing-constraints-bad-node");
+        let input_path = dir.join("example.ir.json");
+        let constraints_path = dir.join("timing-constraints.json");
+
+        let mut netlist = Netlist::new();
+        netlist.add_node(NodeKind::Port, "source");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "node_constraints": [
+                    {"node": "missing", "clock_domain": 1}
+                ],
+                "clock_domains": [
+                    {"id": 1, "period_ps": 10.0}
+                ]
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        let error = run(Cli {
+            command: Commands::LintTimingConstraints(LintTimingConstraintsArgs {
+                input: constraints_path,
+                netlist: Some(input_path),
+                netlist_format: CliNetlistInputFormat::Auto,
+                output: None,
+            }),
+        })
+        .expect_err("bad timing constraints should fail");
+
+        assert!(error
+            .to_string()
+            .contains("timing constraints reference unknown node name 'missing'"));
+    }
+
+    #[test]
+    fn run_with_diagnostics_executes_lint_timing_constraints_and_writes_bundle() {
+        let dir = unique_test_dir("run-with-diagnostics-lint-timing-constraints");
+        let input_path = dir.join("example.ir.json");
+        let constraints_path = dir.join("timing-constraints.json");
+        let output_dir = dir.join("bundle");
+
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink should connect");
+        rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "nodes": [
+                    {"node": "source", "clock_domain": 1},
+                    {"node": "sink", "clock_domain": 2}
+                ],
+                "domains": [
+                    {"id": 1, "period_ps": 10.0},
+                    {"id": 2, "period_ps": 10.0}
+                ],
+                "crossings": [
+                    {"from_domain": 1, "to_domain": 2, "kind": "false_path"}
+                ]
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        run_with_diagnostics(RunWithDiagnosticsArgs {
+            output_dir: output_dir.clone(),
+            kind: DiagnosticsCommandKind::LintTimingConstraints,
+            input: constraints_path.clone(),
+            pdk: None,
+            netlist: Some(input_path.clone()),
+            netlist_format: CliNetlistInputFormat::Auto,
+            rhs: None,
+            mode: CliSimulationMode::Auto,
+            external_command: None,
+            notes: Some("lint timing constraints and bundle".to_string()),
+            assumptions: None,
+            equivalence_metadata: None,
+            check_ref: None,
+            equivalence_kind: None,
+            equivalence_depth: 2,
+            dimacs_output: None,
+            input_kind: None,
+            input_format: CliNetlistInputFormat::Auto,
+            rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
+        })
+        .expect("run-with-diagnostics lint-timing-constraints should succeed");
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
+        )
+        .expect("manifest should be valid json");
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(
+                output_dir
+                    .join("reports")
+                    .join("lint-timing-constraints-report.json"),
+            )
+            .expect("lint timing constraints report should exist"),
+        )
+        .expect("lint timing constraints report should be json");
+
+        assert_eq!(manifest["invocation"]["command"], "lint-timing-constraints");
+        assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["summary"]["captured_input_count"], 2);
+        assert_eq!(manifest["summary"]["captured_report_count"], 1);
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["lint_timing_constraints"])
+        );
+        assert_eq!(manifest["captured_inputs"][0]["role"], "timing_constraints");
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_timing_constraints"
+        );
+        assert_eq!(manifest["captured_inputs"][1]["role"], "input");
+        assert_eq!(
+            manifest["configuration"]["lint_timing_constraints"]["netlist_format"],
+            "auto"
+        );
+        assert_eq!(report["kind"], "lint_timing_constraints");
+        assert_eq!(report["constraint_summary"]["node_constraints"], 2);
+        assert_eq!(report["netlist"]["node_count"], 2);
     }
 
     #[test]
@@ -4879,7 +7387,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink should connect");
         rflux_io::write_ir_json(&input_path, &netlist).expect("ir json should write");
 
@@ -4891,6 +7408,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CompileNetlist,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -4904,6 +7423,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4914,8 +7439,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "compile-netlist");
@@ -4923,13 +7448,24 @@ mod tests {
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["compile_netlist"])
+        );
         assert_eq!(manifest["structured_logs"]["event_count"], 6);
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "compile_netlist");
-        assert!(output_dir.join("reports").join("compile-netlist-report.json").exists());
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "compile_netlist"
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("compile-netlist-report.json")
+            .exists());
 
-        let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[4]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[3]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[4]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
     }
@@ -4955,6 +7491,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CompileNetlist,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -4968,6 +7506,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -4982,8 +7526,14 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "compile-netlist");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
-        assert!(output_dir.join("reports").join("compile-netlist-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["compile_netlist"])
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("compile-netlist-report.json")
+            .exists());
     }
 
     #[test]
@@ -4992,17 +7542,16 @@ mod tests {
         let input_path = dir.join("example.logic");
         let output_dir = dir.join("bundle");
 
-        fs::write(
-            &input_path,
-            "INPUT(a)\nOUTPUT(y)\ny = BUF(a)\n",
-        )
-        .expect("bench text should write");
+        fs::write(&input_path, "INPUT(a)\nOUTPUT(y)\ny = BUF(a)\n")
+            .expect("bench text should write");
 
         run_with_diagnostics(RunWithDiagnosticsArgs {
             output_dir: output_dir.clone(),
             kind: DiagnosticsCommandKind::CompileNetlist,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5016,6 +7565,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Bench,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5029,7 +7584,10 @@ mod tests {
 
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["configuration"]["input_format"], "bench");
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["compile_netlist"])
+        );
     }
 
     #[test]
@@ -5053,6 +7611,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CompileNetlist,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5066,6 +7626,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5080,8 +7646,14 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "compile-netlist");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
-        assert!(output_dir.join("reports").join("compile-netlist-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["compile_netlist"])
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("compile-netlist-report.json")
+            .exists());
     }
 
     #[test]
@@ -5105,6 +7677,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CompileNetlist,
             input: input_path.clone(),
             pdk: Some(pdk_path.clone()),
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5118,6 +7692,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5132,8 +7712,14 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "compile-netlist");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
-        assert!(output_dir.join("reports").join("compile-netlist-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["compile_netlist"])
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("compile-netlist-report.json")
+            .exists());
     }
 
     #[test]
@@ -5156,6 +7742,8 @@ mod tests {
                 kind: DiagnosticsCommandKind::CompileNetlist,
                 input: fixture_path,
                 pdk: Some(pdk_path.clone()),
+                netlist: None,
+                netlist_format: CliNetlistInputFormat::Auto,
                 rhs: None,
                 mode: CliSimulationMode::Auto,
                 external_command: None,
@@ -5169,25 +7757,46 @@ mod tests {
                 input_kind: None,
                 input_format: CliNetlistInputFormat::Auto,
                 rhs_format: CliNetlistInputFormat::Auto,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: None,
+                sfq_pulse_window_ps: None,
+                flow_config: None,
+                timing_constraints: None,
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
             })
-            .expect("run-with-diagnostics compile-netlist from checked-in bench fixture should succeed");
+            .expect(
+                "run-with-diagnostics compile-netlist from checked-in bench fixture should succeed",
+            );
 
             let manifest: Value = serde_json::from_str(
-                &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
+                &fs::read_to_string(output_dir.join("manifest.json"))
+                    .expect("manifest should exist"),
             )
             .expect("manifest should be valid json");
 
             assert_eq!(manifest["invocation"]["command"], "compile-netlist");
             assert_eq!(manifest["execution"]["status"], "succeeded");
             assert_eq!(manifest["summary"]["captured_input_count"], 2);
-            assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
-            assert_eq!(manifest["captured_inputs"][0]["contract"]["input_kind"], "bench");
-            assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "bench_text");
+            assert_eq!(
+                manifest["summary"]["report_kinds"],
+                json!(["compile_netlist"])
+            );
+            assert_eq!(
+                manifest["captured_inputs"][0]["contract"]["input_kind"],
+                "bench"
+            );
+            assert_eq!(
+                manifest["captured_inputs"][0]["contract"]["schema_format"],
+                "bench_text"
+            );
             assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"].is_null());
-            assert!(output_dir.join("reports").join("compile-netlist-report.json").exists());
+            assert!(output_dir
+                .join("reports")
+                .join("compile-netlist-report.json")
+                .exists());
         }
     }
 
@@ -5211,6 +7820,8 @@ mod tests {
                 kind: DiagnosticsCommandKind::CompileNetlist,
                 input: fixture_path,
                 pdk: Some(pdk_path.clone()),
+                netlist: None,
+                netlist_format: CliNetlistInputFormat::Auto,
                 rhs: None,
                 mode: CliSimulationMode::Auto,
                 external_command: None,
@@ -5224,6 +7835,12 @@ mod tests {
                 input_kind: None,
                 input_format: CliNetlistInputFormat::Auto,
                 rhs_format: CliNetlistInputFormat::Auto,
+                clock_period_ps: None,
+                input_arrival_ps: None,
+                sfq_phase_count: None,
+                sfq_pulse_window_ps: None,
+                flow_config: None,
+                timing_constraints: None,
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
@@ -5231,18 +7848,31 @@ mod tests {
             .expect("run-with-diagnostics compile-netlist from checked-in sequential bench fixture should succeed");
 
             let manifest: Value = serde_json::from_str(
-                &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
+                &fs::read_to_string(output_dir.join("manifest.json"))
+                    .expect("manifest should exist"),
             )
             .expect("manifest should be valid json");
 
             assert_eq!(manifest["invocation"]["command"], "compile-netlist");
             assert_eq!(manifest["execution"]["status"], "succeeded");
             assert_eq!(manifest["summary"]["captured_input_count"], 2);
-            assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_netlist"]));
-            assert_eq!(manifest["captured_inputs"][0]["contract"]["input_kind"], "bench");
-            assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "bench_text");
+            assert_eq!(
+                manifest["summary"]["report_kinds"],
+                json!(["compile_netlist"])
+            );
+            assert_eq!(
+                manifest["captured_inputs"][0]["contract"]["input_kind"],
+                "bench"
+            );
+            assert_eq!(
+                manifest["captured_inputs"][0]["contract"]["schema_format"],
+                "bench_text"
+            );
             assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"].is_null());
-            assert!(output_dir.join("reports").join("compile-netlist-report.json").exists());
+            assert!(output_dir
+                .join("reports")
+                .join("compile-netlist-report.json")
+                .exists());
         }
     }
 
@@ -5258,6 +7888,8 @@ mod tests {
             kind: DiagnosticsCommandKind::SolveDimacs,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5271,6 +7903,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5281,8 +7919,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "solve-dimacs");
@@ -5291,11 +7929,19 @@ mod tests {
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(manifest["summary"]["inspection_failure_count"], 0);
         assert_eq!(manifest["summary"]["report_kinds"], json!(["dimacs_sat"]));
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "dimacs_sat");
-        assert!(output_dir.join("reports").join("solve-dimacs-report.json").exists());
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "dimacs_sat"
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("solve-dimacs-report.json")
+            .exists());
 
-        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
     }
@@ -5313,18 +7959,66 @@ mod tests {
         let b_l = lhs.add_node(NodeKind::Port, "b");
         let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
-        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
-        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let b_r = rhs.add_node(NodeKind::Port, "b");
         let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_and", Some(LogicOp::And));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("b->and");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("a->and");
-        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("and->out");
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .expect("b->and");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .expect("a->and");
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         rflux_io::write_ir_json(&lhs_path, &lhs).expect("lhs should be written");
         rflux_io::write_ir_json(&rhs_path, &rhs).expect("rhs should be written");
@@ -5334,6 +8028,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CheckEquivalence,
             input: lhs_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: Some(rhs_path.clone()),
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5347,6 +8043,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5357,21 +8059,32 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "check-equivalence");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["combinational"]));
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "combinational");
-        assert!(output_dir.join("reports").join("check-equivalence-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["combinational"])
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "combinational"
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("check-equivalence-report.json")
+            .exists());
         assert!(dimacs_path.exists());
 
-        let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[4]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[3]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[4]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
     }
@@ -5388,24 +8101,78 @@ mod tests {
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "state");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 })
-            .expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 })
-            .expect("clock->dff");
-        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 })
-            .expect("dff->out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node(NodeKind::Dff, "state");
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 })
-            .expect("data->dff");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 1 })
-            .expect("clock->dff");
-        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 })
-            .expect("dff->out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         rflux_io::write_ir_json(&lhs_path, &lhs).expect("lhs should be written");
         rflux_io::write_ir_json(&rhs_path, &rhs).expect("rhs should be written");
@@ -5415,6 +8182,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CheckEquivalence,
             input: lhs_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: Some(rhs_path.clone()),
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5428,6 +8197,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5457,14 +8232,26 @@ mod tests {
         let mut lhs = Netlist::new();
         let a_l = lhs.add_node(NodeKind::Port, "a");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: out_l, port: 0 })
-            .expect("a->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("a->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let out_r = rhs.add_node(NodeKind::Port, "other_out");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: out_r, port: 0 })
-            .expect("a->other_out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("a->other_out");
 
         rflux_io::write_ir_json(&lhs_path, &lhs).expect("lhs should be written");
         rflux_io::write_ir_json(&rhs_path, &rhs).expect("rhs should be written");
@@ -5474,6 +8261,8 @@ mod tests {
             kind: DiagnosticsCommandKind::CheckEquivalence,
             input: lhs_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: Some(rhs_path.clone()),
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5487,6 +8276,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5520,6 +8315,8 @@ mod tests {
             kind: DiagnosticsCommandKind::LintInput,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5533,6 +8330,12 @@ mod tests {
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5543,8 +8346,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "lint-input");
@@ -5552,12 +8355,23 @@ mod tests {
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(manifest["summary"]["report_kinds"], json!(["lint_input"]));
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "lint_input");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_ir_netlist");
-        assert!(output_dir.join("reports").join("lint-input-report.json").exists());
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "lint_input"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_ir_netlist"
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("lint-input-report.json")
+            .exists());
 
-        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
         assert_eq!(completed_event["fields"]["delay_detail_count"], 0);
@@ -5578,6 +8392,8 @@ mod tests {
             kind: DiagnosticsCommandKind::LintInput,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5591,6 +8407,12 @@ mod tests {
             input_kind: Some(CliInputKind::Bench),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5610,7 +8432,10 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "lint-input");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["configuration"]["lint_input"]["kind"], "bench");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "quaigh_bench_subset");
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "quaigh_bench_subset"
+        );
         assert_eq!(report["input_kind"], "bench");
         assert_eq!(report["netlist_summary"]["node_count"], 3);
         assert_eq!(report["netlist_summary"]["edge_count"], 2);
@@ -5629,6 +8454,8 @@ mod tests {
             kind: DiagnosticsCommandKind::PdkValidate,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5642,6 +8469,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5652,31 +8485,54 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "pdk-validate");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["pdk_validation"]));
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "pdk_validation");
-        assert_eq!(manifest["captured_reports"][0]["report"]["schema_version"], 1);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_pdk");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "versioned_envelope");
-        assert!(output_dir.join("reports").join("pdk-validate-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["pdk_validation"])
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "pdk_validation"
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["schema_version"],
+            1
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_pdk"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("pdk-validate-report.json")
+            .exists());
         let report: Value = serde_json::from_str(
             &fs::read_to_string(output_dir.join("reports").join("pdk-validate-report.json"))
                 .expect("pdk validate report should exist"),
         )
         .expect("pdk validate report should be valid json");
         assert_eq!(report["checks"]["cell_library_index"]["ok"], true);
-        assert_eq!(report["checks"]["cell_library_index"]["missing_timing_count"], 0);
+        assert_eq!(
+            report["checks"]["cell_library_index"]["missing_timing_count"],
+            0
+        );
         assert_eq!(report["summary"]["cell_library_kind_count"], 7);
 
-        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
     }
@@ -5694,6 +8550,8 @@ mod tests {
             kind: DiagnosticsCommandKind::PdkCellLibrary,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5707,6 +8565,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5717,28 +8581,49 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "pdk-cell-library");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["pdk_cell_library"]));
-        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "pdk_cell_library");
-        assert_eq!(manifest["captured_reports"][0]["report"]["schema_version"], 1);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_pdk");
-        assert!(output_dir.join("reports").join("pdk-cell-library-report.json").exists());
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["pdk_cell_library"])
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["kind"],
+            "pdk_cell_library"
+        );
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["schema_version"],
+            1
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_pdk"
+        );
+        assert!(output_dir
+            .join("reports")
+            .join("pdk-cell-library-report.json")
+            .exists());
         let report: Value = serde_json::from_str(
-            &fs::read_to_string(output_dir.join("reports").join("pdk-cell-library-report.json"))
-                .expect("pdk cell library report should exist"),
+            &fs::read_to_string(
+                output_dir
+                    .join("reports")
+                    .join("pdk-cell-library-report.json"),
+            )
+            .expect("pdk cell library report should exist"),
         )
         .expect("pdk cell library report should be valid json");
         assert_eq!(report["summary"]["cell_count"], 7);
 
-        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
-        let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let completed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
         assert_eq!(completed_event["fields"]["matched_cell_count"], 7);
@@ -5764,6 +8649,8 @@ mod tests {
             kind: DiagnosticsCommandKind::PdkValidate,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5777,6 +8664,12 @@ mod tests {
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5787,8 +8680,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["execution"]["status"], "failed");
@@ -5798,12 +8691,22 @@ mod tests {
             .is_some_and(|message| message.contains("error[RFLOW-SCHEMA-002]")));
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_pdk");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "versioned_envelope");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["input_schema_version"], 1);
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_pdk"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["input_schema_version"],
+            1
+        );
         assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"].is_null());
 
-        let failed_event: Value = serde_json::from_str(event_lines[3]).expect("failed event should be json");
+        let failed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("failed event should be json");
         assert_eq!(failed_event["event"], "command_failed");
         assert_eq!(failed_event["fields"]["error_code"], "RFLOW-SCHEMA-002");
     }
@@ -5828,6 +8731,8 @@ mod tests {
             kind: DiagnosticsCommandKind::LintInput,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5841,6 +8746,12 @@ mod tests {
             input_kind: Some(CliInputKind::Pdk),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5851,8 +8762,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["invocation"]["command"], "lint-input");
@@ -5863,15 +8774,29 @@ mod tests {
             .is_some_and(|message| message.contains("error[RFLOW-SCHEMA-002]")));
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_pdk");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "versioned_envelope");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["input_schema_version"], 1);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["legacy_compatibility_used"], false);
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_pdk"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["input_schema_version"],
+            1
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["legacy_compatibility_used"],
+            false
+        );
         assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"].is_null());
         assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 3);
 
-        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
-        let failed_event: Value = serde_json::from_str(event_lines[3]).expect("failed event should be json");
+        let started_event: Value =
+            serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let failed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("failed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(failed_event["event"], "command_failed");
         assert_eq!(failed_event["fields"]["error_code"], "RFLOW-SCHEMA-002");
@@ -5890,6 +8815,8 @@ mod tests {
             kind: DiagnosticsCommandKind::LintInput,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5903,6 +8830,12 @@ mod tests {
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5913,8 +8846,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["execution"]["status"], "failed");
@@ -5924,13 +8857,23 @@ mod tests {
             .is_some_and(|message| message.contains("error[RFLOW-SCHEMA-003]")));
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_ir_netlist");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "versioned_envelope");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["input_schema_version"], 1);
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_ir_netlist"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["input_schema_version"],
+            1
+        );
         assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"].is_null());
         assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 3);
 
-        let failed_event: Value = serde_json::from_str(event_lines[3]).expect("failed event should be json");
+        let failed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("failed event should be json");
         assert_eq!(failed_event["event"], "command_failed");
         assert_eq!(failed_event["fields"]["error_code"], "RFLOW-SCHEMA-003");
     }
@@ -5956,6 +8899,8 @@ mod tests {
             kind: DiagnosticsCommandKind::LintInput,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -5969,6 +8914,12 @@ mod tests {
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -5979,8 +8930,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["execution"]["status"], "failed");
@@ -5990,12 +8941,22 @@ mod tests {
             .is_some_and(|message| message.contains("error[RFLOW-SCHEMA-001]")));
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_ir_netlist");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "versioned_envelope");
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["input_schema_version"], 99);
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_ir_netlist"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["input_schema_version"],
+            99
+        );
         assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"].is_null());
 
-        let failed_event: Value = serde_json::from_str(event_lines[3]).expect("failed event should be json");
+        let failed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("failed event should be json");
         assert_eq!(failed_event["event"], "command_failed");
         assert_eq!(failed_event["fields"]["error_code"], "RFLOW-SCHEMA-001");
     }
@@ -6012,6 +8973,8 @@ mod tests {
             kind: DiagnosticsCommandKind::LintInput,
             input: input_path.clone(),
             pdk: None,
+            netlist: None,
+            netlist_format: CliNetlistInputFormat::Auto,
             rhs: None,
             mode: CliSimulationMode::Auto,
             external_command: None,
@@ -6025,6 +8988,12 @@ mod tests {
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            clock_period_ps: None,
+            input_arrival_ps: None,
+            sfq_phase_count: None,
+            sfq_pulse_window_ps: None,
+            flow_config: None,
+            timing_constraints: None,
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
@@ -6035,8 +9004,8 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
-        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
-            .expect("event log should exist");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
 
         assert_eq!(manifest["execution"]["status"], "failed");
@@ -6046,14 +9015,20 @@ mod tests {
             .is_some_and(|message| message.contains("error[RFLOW-INPUT-002]")));
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
-        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_ir_netlist");
+        assert_eq!(
+            manifest["captured_inputs"][0]["contract"]["contract_kind"],
+            "rflux_ir_netlist"
+        );
         assert!(manifest["captured_inputs"][0]["contract"]["schema_format"].is_null());
         assert!(manifest["captured_inputs"][0]["contract"]["input_schema_version"].is_null());
-        assert!(manifest["captured_inputs"][0]["contract"]["inspection_error"]
-            .as_str()
-            .is_some_and(|message| message.contains("failed to parse input JSON from")));
+        assert!(
+            manifest["captured_inputs"][0]["contract"]["inspection_error"]
+                .as_str()
+                .is_some_and(|message| message.contains("failed to parse input JSON from"))
+        );
 
-        let failed_event: Value = serde_json::from_str(event_lines[3]).expect("failed event should be json");
+        let failed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("failed event should be json");
         assert_eq!(failed_event["event"], "command_failed");
         assert_eq!(failed_event["fields"]["error_code"], "RFLOW-INPUT-002");
     }
@@ -6117,18 +9092,35 @@ mod tests {
         assert_eq!(manifest["kind"], "diagnostics_bundle");
         assert_eq!(manifest["bundle_version"], 1);
         assert_eq!(manifest["invocation"]["command"], "simulate-file");
-        assert!(manifest["invocation"]["working_directory"].as_str().is_some());
+        assert!(manifest["invocation"]["working_directory"]
+            .as_str()
+            .is_some());
         assert_eq!(manifest["invocation"]["mode"], "internal_transient");
         assert_eq!(manifest["invocation"]["external_command"], "josim");
-        assert_eq!(manifest["configuration"]["paths"]["input"], input_path.display().to_string());
-        assert_eq!(manifest["configuration"]["paths"]["pdk"], pdk_path.display().to_string());
-        assert_eq!(manifest["configuration"]["paths"]["report"], report_path.display().to_string());
-        assert_eq!(manifest["configuration"]["simulation"]["mode"], "internal_transient");
+        assert_eq!(
+            manifest["configuration"]["paths"]["input"],
+            input_path.display().to_string()
+        );
+        assert_eq!(
+            manifest["configuration"]["paths"]["pdk"],
+            pdk_path.display().to_string()
+        );
+        assert_eq!(
+            manifest["configuration"]["paths"]["report"],
+            report_path.display().to_string()
+        );
+        assert_eq!(
+            manifest["configuration"]["simulation"]["mode"],
+            "internal_transient"
+        );
         assert_eq!(manifest["summary"]["command"], "simulate-file");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(manifest["summary"]["inspection_failure_count"], 0);
-        assert_eq!(manifest["summary"]["report_kinds"], json!(["simulate_file"]));
+        assert_eq!(
+            manifest["summary"]["report_kinds"],
+            json!(["simulate_file"])
+        );
         assert_eq!(manifest["summary"]["delay_detail_count"], 1);
         assert_eq!(manifest["summary"]["measurement_detail_count"], 1);
         assert_eq!(manifest["summary"]["measurement_warning_count"], 1);
@@ -6156,18 +9148,33 @@ mod tests {
             .expect("captured reports should be array");
         assert_eq!(captured_inputs.len(), 2);
         assert_eq!(captured_reports.len(), 1);
-        assert_eq!(captured_inputs[0]["contract"]["contract_kind"], "rflux_ir_netlist");
-        assert_eq!(captured_inputs[0]["contract"]["schema_format"], "versioned_envelope");
+        assert_eq!(
+            captured_inputs[0]["contract"]["contract_kind"],
+            "rflux_ir_netlist"
+        );
+        assert_eq!(
+            captured_inputs[0]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
         assert_eq!(captured_inputs[0]["contract"]["input_schema_version"], 1);
-        assert_eq!(captured_inputs[0]["contract"]["legacy_compatibility_used"], false);
+        assert_eq!(
+            captured_inputs[0]["contract"]["legacy_compatibility_used"],
+            false
+        );
         assert!(captured_inputs[0]["contract"]["inspection_error"].is_null());
         assert_eq!(captured_inputs[1]["contract"]["contract_kind"], "rflux_pdk");
-        assert_eq!(captured_inputs[1]["contract"]["schema_format"], "versioned_envelope");
+        assert_eq!(
+            captured_inputs[1]["contract"]["schema_format"],
+            "versioned_envelope"
+        );
         assert_eq!(captured_reports[0]["report"]["kind"], "simulate_file");
         assert_eq!(captured_reports[0]["report"]["schema_version"], 1);
         assert_eq!(captured_reports[0]["report"]["delay_detail_count"], 1);
         assert_eq!(captured_reports[0]["report"]["measurement_detail_count"], 1);
-        assert_eq!(captured_reports[0]["report"]["measurement_warning_count"], 1);
+        assert_eq!(
+            captured_reports[0]["report"]["measurement_warning_count"],
+            1
+        );
         assert_eq!(captured_reports[0]["report"]["violation_detail_count"], 1);
         assert!(captured_reports[0]["report"]["inspection_error"].is_null());
 
@@ -6177,13 +9184,25 @@ mod tests {
         let event_log_path = output_dir.join("events.jsonl");
         let event_log = fs::read_to_string(&event_log_path).expect("event log should exist");
         let event_lines: Vec<&str> = event_log.lines().collect();
-        assert_eq!(fs::read_to_string(&bundled_input).expect("bundled input should exist"), fs::read_to_string(&input_path).expect("source input should exist"));
-        assert_eq!(fs::read_to_string(&bundled_pdk).expect("bundled pdk should exist"), fs::read_to_string(&pdk_path).expect("source pdk should exist"));
-        assert_eq!(fs::read_to_string(&bundled_report).expect("bundled report should exist"), fs::read_to_string(&report_path).expect("source report should exist"));
+        assert_eq!(
+            fs::read_to_string(&bundled_input).expect("bundled input should exist"),
+            fs::read_to_string(&input_path).expect("source input should exist")
+        );
+        assert_eq!(
+            fs::read_to_string(&bundled_pdk).expect("bundled pdk should exist"),
+            fs::read_to_string(&pdk_path).expect("source pdk should exist")
+        );
+        assert_eq!(
+            fs::read_to_string(&bundled_report).expect("bundled report should exist"),
+            fs::read_to_string(&report_path).expect("source report should exist")
+        );
         assert_eq!(event_lines.len(), 5);
-        let first_event: Value = serde_json::from_str(event_lines[0]).expect("first event should be json");
-        let report_event: Value = serde_json::from_str(event_lines[3]).expect("report event should be json");
-        let last_event: Value = serde_json::from_str(event_lines[4]).expect("last event should be json");
+        let first_event: Value =
+            serde_json::from_str(event_lines[0]).expect("first event should be json");
+        let report_event: Value =
+            serde_json::from_str(event_lines[3]).expect("report event should be json");
+        let last_event: Value =
+            serde_json::from_str(event_lines[4]).expect("last event should be json");
         assert_eq!(first_event["event"], "bundle_started");
         assert_eq!(report_event["event"], "report_captured");
         assert_eq!(last_event["event"], "manifest_prepared");
@@ -6235,6 +9254,39 @@ mod tests {
         assert_eq!(report["measurement_detail_count"], 1);
         assert_eq!(report["measurement_warning_count"], 1);
         assert_eq!(report["violation_detail_count"], 1);
+        assert!(report["inspection_error"].is_null());
+    }
+
+    #[test]
+    fn diagnostics_report_snapshot_recognizes_flow_config_patch_artifact() {
+        let dir = unique_test_dir("collect-diagnostics-flow-config-patch-report");
+        let report_path = dir.join("flow-config-patch.json");
+        emit_json(
+            &json!({
+                "schema_version": FLOW_CONFIG_SCHEMA_VERSION,
+                "kind": FLOW_CONFIG_KIND,
+                "payload": {
+                    "timing": {
+                        "clock_period_ps": 90.0,
+                        "input_arrival_ps": 4.0,
+                        "sfq_phase_count": 2,
+                        "sfq_pulse_window_ps": 3.0
+                    },
+                    "routing": {
+                        "prefer_ptl_from_length_um": 70.0,
+                        "detour_margin_um": 8.0,
+                        "min_hold_jtl_length_um": 20.0
+                    }
+                }
+            }),
+            Some(&report_path),
+        )
+        .expect("flow config patch should write");
+
+        let report = diagnostics_report_snapshot(&report_path);
+
+        assert_eq!(report["kind"], FLOW_CONFIG_KIND);
+        assert_eq!(report["schema_version"], FLOW_CONFIG_SCHEMA_VERSION);
         assert!(report["inspection_error"].is_null());
     }
 
@@ -6321,6 +9373,80 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_contract_snapshot_recognizes_timing_constraints() {
+        let dir = unique_test_dir("collect-diagnostics-contract-timing");
+        let constraints_path = dir.join("timing-constraints.json");
+        fs::write(
+            &constraints_path,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": TIMING_CONSTRAINTS_SCHEMA_VERSION,
+                "kind": TIMING_CONSTRAINTS_KIND,
+                "payload": {
+                    "nodes": [
+                        {"node": "source", "clock_domain": 1}
+                    ],
+                    "domains": [
+                        {"id": 1, "period_ps": 10.0}
+                    ]
+                }
+            }))
+            .expect("constraints json should render"),
+        )
+        .expect("constraints json should write");
+
+        let contract = diagnostics_contract_snapshot("timing_constraints", &constraints_path);
+
+        assert_eq!(contract["input_kind"], "timing_constraints");
+        assert_eq!(contract["contract_kind"], "rflux_timing_constraints");
+        assert_eq!(contract["schema_format"], "versioned_envelope");
+        assert_eq!(
+            contract["input_schema_version"],
+            TIMING_CONSTRAINTS_SCHEMA_VERSION
+        );
+        assert_eq!(contract["legacy_compatibility_used"], false);
+        assert_eq!(contract["constraint_summary"]["node_constraints"], 1);
+        assert_eq!(contract["constraint_summary"]["clock_domains"], 1);
+        assert!(contract["inspection_error"].is_null());
+    }
+
+    #[test]
+    fn diagnostics_contract_snapshot_recognizes_flow_config() {
+        let dir = unique_test_dir("collect-diagnostics-contract-flow-config");
+        let flow_config_path = dir.join("flow-config.json");
+        fs::write(
+            &flow_config_path,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": FLOW_CONFIG_SCHEMA_VERSION,
+                "kind": FLOW_CONFIG_KIND,
+                "payload": {
+                    "timing": {
+                        "clock_period_ps": 120.0,
+                        "input_arrival_ps": 5.0,
+                        "sfq_phase_count": 2,
+                        "sfq_pulse_window_ps": 2.0
+                    },
+                    "routing": {
+                        "prefer_ptl_from_length_um": 40.0,
+                        "detour_margin_um": 4.0,
+                        "min_hold_jtl_length_um": 30.0
+                    }
+                }
+            }))
+            .expect("flow config json should render"),
+        )
+        .expect("flow config json should write");
+
+        let contract = diagnostics_contract_snapshot("flow_config", &flow_config_path);
+
+        assert_eq!(contract["input_kind"], "flow_config");
+        assert_eq!(contract["contract_kind"], "rflux_flow_config");
+        assert_eq!(contract["schema_format"], "versioned_envelope");
+        assert_eq!(contract["input_schema_version"], FLOW_CONFIG_SCHEMA_VERSION);
+        assert_eq!(contract["legacy_compatibility_used"], false);
+        assert!(contract["inspection_error"].is_null());
+    }
+
+    #[test]
     fn diagnostics_summary_reports_legacy_and_failures() {
         let captured_inputs = vec![
             json!({
@@ -6375,7 +9501,8 @@ mod tests {
             }),
         ];
 
-        let summary = build_diagnostics_summary(Some("simulate-file"), &captured_inputs, &captured_reports);
+        let summary =
+            build_diagnostics_summary(Some("simulate-file"), &captured_inputs, &captured_reports);
 
         assert_eq!(summary["command"], "simulate-file");
         assert_eq!(summary["captured_input_count"], 2);
@@ -6388,9 +9515,17 @@ mod tests {
         assert_eq!(summary["delay_detail_count"], 1);
         assert_eq!(summary["measurement_detail_count"], 1);
         assert_eq!(summary["violation_detail_count"], 1);
+        assert!(summary["recommended_next_flow_config"].is_null());
+        assert!(summary["recommended_next_flow_config_kind"].is_null());
         assert_eq!(summary["report_inspection_failure_count"], 1);
-        assert_eq!(summary["report_inspection_failures"][0]["source_path"], "broken-report.json");
-        assert_eq!(summary["report_inspection_failures"][0]["error"], "parse failed");
+        assert_eq!(
+            summary["report_inspection_failures"][0]["source_path"],
+            "broken-report.json"
+        );
+        assert_eq!(
+            summary["report_inspection_failures"][0]["error"],
+            "parse failed"
+        );
     }
 
     #[test]
@@ -6421,8 +9556,12 @@ mod tests {
         assert_eq!(report["schema_format"], "versioned_envelope");
         assert_eq!(report["input_schema_version"], 1);
         assert_eq!(report["legacy_compatibility_used"], false);
+        assert_eq!(report["schema_contract"]["contract_kind"], "rflux_ir_netlist");
+        assert_eq!(report["frontend_summary"]["reader"], "rflux_io::read_ir_json");
+        assert_eq!(report["frontend_summary"]["roundtrip_write_support"], true);
         assert_eq!(report["netlist_summary"]["node_count"], 1);
         assert_eq!(report["netlist_summary"]["edge_count"], 0);
+        assert_eq!(report["netlist_summary"]["node_kind_counts"]["Port"], 1);
     }
 
     #[test]
@@ -6460,8 +9599,11 @@ mod tests {
         let dir = unique_test_dir("lint-input-bench");
         let input_path = dir.join("input.bench");
         let output_path = dir.join("lint-report.json");
-        fs::write(&input_path, "INPUT(a)\nINPUT(b)\nOUTPUT(y)\ny = XOR(a, b)\n")
-            .expect("bench input should write");
+        fs::write(
+            &input_path,
+            "INPUT(a)\nINPUT(b)\nOUTPUT(y)\ny = XOR(a, b)\n",
+        )
+        .expect("bench input should write");
 
         run_lint_input(LintInputArgs {
             input: input_path.clone(),
@@ -6482,8 +9624,12 @@ mod tests {
         assert_eq!(report["schema_format"], "bench_text");
         assert!(report["input_schema_version"].is_null());
         assert_eq!(report["legacy_compatibility_used"], false);
+        assert_eq!(report["frontend_summary"]["reader"], "rflux_io::read_bench_netlist");
+        assert_eq!(report["frontend_summary"]["source_map_support"], "line_only_diagnostics");
         assert_eq!(report["netlist_summary"]["node_count"], 4);
         assert_eq!(report["netlist_summary"]["edge_count"], 3);
+        assert_eq!(report["netlist_summary"]["node_kind_counts"]["Port"], 3);
+        assert_eq!(report["netlist_summary"]["logic_op_counts"]["Xor"], 1);
     }
 
     #[test]
@@ -6513,6 +9659,8 @@ mod tests {
         assert_eq!(report["schema_format"], "versioned_envelope");
         assert_eq!(report["input_schema_version"], 1);
         assert_eq!(report["legacy_compatibility_used"], false);
+        assert_eq!(report["schema_contract"]["contract_kind"], "rflux_pdk");
+        assert_eq!(report["frontend_summary"]["reader"], "rflux_io::read_pdk_json");
     }
 
     #[test]
@@ -6574,26 +9722,57 @@ mod tests {
         assert_eq!(report["summary"]["cell_count"], 7);
         assert_eq!(report["summary"]["cell_timing_count"], 7);
         assert_eq!(report["summary"]["interconnect_timing_count"], 2);
+        assert_eq!(report["summary"]["timing_corner_count"], 0);
+        assert!(report["summary"]["active_timing_corner"].is_null());
+        assert_eq!(report["summary"]["timing_corners"], json!([]));
         assert_eq!(report["summary"]["cell_library_name"], "minimal-sfq");
         assert_eq!(report["summary"]["cell_library_version"], "0.1.0");
         assert_eq!(report["summary"]["cell_library_source"], "rflux-minimal");
         assert_eq!(report["summary"]["cell_library_kind_count"], 7);
-        assert_eq!(report["summary"]["cell_library_kind_counts"]["generic_gate"], 1);
+        assert_eq!(
+            report["summary"]["cell_library_kind_counts"]["generic_gate"],
+            1
+        );
         assert_eq!(report["summary"]["cell_library_kind_counts"]["macro"], 1);
         assert_eq!(report["summary"]["cell_library_named_timing_count"], 0);
         assert_eq!(report["summary"]["cell_library_kind_timing_count"], 7);
         assert_eq!(report["summary"]["cell_library_missing_timing_count"], 0);
-        assert_eq!(report["summary"]["cell_library_characterized_cell_count"], 0);
-        assert_eq!(report["summary"]["cell_library_named_timing_cells"], json!([]));
-        assert_eq!(report["summary"]["cell_library_missing_timing_cells"], json!([]));
-        assert_eq!(report["summary"]["cell_library_characterized_cells"], json!([]));
+        assert_eq!(
+            report["summary"]["cell_library_characterized_cell_count"],
+            0
+        );
+        assert_eq!(
+            report["summary"]["cell_library_named_timing_cells"],
+            json!([])
+        );
+        assert_eq!(
+            report["summary"]["cell_library_missing_timing_cells"],
+            json!([])
+        );
+        assert_eq!(
+            report["summary"]["cell_library_characterized_cells"],
+            json!([])
+        );
         assert_eq!(report["checks"]["required_cell_kinds"]["ok"], true);
         assert_eq!(report["checks"]["required_cell_timing"]["ok"], true);
         assert_eq!(report["checks"]["required_interconnect_timing"]["ok"], true);
+        assert_eq!(report["checks"]["timing_corners"]["ok"], true);
+        assert_eq!(report["checks"]["timing_corners"]["level"], "advisory");
+        assert_eq!(report["checks"]["timing_corners"]["count"], 0);
+        assert_eq!(report["checks"]["timing_corners"]["available"], json!([]));
         assert_eq!(report["checks"]["cell_library_metadata"]["ok"], true);
-        assert_eq!(report["checks"]["cell_library_metadata"]["level"], "present");
-        assert_eq!(report["checks"]["cell_library_metadata"]["name"], "minimal-sfq");
-        assert_eq!(report["checks"]["cell_library_metadata"]["version"], "0.1.0");
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["level"],
+            "present"
+        );
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["name"],
+            "minimal-sfq"
+        );
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["version"],
+            "0.1.0"
+        );
         assert_eq!(
             report["checks"]["cell_library_metadata"]["artifact_kind"],
             PDK_CELL_LIBRARY_ARTIFACT_KIND
@@ -6620,10 +9799,22 @@ mod tests {
             "rflux-minimal"
         );
         assert_eq!(report["checks"]["cell_library_index"]["cell_count"], 7);
-        assert_eq!(report["checks"]["cell_library_index"]["kind_counts"]["macro"], 1);
-        assert_eq!(report["checks"]["cell_library_index"]["available_kinds"][0], "generic_gate");
-        assert_eq!(report["checks"]["cell_library_index"]["kind_timing_count"], 7);
-        assert_eq!(report["checks"]["cell_library_index"]["missing_timing_cells"], json!([]));
+        assert_eq!(
+            report["checks"]["cell_library_index"]["kind_counts"]["macro"],
+            1
+        );
+        assert_eq!(
+            report["checks"]["cell_library_index"]["available_kinds"][0],
+            "generic_gate"
+        );
+        assert_eq!(
+            report["checks"]["cell_library_index"]["kind_timing_count"],
+            7
+        );
+        assert_eq!(
+            report["checks"]["cell_library_index"]["missing_timing_cells"],
+            json!([])
+        );
         assert_eq!(
             report["checks"]["cell_library_index"]["remediation"]["timing"]["status"],
             "complete"
@@ -6670,23 +9861,37 @@ mod tests {
         assert_eq!(report["cell_library_name"], "minimal-sfq");
         assert_eq!(report["cell_library_version"], "0.1.0");
         assert_eq!(report["cell_library_source"], "rflux-minimal");
-        assert_eq!(report["library"]["artifact_kind"], PDK_CELL_LIBRARY_ARTIFACT_KIND);
+        assert!(report["active_timing_corner"].is_null());
+        assert_eq!(report["timing_corners"], json!([]));
+        assert_eq!(
+            report["library"]["artifact_kind"],
+            PDK_CELL_LIBRARY_ARTIFACT_KIND
+        );
         assert_eq!(report["library"]["name"], "minimal-sfq");
         assert_eq!(report["library"]["version"], "0.1.0");
         assert_eq!(report["library"]["source"], "rflux-minimal");
-        assert_eq!(report["library"]["schema"]["name"], PDK_CELL_LIBRARY_MANIFEST_SCHEMA);
+        assert_eq!(
+            report["library"]["schema"]["name"],
+            PDK_CELL_LIBRARY_MANIFEST_SCHEMA
+        );
         assert_eq!(
             report["library"]["schema"]["version"],
             PDK_CELL_LIBRARY_MANIFEST_SCHEMA_VERSION
         );
         assert_eq!(report["library"]["capabilities"]["query_by_name"], true);
         assert_eq!(report["library"]["capabilities"]["query_by_kind"], true);
-        assert_eq!(report["library"]["capabilities"]["reports_effective_timing"], true);
+        assert_eq!(
+            report["library"]["capabilities"]["reports_effective_timing"],
+            true
+        );
         assert_eq!(
             report["library"]["capabilities"]["reports_characterization_metadata"],
             true
         );
-        assert_eq!(report["library"]["capabilities"]["reports_remediation"], true);
+        assert_eq!(
+            report["library"]["capabilities"]["reports_remediation"],
+            true
+        );
         assert_eq!(report["library"]["coverage"]["cell_count"], 7);
         assert_eq!(report["library"]["coverage"]["kind_count"], 7);
         assert_eq!(report["library"]["coverage"]["kind_timing_count"], 7);
@@ -6709,6 +9914,72 @@ mod tests {
         assert_eq!(report["entries"][0]["name"], "sfq_macro");
         assert_eq!(report["entries"][0]["kind"], "macro");
         assert_eq!(report["entries"][0]["timing_source"], "kind");
+    }
+
+    #[test]
+    fn run_pdk_validate_reports_timing_corners() {
+        let dir = unique_test_dir("pdk-validate-timing-corners");
+        let input_path = dir.join("input.pdk.json");
+        let output_path = dir.join("pdk-validate-report.json");
+        let mut pdk = Pdk::minimal("corner-report").with_active_timing_corner("slow");
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: Some("ss".to_string()),
+            voltage_v: Some(2.4),
+            temperature_k: Some(4.2),
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 24.0,
+                setup_ps: 7.0,
+                hold_ps: 4.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: rflux_tech::InterconnectKind::Jtl,
+                points: vec![TimingPoint {
+                    length_um: 0.0,
+                    delay_ps: 5.0,
+                }],
+            }],
+        });
+        write_pdk_json(&input_path, &pdk).expect("corner pdk json should write");
+
+        run_pdk_validate(PdkValidateArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+        })
+        .expect("pdk-validate should succeed for timing corners");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("pdk validate report should exist"),
+        )
+        .expect("pdk validate report should be valid json");
+
+        assert_eq!(report["kind"], "pdk_validation");
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["summary"]["timing_corner_count"], 1);
+        assert_eq!(report["summary"]["active_timing_corner"], "slow");
+        assert_eq!(report["summary"]["timing_corners"][0]["name"], "slow");
+        assert_eq!(report["summary"]["timing_corners"][0]["process"], "ss");
+        assert_eq!(report["summary"]["timing_corners"][0]["voltage_v"], 2.4);
+        assert_eq!(report["summary"]["timing_corners"][0]["temperature_k"], 4.2);
+        assert_eq!(
+            report["summary"]["timing_corners"][0]["cell_timing_count"],
+            1
+        );
+        assert_eq!(
+            report["summary"]["timing_corners"][0]["interconnect_timing_count"],
+            1
+        );
+        assert_eq!(report["summary"]["timing_corners"][0]["is_active"], true);
+        assert_eq!(report["checks"]["timing_corners"]["ok"], true);
+        assert_eq!(report["checks"]["timing_corners"]["level"], "present");
+        assert_eq!(report["checks"]["timing_corners"]["active"], "slow");
+        assert_eq!(report["checks"]["timing_corners"]["active_found"], true);
+        assert_eq!(
+            report["checks"]["timing_corners"]["available"],
+            json!(["slow"])
+        );
     }
 
     #[test]
@@ -6763,11 +10034,17 @@ mod tests {
         .expect("pdk cell library report should be valid json");
 
         assert_eq!(report["summary"]["missing_timing_count"], 1);
-        assert_eq!(report["summary"]["missing_timing_cells"], json!(["sfq_macro"]));
+        assert_eq!(
+            report["summary"]["missing_timing_cells"],
+            json!(["sfq_macro"])
+        );
         assert_eq!(report["library"]["coverage"]["missing_timing_count"], 1);
         assert_eq!(report["library"]["coverage"]["timing_complete"], false);
         assert_eq!(report["remediation"]["timing"]["status"], "action_required");
-        assert_eq!(report["remediation"]["timing"]["cells"], json!(["sfq_macro"]));
+        assert_eq!(
+            report["remediation"]["timing"]["cells"],
+            json!(["sfq_macro"])
+        );
         assert_eq!(report["entries"][0]["timing_source"], "missing");
     }
 
@@ -6819,7 +10096,9 @@ mod tests {
         assert_eq!(report["ok"], false);
         assert_eq!(report["error_count"], 3);
         let errors = report["errors"].as_array().expect("errors should be array");
-        assert!(errors.iter().any(|error| error == "pdk.name must not be empty"));
+        assert!(errors
+            .iter()
+            .any(|error| error == "pdk.name must not be empty"));
         assert!(errors
             .iter()
             .any(|error| error == "pdk.metal_layers must be greater than zero"));
@@ -6865,12 +10144,21 @@ mod tests {
         assert!(report["summary"]["cell_library_version"].is_null());
         assert!(report["summary"]["cell_library_source"].is_null());
         assert_eq!(report["checks"]["cell_library_metadata"]["ok"], false);
-        assert_eq!(report["checks"]["cell_library_metadata"]["level"], "advisory");
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["level"],
+            "advisory"
+        );
         assert!(report["checks"]["cell_library_metadata"]["version"].is_null());
         assert!(report["checks"]["cell_library_metadata"]["source"].is_null());
-        let warnings = report["warnings"].as_array().expect("warnings should be array");
-        assert!(warnings.iter().any(|warning| warning == "pdk.cell_library.version is not set"));
-        assert!(warnings.iter().any(|warning| warning == "pdk.cell_library.source is not set"));
+        let warnings = report["warnings"]
+            .as_array()
+            .expect("warnings should be array");
+        assert!(warnings
+            .iter()
+            .any(|warning| warning == "pdk.cell_library.version is not set"));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning == "pdk.cell_library.source is not set"));
     }
 
     #[test]
@@ -6879,20 +10167,21 @@ mod tests {
         let input_path = dir.join("input.pdk.json");
         let output_path = dir.join("pdk-validate-report.json");
         let mut pdk = Pdk::minimal("validate-warnings");
-        pdk.characterized_cell_metadata.push(NamedCharacterizationMetadata {
-            cell_name: "sfq_macro".to_string(),
-            metadata: CharacterizationArtifactMetadata {
-                arc_delays: vec![CharacterizationArcDelay {
-                    name: "unknown-sink".to_string(),
-                    driver_cell_name: "sfq_macro".to_string(),
-                    from_port: 0,
-                    sink_cell_name: "missing_sink".to_string(),
-                    to_port: 0,
-                    delay_ps: 2.5,
-                }],
-                ..CharacterizationArtifactMetadata::default()
-            },
-        });
+        pdk.characterized_cell_metadata
+            .push(NamedCharacterizationMetadata {
+                cell_name: "sfq_macro".to_string(),
+                metadata: CharacterizationArtifactMetadata {
+                    arc_delays: vec![CharacterizationArcDelay {
+                        name: "unknown-sink".to_string(),
+                        driver_cell_name: "sfq_macro".to_string(),
+                        from_port: 0,
+                        sink_cell_name: "missing_sink".to_string(),
+                        to_port: 0,
+                        delay_ps: 2.5,
+                    }],
+                    ..CharacterizationArtifactMetadata::default()
+                },
+            });
         write_pdk_json(&input_path, &pdk).expect("warning pdk json should write");
 
         run_pdk_validate(PdkValidateArgs {
@@ -6913,10 +10202,12 @@ mod tests {
         assert_eq!(report["summary"]["characterized_cell_metadata_count"], 1);
         assert_eq!(report["summary"]["characterized_arc_delay_count"], 1);
         assert_eq!(report["checks"]["characterized_arcs"]["ok"], true);
-        let warnings = report["warnings"].as_array().expect("warnings should be array");
-        assert!(warnings.iter().any(|warning| warning
-            .as_str()
-            .is_some_and(|message| message.contains("references unknown sink cell 'missing_sink'"))));
+        let warnings = report["warnings"]
+            .as_array()
+            .expect("warnings should be array");
+        assert!(warnings.iter().any(|warning| warning.as_str().is_some_and(
+            |message| message.contains("references unknown sink cell 'missing_sink'")
+        )));
     }
 
     #[test]
@@ -6996,7 +10287,8 @@ mod tests {
         let rendered = render_cli_error(&error);
 
         assert!(rendered.contains("error[RFLOW-INPUT-002]: failed to validate IR JSON from"));
-        assert!(rendered.contains("detail: json parse error:"));
+        assert!(rendered.contains("detail: json parse error: at line"));
+        assert!(rendered.contains("column"));
         assert!(rendered.contains(
             "next: Validate the JSON syntax and field types against the current file contract."
         ));
@@ -7019,7 +10311,9 @@ mod tests {
         let rendered = render_cli_error(&error);
 
         assert!(rendered.contains("error[RFLOW-SCHEMA-003]: failed to validate IR JSON from"));
-        assert!(rendered.contains("detail: expected rflux_ir_netlist JSON envelope, found rflux_pdk"));
+        assert!(
+            rendered.contains("detail: expected rflux_ir_netlist JSON envelope, found rflux_pdk")
+        );
         assert!(rendered.contains(
             "next: Use the correct file type for this command, or regenerate the file with the matching writer."
         ));
@@ -7033,9 +10327,11 @@ mod tests {
 
         let rendered = render_cli_error(&error);
 
-        assert!(rendered.contains("error[RFLOW-INPUT-001]: failed to read IR JSON from missing-file.ir.json"));
+        assert!(rendered
+            .contains("error[RFLOW-INPUT-001]: failed to read IR JSON from missing-file.ir.json"));
         assert!(rendered.contains("detail: io error:"));
-        assert!(rendered.contains("next: Check that the input path exists and is readable, then retry."));
+        assert!(rendered
+            .contains("next: Check that the input path exists and is readable, then retry."));
     }
 
     #[test]
@@ -7071,9 +10367,13 @@ mod tests {
 
         let rendered = render_cli_error(&error);
 
-        assert!(rendered.contains("error[RFLOW-INPUT-001]: simulate-file failed for missing-input.cir"));
+        assert!(
+            rendered.contains("error[RFLOW-INPUT-001]: simulate-file failed for missing-input.cir")
+        );
         assert!(rendered.contains("detail: io error at missing-input.cir:"));
-        assert!(rendered.contains("next: Check that the deck path exists and is readable, then retry simulate-file."));
+        assert!(rendered.contains(
+            "next: Check that the deck path exists and is readable, then retry simulate-file."
+        ));
     }
 
     #[test]
@@ -7098,7 +10398,9 @@ mod tests {
             "error[RFLOW-SIM-002]: simulate-file failed for {}",
             input_path.display()
         )));
-        assert!(rendered.contains("detail: nested .subckt definition is not supported inside outer"));
+        assert!(
+            rendered.contains("detail: nested .subckt definition is not supported inside outer")
+        );
         assert!(rendered.contains(
             "next: Run with --mode external_josim or simplify the deck to the currently supported internal subset."
         ));
@@ -7113,24 +10415,78 @@ mod tests {
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "state");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 })
-            .expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 })
-            .expect("clock->dff");
-        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 })
-            .expect("dff->out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node(NodeKind::Dff, "state");
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 })
-            .expect("data->dff");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 1 })
-            .expect("clock->dff");
-        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 })
-            .expect("dff->out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let error = verifier
             .check_boolean_equivalence(&lhs, &rhs)
@@ -7139,7 +10495,9 @@ mod tests {
 
         let rendered = render_cli_error(&error);
 
-        assert!(rendered.contains("error[RFLOW-VERIFY-002]: combinational equivalence check failed"));
+        assert!(
+            rendered.contains("error[RFLOW-VERIFY-002]: combinational equivalence check failed")
+        );
         assert!(rendered.contains("detail: sat check does not support node"));
         assert!(rendered.contains(
             "next: Use --kind single_step_sequential for sequential netlists, or reduce the check to a combinational subset."
@@ -7153,14 +10511,26 @@ mod tests {
         let mut lhs = Netlist::new();
         let a_l = lhs.add_node(NodeKind::Port, "a");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: out_l, port: 0 })
-            .expect("a->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("a->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let out_r = rhs.add_node(NodeKind::Port, "other_out");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: out_r, port: 0 })
-            .expect("a->other_out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("a->other_out");
 
         let error = verifier
             .check_boolean_equivalence(&lhs, &rhs)
@@ -7169,7 +10539,9 @@ mod tests {
 
         let rendered = render_cli_error(&error);
 
-        assert!(rendered.contains("error[RFLOW-VERIFY-001]: combinational equivalence check failed"));
+        assert!(
+            rendered.contains("error[RFLOW-VERIFY-001]: combinational equivalence check failed")
+        );
         assert!(rendered.contains("detail: sat interface mismatch: output sets differ"));
         assert!(rendered.contains(
             "next: Align the compared netlists so they expose the same named inputs, outputs, and state interface before retrying check-equivalence."
@@ -7178,7 +10550,8 @@ mod tests {
 
     #[test]
     fn render_cli_error_uses_rflow_code_for_verify_layout_failures() {
-        let error = anyhow!("layout contains unsupported crossover").context("verify-layout failed");
+        let error =
+            anyhow!("layout contains unsupported crossover").context("verify-layout failed");
 
         let rendered = render_cli_error(&error);
 
@@ -7192,12 +10565,9 @@ mod tests {
 
 fn build_lint_input_report(input: &Path, kind: CliInputKind) -> Result<Value> {
     match kind {
-        CliInputKind::Ir => lint_netlist_report(
-            input,
-            "ir",
-            "rflux_ir_netlist",
-            NetlistInputFormat::IrJson,
-        ),
+        CliInputKind::Ir => {
+            lint_netlist_report(input, "ir", "rflux_ir_netlist", NetlistInputFormat::IrJson)
+        }
         CliInputKind::Bench => lint_netlist_report(
             input,
             "bench",
@@ -7240,13 +10610,19 @@ fn build_pdk_cell_library_report(
     if cell_filter.is_some() && kind_filter.is_some() {
         bail!("pdk-cell-library accepts either --cell or --kind, not both");
     }
-    let pdk = read_pdk_json(input)
-        .with_context(|| format!("failed to inspect PDK cell library from {}", input.display()))?;
+    let pdk = read_pdk_json(input).with_context(|| {
+        format!(
+            "failed to inspect PDK cell library from {}",
+            input.display()
+        )
+    })?;
     let all_entries = pdk.cell_library_entries();
     let summary = pdk.cell_library_summary();
     let library = pdk.cell_library_metadata();
     let entries = if let Some(cell_name) = cell_filter {
-        pdk.cell_library_entry(cell_name).into_iter().collect::<Vec<_>>()
+        pdk.cell_library_entry(cell_name)
+            .into_iter()
+            .collect::<Vec<_>>()
     } else if let Some(kind) = kind_filter {
         let kind = parse_cli_sf_cell_kind(kind)?;
         pdk.cell_library_entries_by_kind(kind)
@@ -7260,6 +10636,8 @@ fn build_pdk_cell_library_report(
         "cell_library_name": pdk.cell_library_name(),
         "cell_library_version": pdk.cell_library_version(),
         "cell_library_source": pdk.cell_library_source(),
+        "active_timing_corner": pdk.active_timing_corner.as_deref(),
+        "timing_corners": pdk_timing_corners_to_json(&pdk),
         "library": pdk_cell_library_manifest_to_json(library, &summary),
         "available_kinds": pdk
             .cell_library_kinds()
@@ -7343,6 +10721,9 @@ fn pdk_validate_summary(pdk: &Pdk, error_count: usize, warning_count: usize) -> 
             .map(|entry| entry.metadata.arc_delays.len())
             .sum::<usize>(),
         "interconnect_timing_count": pdk.interconnect_timing.len(),
+        "timing_corner_count": pdk.timing_corners.len(),
+        "active_timing_corner": pdk.active_timing_corner.as_deref(),
+        "timing_corners": pdk_timing_corners_to_json(pdk),
         "ptl_forbidden_range_count": pdk.ptl_forbidden_ranges.len(),
         "cell_library_name": pdk.cell_library_name(),
         "cell_library_version": pdk.cell_library_version(),
@@ -7362,7 +10743,15 @@ fn pdk_validate_summary(pdk: &Pdk, error_count: usize, warning_count: usize) -> 
 }
 
 fn pdk_validate_checks(pdk: &Pdk, validation: &rflux_tech::PdkValidationReport) -> Value {
-    let required_cell_kinds = ["GenericGate", "Macro", "Splitter", "Dff", "Jtl", "Ptl", "Port"];
+    let required_cell_kinds = [
+        "GenericGate",
+        "Macro",
+        "Splitter",
+        "Dff",
+        "Jtl",
+        "Ptl",
+        "Port",
+    ];
     let required_interconnect_kinds = ["Jtl", "Ptl"];
     let cell_library_summary = pdk.cell_library_summary();
     let has_required_cell_kinds = required_cell_kinds.iter().all(|kind| {
@@ -7398,6 +10787,15 @@ fn pdk_validate_checks(pdk: &Pdk, validation: &rflux_tech::PdkValidationReport) 
         "required_interconnect_timing": {
             "ok": has_required_interconnect_timing,
             "required": required_interconnect_kinds,
+        },
+        "timing_corners": {
+            "ok": pdk.active_timing_corner.is_none() || pdk.active_corner().is_some(),
+            "count": pdk.timing_corners.len(),
+            "active": pdk.active_timing_corner.as_deref(),
+            "active_found": pdk.active_timing_corner.is_none() || pdk.active_corner().is_some(),
+            "available": pdk.timing_corner_names(),
+            "level": if pdk.timing_corners.is_empty() { "advisory" } else { "present" },
+            "corners": pdk_timing_corners_to_json(pdk),
         },
         "named_cell_timing": {
             "ok": !pdk.named_cell_timing.is_empty(),
@@ -7461,7 +10859,9 @@ fn pdk_validate_checks(pdk: &Pdk, validation: &rflux_tech::PdkValidationReport) 
 
 fn parse_cli_sf_cell_kind(kind: &str) -> Result<rflux_tech::SfCellKind> {
     match kind {
-        "generic_gate" | "GenericGate" | "cell" | "cell_instance" => Ok(rflux_tech::SfCellKind::GenericGate),
+        "generic_gate" | "GenericGate" | "cell" | "cell_instance" => {
+            Ok(rflux_tech::SfCellKind::GenericGate)
+        }
         "macro" | "Macro" | "macro_cell" => Ok(rflux_tech::SfCellKind::Macro),
         "splitter" | "Splitter" => Ok(rflux_tech::SfCellKind::Splitter),
         "dff" | "Dff" => Ok(rflux_tech::SfCellKind::Dff),
@@ -7525,6 +10925,23 @@ fn pdk_cell_library_kind_counts_to_json(summary: &rflux_tech::CellLibrarySummary
         object.insert(sf_cell_kind_cli_name(*kind).to_string(), json!(count));
     }
     Value::Object(object)
+}
+
+fn pdk_timing_corners_to_json(pdk: &Pdk) -> Value {
+    json!(pdk
+        .timing_corners
+        .iter()
+        .map(|corner| json!({
+            "name": corner.name,
+            "process": corner.process,
+            "voltage_v": corner.voltage_v,
+            "temperature_k": corner.temperature_k,
+            "cell_timing_count": corner.cell_timing.len(),
+            "named_cell_timing_count": corner.named_cell_timing.len(),
+            "interconnect_timing_count": corner.interconnect_timing.len(),
+            "is_active": pdk.active_timing_corner.as_deref() == Some(corner.name.as_str()),
+        }))
+        .collect::<Vec<_>>())
 }
 
 fn pdk_cell_library_entry_to_json(entry: rflux_tech::CellLibraryEntry) -> Value {

@@ -309,26 +309,29 @@ uv run python python/scripts/summarize_waveform_compare_results.py --result-dir 
 
 The command exits non-zero if any deck fails threshold checks or if result files are missing.
 
-### 5. Optional CI waveform compare job
+### 5. Default CI waveform compare gate
 
-`ci.yml` now includes a manual `workflow_dispatch` job named `waveform-compare-optional`.
-It is disabled by default and only runs when `run_external_waveform_compare=true` is selected.
-The job runs the manifest-based numeric compare path via `python/scripts/run_waveform_compare_manifest.py --validate-pass`, runs the adjacent unsupported-warning review path via `python/scripts/run_external_warning_manifest.py --validate-pass`, stages both review packets through `python/scripts/prepare_waveform_compare_artifacts.py` and `python/scripts/prepare_external_warning_artifacts.py`, then uploads both artifact bundles from `target/`.
+`ci.yml` now includes a default Windows job named `waveform-compare-gate`.
+It downloads JoSIM `v2.7` on `windows-latest`, runs the manifest-based numeric compare path via `python/scripts/run_waveform_compare_manifest.py --validate-pass --validate-no-regression`, runs the adjacent unsupported-warning review path via `python/scripts/run_external_warning_manifest.py --validate-pass`, stages both review packets through `python/scripts/prepare_waveform_compare_artifacts.py` and `python/scripts/prepare_external_warning_artifacts.py`, then uploads both artifact bundles from `target/`.
+On push and pull request events, the gate auto-resolves the repo-tracked Windows approved baseline and enforces zero-tolerance no-regression against it. On `workflow_dispatch`, the same gate still runs by default but can override the JoSIM command, baseline source, and no-regression settings through workflow inputs.
 
 Inputs:
 
-- `run_external_waveform_compare`: enable/disable optional job
-- `josim_command`: command/path passed to both optional manifest runners
+- `josim_command`: optional override for the JoSIM command/path used by the Windows gate
+- `previous_summary_json`: optional repo-relative approved baseline summary JSON override
+- `baseline_platform`: platform key used for repo baseline auto-resolution, default `windows`
+- `validate_no_regression`: whether the gate should fail on positive drift relative to the resolved baseline, default `true`
+- `regression_tolerance_v`: allowed positive drift during no-regression validation, default `0.0`
 
-This keeps normal push/PR CI unchanged while allowing on-demand external correlation checks on runners where JoSIM is installed.
+This makes simulation parity part of the default CI quality bar without forcing Ubuntu to compare against a cross-platform Windows baseline.
 
 Quick manual trigger checklist (GitHub UI):
 
 1. Open repository `Actions` tab and select workflow `CI`.
 2. Click `Run workflow`.
-3. Set `run_external_waveform_compare` to `true`.
-4. Set `josim_command` if JoSIM is not available as plain `josim` on the runner PATH.
-5. Start the run and verify `waveform-compare-optional` job result plus uploaded waveform-compare and external-warning artifacts.
+3. Optionally set `josim_command` if the gate should use a non-default JoSIM binary.
+4. Optionally set `previous_summary_json`, `baseline_platform`, `validate_no_regression`, or `regression_tolerance_v` for a custom review run.
+5. Start the run and verify `waveform-compare-gate` result plus uploaded waveform-compare and external-warning artifacts.
 
 ## 快速上手
 

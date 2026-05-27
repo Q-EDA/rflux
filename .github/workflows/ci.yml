@@ -5,11 +5,6 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      run_external_waveform_compare:
-        description: "Run optional external JoSIM waveform compare job"
-        required: false
-        default: false
-        type: boolean
       run_security_compliance:
         description: "Run optional security/compliance baseline job"
         required: false
@@ -21,9 +16,9 @@ on:
         default: false
         type: boolean
       josim_command:
-        description: "JoSIM command/path for compare tests"
+        description: "Optional override for the JoSIM command/path used by the Windows waveform gate"
         required: false
-        default: "josim"
+        default: ""
         type: string
       previous_summary_json:
         description: "Optional repo-relative approved baseline summary JSON for history diff generation"
@@ -33,12 +28,12 @@ on:
       baseline_platform:
         description: "Platform key used to auto-stage a repo-tracked approved baseline when previous_summary_json is empty"
         required: false
-        default: "linux"
+        default: "windows"
         type: string
       validate_no_regression:
         description: "Fail when the current summary regresses relative to previous_summary_json"
         required: false
-        default: false
+        default: true
         type: boolean
       regression_tolerance_v:
         description: "Allowed positive worst_max_abs_v drift during no-regression validation"
@@ -121,9 +116,8 @@ jobs:
             target/dimacs_sat_metrics.csv
             target/quaigh_fixture_sat_metrics.csv
 
-  waveform-compare-optional:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_external_waveform_compare }}
-    runs-on: ubuntu-latest
+  waveform-compare-gate:
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -131,60 +125,109 @@ jobs:
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
 
+      - name: Install JoSIM for Windows parity gate
+        shell: pwsh
+        run: |
+          $version = 'v2.7'
+          $archiveName = 'JoSIM-v2.7-windows-x64.zip'
+          $downloadUrl = "https://github.com/JoeyDelp/JoSIM/releases/download/$version/$archiveName"
+          $toolsDir = Join-Path $env:GITHUB_WORKSPACE 'tools'
+          $archivePath = Join-Path $toolsDir $archiveName
+          $installDir = Join-Path $toolsDir 'JoSIM-v2.7-windows-x64'
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+          if (Test-Path $installDir) {
+            Remove-Item -Recurse -Force $installDir
+          }
+          Expand-Archive -Path $archivePath -DestinationPath $toolsDir -Force
+          $binaryPath = Join-Path $installDir 'bin\josim-cli.exe'
+          if (-not (Test-Path $binaryPath)) {
+            throw "Expected JoSIM binary at $binaryPath"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $installDir 'bin')
+
+      - name: Resolve waveform gate settings
+        shell: pwsh
+        run: |
+          $defaultJosimCommand = Join-Path $env:GITHUB_WORKSPACE 'tools\JoSIM-v2.7-windows-x64\bin\josim-cli.exe'
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $josimCommand = if ('${{ inputs.josim_command }}') { '${{ inputs.josim_command }}' } else { $defaultJosimCommand }
+            $previousSummaryJson = '${{ inputs.previous_summary_json }}'
+            $baselinePlatform = '${{ inputs.baseline_platform }}'
+            $validateNoRegression = '${{ inputs.validate_no_regression }}'
+            $regressionTolerance = '${{ inputs.regression_tolerance_v }}'
+          } else {
+            $josimCommand = $defaultJosimCommand
+            $previousSummaryJson = ''
+            $baselinePlatform = 'windows'
+            $validateNoRegression = 'true'
+            $regressionTolerance = '0.0'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_JOSIM_COMMAND=$josimCommand"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_PREVIOUS_SUMMARY_JSON=$previousSummaryJson"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_BASELINE_PLATFORM=$baselinePlatform"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_VALIDATE_NO_REGRESSION=$validateNoRegression"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_REGRESSION_TOLERANCE_V=$regressionTolerance"
+
       - name: Build Python extension
         run: uv run maturin develop -m crates/py/Cargo.toml
 
-      - name: Run optional external waveform compare manifest
+      - name: Run default external waveform compare manifest
+        shell: pwsh
         run: |
-          uv run python python/scripts/run_waveform_compare_manifest.py \
-            --josim-command "${{ inputs.josim_command }}" \
-            --result-dir target/waveform-compare/results \
-            --validate-pass
+          $compareArgs = @(
+            'python/scripts/run_waveform_compare_manifest.py',
+            '--josim-command', $env:RFLOW_JOSIM_COMMAND,
+            '--result-dir', 'target/waveform-compare/results',
+            '--baseline-platform', $env:RFLOW_BASELINE_PLATFORM,
+            '--regression-tolerance-v', $env:RFLOW_REGRESSION_TOLERANCE_V,
+            '--validate-pass'
+          )
+          if ($env:RFLOW_PREVIOUS_SUMMARY_JSON) {
+            $compareArgs += @('--previous-summary-json', $env:RFLOW_PREVIOUS_SUMMARY_JSON)
+          }
+          if ($env:RFLOW_VALIDATE_NO_REGRESSION -eq 'true') {
+            $compareArgs += '--validate-no-regression'
+          }
+          uv run python @compareArgs
 
-      - name: Run optional external warning manifest
+      - name: Run default external warning manifest
+        shell: pwsh
         run: |
-          uv run python python/scripts/run_external_warning_manifest.py \
-            --josim-command "${{ inputs.josim_command }}" \
-            --result-dir target/external-warning-manifest \
-            --validate-pass
+          uv run python python/scripts/run_external_warning_manifest.py --josim-command "$env:RFLOW_JOSIM_COMMAND" --result-dir target/external-warning-manifest --validate-pass
 
       - name: Prepare waveform compare review artifacts
+        shell: pwsh
         run: |
-          REGRESSION_ARGS=""
-          if [ "${{ inputs.validate_no_regression }}" = "true" ]; then
-            REGRESSION_ARGS="--validate-no-regression"
-          fi
-          uv run python python/scripts/prepare_waveform_compare_artifacts.py \
-            --thresholds python/tests/benchmarks/phase6/waveform_thresholds.json \
-            --benchmark-dir python/tests/benchmarks/phase6 \
-            --result-dir target/waveform-compare/results \
-            --artifact-dir target/waveform-compare \
-            --previous-summary-json "${{ inputs.previous_summary_json }}" \
-            --baseline-platform "${{ inputs.baseline_platform }}" \
-            --regression-tolerance-v "${{ inputs.regression_tolerance_v }}" \
-            --josim-command "${{ inputs.josim_command }}" \
-            --github-workflow "${{ github.workflow }}" \
-            --github-job "waveform-compare-optional" \
-            --github-event-name "${{ github.event_name }}" \
-            --github-run-id "${{ github.run_id }}" \
-            --github-run-attempt "${{ github.run_attempt }}" \
-            --github-sha "${{ github.sha }}" \
-            --github-ref-name "${{ github.ref_name }}" \
-            ${REGRESSION_ARGS}
+          $artifactArgs = @(
+            'python/scripts/prepare_waveform_compare_artifacts.py',
+            '--thresholds', 'python/tests/benchmarks/phase6/waveform_thresholds.json',
+            '--benchmark-dir', 'python/tests/benchmarks/phase6',
+            '--result-dir', 'target/waveform-compare/results',
+            '--artifact-dir', 'target/waveform-compare',
+            '--baseline-platform', $env:RFLOW_BASELINE_PLATFORM,
+            '--regression-tolerance-v', $env:RFLOW_REGRESSION_TOLERANCE_V,
+            '--josim-command', $env:RFLOW_JOSIM_COMMAND,
+            '--github-workflow', '${{ github.workflow }}',
+            '--github-job', 'waveform-compare-gate',
+            '--github-event-name', '${{ github.event_name }}',
+            '--github-run-id', '${{ github.run_id }}',
+            '--github-run-attempt', '${{ github.run_attempt }}',
+            '--github-sha', '${{ github.sha }}',
+            '--github-ref-name', '${{ github.ref_name }}'
+          )
+          if ($env:RFLOW_PREVIOUS_SUMMARY_JSON) {
+            $artifactArgs += @('--previous-summary-json', $env:RFLOW_PREVIOUS_SUMMARY_JSON)
+          }
+          if ($env:RFLOW_VALIDATE_NO_REGRESSION -eq 'true') {
+            $artifactArgs += '--validate-no-regression'
+          }
+          uv run python @artifactArgs
 
       - name: Prepare external warning review artifacts
+        shell: pwsh
         run: |
-          uv run python python/scripts/prepare_external_warning_artifacts.py \
-            --result-dir target/external-warning-manifest \
-            --artifact-dir target/external-warning-review \
-            --josim-command "${{ inputs.josim_command }}" \
-            --github-workflow "${{ github.workflow }}" \
-            --github-job "waveform-compare-optional" \
-            --github-event-name "${{ github.event_name }}" \
-            --github-run-id "${{ github.run_id }}" \
-            --github-run-attempt "${{ github.run_attempt }}" \
-            --github-sha "${{ github.sha }}" \
-            --github-ref-name "${{ github.ref_name }}"
+          uv run python python/scripts/prepare_external_warning_artifacts.py --result-dir target/external-warning-manifest --artifact-dir target/external-warning-review --josim-command "$env:RFLOW_JOSIM_COMMAND" --github-workflow "${{ github.workflow }}" --github-job "waveform-compare-gate" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
 
       - name: Upload waveform compare artifacts
         uses: actions/upload-artifact@v4

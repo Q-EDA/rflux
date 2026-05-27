@@ -1,8 +1,14 @@
 use std::collections::BTreeSet;
 
 use rflux_ir::{Netlist, NodeKind, PinRef};
-use rflux_place::{BlockedRegion as PlacementBlockedRegion, LevelizedPlacer, PlaceError, PlacementConfig, Placement};
-use rflux_route::{BlockedRegion as RoutingBlockedRegion, RouteError, RoutingConfig, RoutingReport, RouteMode, SimpleRouter};
+use rflux_place::{
+    BlockedRegion as PlacementBlockedRegion, LevelizedPlacer, PlaceError, Placement,
+    PlacementConfig,
+};
+use rflux_route::{
+    BlockedRegion as RoutingBlockedRegion, RouteError, RouteMode, RoutingConfig, RoutingReport,
+    SimpleRouter,
+};
 use rflux_sim::run_generated_deck;
 use rflux_synth::{Compiler, SynthError, SynthesisConfig, SynthesisReport};
 use rflux_tech::{CellTimingModel, CharacterizedCellLibraryEntry, Pdk, SfCell, SfCellKind};
@@ -15,6 +21,8 @@ pub use rflux_sim::{
     parse_simulator_output, SimulationBackend, SimulationConfig, SimulationDelayDetail,
     SimulationEndpointRef, SimulationMode, SimulationReport, SimulationViolationDetail,
 };
+
+const TIMING_CLOSURE_MAX_ACTIONS_PER_CHECK: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct FlowConfig {
@@ -57,6 +65,8 @@ pub struct RoutingSummary {
     pub detoured_routes: usize,
     pub jtl_routes: usize,
     pub ptl_routes: usize,
+    pub effective_prefer_ptl_from_length_um: f64,
+    pub effective_detour_margin_um: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +132,8 @@ pub struct TimingClosureLoopReport {
     pub detour_feedback_applied: bool,
     pub initial_total_detour_overhead_um: f64,
     pub final_total_detour_overhead_um: f64,
+    pub route_delay_optimization_attempted: bool,
+    pub route_delay_optimization_applied: bool,
     pub reduce_route_delay_candidate_available: bool,
     pub recommended_prefer_ptl_from_length_um: Option<f64>,
     pub recommended_detour_margin_um: Option<f64>,
@@ -196,6 +208,34 @@ pub struct TimingAnalysisReport {
     pub hold_fix_applied: bool,
     pub closure: TimingClosureSummary,
     pub timing_arcs: Vec<TimingArcSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimingCornerAnalysisReport {
+    pub corner_name: String,
+    pub is_default_corner: bool,
+    pub is_active_corner: bool,
+    pub worst_setup_slack_ps: f64,
+    pub worst_hold_slack_ps: f64,
+    pub critical_path_delay_ps: f64,
+    pub analyzed_arcs: usize,
+    pub setup_violations: usize,
+    pub hold_violations: usize,
+    pub capture_window_violations: usize,
+    pub closure: TimingClosureSummary,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiCornerTimingAnalysisReport {
+    pub active_timing_corner: Option<String>,
+    pub corner_count: usize,
+    pub worst_setup_corner: String,
+    pub worst_hold_corner: String,
+    pub worst_critical_path_corner: String,
+    pub worst_setup_slack_ps: f64,
+    pub worst_hold_slack_ps: f64,
+    pub worst_critical_path_delay_ps: f64,
+    pub corners: Vec<TimingCornerAnalysisReport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -370,12 +410,15 @@ struct CompiledArtifacts {
     synthesis: SynthesisReport,
     placement: Placement,
     routing: RoutingReport,
+    effective_routing_config: RoutingConfig,
     clock: ClockSummary,
     timing: TimingReport,
     initial_total_detour_overhead_um: f64,
     initial_hold_violations: usize,
     hold_fix_attempted: bool,
     detour_feedback_applied: bool,
+    route_delay_optimization_attempted: bool,
+    route_delay_optimization_applied: bool,
     hold_fix_applied: bool,
 }
 
@@ -463,6 +506,10 @@ impl FlowRunner {
                 detoured_routes: artifacts.routing.detoured_routes,
                 jtl_routes: artifacts.routing.jtl_routes,
                 ptl_routes: artifacts.routing.ptl_routes,
+                effective_prefer_ptl_from_length_um: artifacts
+                    .effective_routing_config
+                    .prefer_ptl_from_length_um,
+                effective_detour_margin_um: artifacts.effective_routing_config.detour_margin_um,
             },
             clock: artifacts.clock,
             timing: TimingSummary {
@@ -539,6 +586,49 @@ impl FlowRunner {
                 })
                 .collect(),
         })
+    }
+
+    pub fn analyze_timing_corners(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+    ) -> Result<MultiCornerTimingAnalysisReport, FlowError> {
+        let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let mut corner_reports = Vec::with_capacity(pdk.timing_corners.len() + 1);
+        let mut default_pdk = pdk.clone();
+        default_pdk.active_timing_corner = None;
+        let default_timing =
+            self.timing
+                .analyze(netlist, &artifacts.routing, &default_pdk, &config.timing)?;
+        corner_reports.push(timing_corner_analysis_report(
+            "default",
+            true,
+            pdk.active_timing_corner.is_none(),
+            &default_timing,
+            &artifacts.routing,
+            &config.timing,
+        ));
+
+        for corner_name in pdk.timing_corner_names() {
+            let corner_pdk = pdk.with_active_timing_corner(corner_name);
+            let timing =
+                self.timing
+                    .analyze(netlist, &artifacts.routing, &corner_pdk, &config.timing)?;
+            corner_reports.push(timing_corner_analysis_report(
+                corner_name,
+                false,
+                pdk.active_timing_corner.as_deref() == Some(corner_name),
+                &timing,
+                &artifacts.routing,
+                &config.timing,
+            ));
+        }
+
+        Ok(multi_corner_timing_report(
+            pdk.active_timing_corner.clone(),
+            corner_reports,
+        ))
     }
 
     pub fn analyze_timing_statistical(
@@ -663,7 +753,8 @@ impl FlowRunner {
                 candidate_config.routing.prefer_ptl_from_length_um = threshold;
                 candidate_config.routing.detour_margin_um = detour_margin;
                 let mut candidate_netlist = netlist.clone();
-                let candidate_artifacts = self.compile_artifacts(&mut candidate_netlist, pdk, &candidate_config)?;
+                let candidate_artifacts =
+                    self.compile_artifacts(&mut candidate_netlist, pdk, &candidate_config)?;
                 let candidate_report = ac_bias_report_from_artifacts(&candidate_artifacts);
                 if ac_bias_report_better_than(&candidate_report, &best_report) {
                     best_threshold = threshold;
@@ -763,8 +854,10 @@ impl FlowRunner {
                 let candidate_artifacts =
                     self.compile_artifacts(&mut candidate_netlist, &merged_pdk, &candidate_config)?;
                 let candidate_report = ac_bias_report_from_artifacts(&candidate_artifacts);
-                let candidate_constraints =
-                    advanced_constraint_report_from_artifacts(&candidate_artifacts, constraint_config);
+                let candidate_constraints = advanced_constraint_report_from_artifacts(
+                    &candidate_artifacts,
+                    constraint_config,
+                );
                 let candidate_score =
                     library_aware_optimization_score(&candidate_report, &candidate_constraints);
                 if candidate_score > best_score + 1e-9
@@ -783,7 +876,8 @@ impl FlowRunner {
         let optimization_applied = best_threshold > baseline_threshold + 1e-9
             || best_detour_margin > baseline_detour_margin + 1e-9
             || best_detour_margin < baseline_detour_margin - 1e-9
-            || best_score > library_aware_optimization_score(&baseline, &baseline_constraints) + 1e-9;
+            || best_score
+                > library_aware_optimization_score(&baseline, &baseline_constraints) + 1e-9;
 
         Ok(LibraryAwareAcBiasOptimizationReport {
             ac_bias: AcBiasOptimizationReport {
@@ -1037,8 +1131,13 @@ impl FlowRunner {
             .iter()
             .filter(|route| {
                 matches!(route.mode, RouteMode::Ptl)
-                    && (matches!(netlist.nodes()[route.from.node.0].kind, rflux_ir::NodeKind::MacroCell)
-                        || matches!(netlist.nodes()[route.to.node.0].kind, rflux_ir::NodeKind::MacroCell))
+                    && (matches!(
+                        netlist.nodes()[route.from.node.0].kind,
+                        rflux_ir::NodeKind::MacroCell
+                    ) || matches!(
+                        netlist.nodes()[route.to.node.0].kind,
+                        rflux_ir::NodeKind::MacroCell
+                    ))
             })
             .count();
 
@@ -1046,7 +1145,9 @@ impl FlowRunner {
             .routing
             .routes
             .iter()
-            .filter(|route| matches!(route.mode, RouteMode::Ptl) && !pdk.is_ptl_length_allowed(route.length_um))
+            .filter(|route| {
+                matches!(route.mode, RouteMode::Ptl) && !pdk.is_ptl_length_allowed(route.length_um)
+            })
             .count();
 
         let structural_violations = artifacts
@@ -1072,7 +1173,9 @@ impl FlowRunner {
         pdk: &Pdk,
         config: &FlowConfig,
     ) -> Result<CompiledArtifacts, FlowError> {
-        let synthesis = self.compiler.compile_netlist(netlist, pdk, &config.synthesis)?;
+        let synthesis = self
+            .compiler
+            .compile_netlist(netlist, pdk, &config.synthesis)?;
         let placement_config = placement_config_with_library_feedback(
             netlist,
             pdk,
@@ -1081,28 +1184,66 @@ impl FlowRunner {
         );
         let placement = self.placer.place(netlist, &placement_config)?;
         let routing_config = routing_config_with_library_feedback(netlist, pdk, &config.routing);
-        let initial_routing = self.router.route(netlist, &placement, pdk, &routing_config)?;
+        let initial_routing = self
+            .router
+            .route(netlist, &placement, pdk, &routing_config)?;
         let initial_total_detour_overhead_um = initial_routing.total_detour_overhead_um;
 
-        let (placement, routing, detour_feedback_applied) =
-            self.apply_detour_feedback_if_helpful(netlist, pdk, config, placement, initial_routing, &routing_config)?;
-        let initial_timing = self.timing.analyze(netlist, &routing, pdk, &config.timing)?;
+        let (placement, routing, detour_feedback_applied) = self.apply_detour_feedback_if_helpful(
+            netlist,
+            pdk,
+            config,
+            placement,
+            initial_routing,
+            &routing_config,
+        )?;
+        let initial_timing = self
+            .timing
+            .analyze(netlist, &routing, pdk, &config.timing)?;
+        let initial_closure = timing_closure_summary(
+            initial_timing.setup_violations,
+            initial_timing.hold_violations,
+            &initial_timing,
+            &routing,
+            &config.timing,
+        );
+        let (
+            routing,
+            mut effective_routing_config,
+            initial_timing,
+            route_delay_optimization_attempted,
+            route_delay_optimization_applied,
+        ) = self.apply_route_delay_optimization_if_helpful(
+            netlist,
+            &placement,
+            pdk,
+            config,
+            routing,
+            initial_timing,
+            &initial_closure,
+        )?;
         let initial_hold_violations = initial_timing.hold_violations;
         let hold_fix_attempted = config.min_hold_jtl_length_um > 0.0 && initial_hold_violations > 0;
-        let (routing, timing, hold_fix_applied) =
-            self.apply_hold_fix_if_helpful(netlist, &placement, pdk, config, routing, initial_timing)?;
+        let (routing, timing, hold_fix_routing_config, hold_fix_applied) = self
+            .apply_hold_fix_if_helpful(netlist, &placement, pdk, config, routing, initial_timing)?;
+        if hold_fix_applied {
+            effective_routing_config = hold_fix_routing_config;
+        }
         let clock = build_clock_summary(netlist, &placement, config.clock_phase_count);
 
         Ok(CompiledArtifacts {
             synthesis,
             placement,
             routing,
+            effective_routing_config,
             clock,
             timing,
             initial_total_detour_overhead_um,
             initial_hold_violations,
             hold_fix_attempted,
             detour_feedback_applied,
+            route_delay_optimization_attempted,
+            route_delay_optimization_applied,
             hold_fix_applied,
         })
     }
@@ -1123,7 +1264,10 @@ impl FlowRunner {
         let mut feedback_config = config.placement.clone();
         feedback_config
             .blocked_regions
-            .extend(detour_feedback_regions(&initial_placement, &initial_routing));
+            .extend(detour_feedback_regions(
+                &initial_placement,
+                &initial_routing,
+            ));
         let feedback_placement_config = placement_config_with_library_feedback(
             netlist,
             pdk,
@@ -1132,7 +1276,9 @@ impl FlowRunner {
         );
 
         let feedback_placement = self.placer.place(netlist, &feedback_placement_config)?;
-        let feedback_routing = self.router.route(netlist, &feedback_placement, pdk, base_routing_config)?;
+        let feedback_routing =
+            self.router
+                .route(netlist, &feedback_placement, pdk, base_routing_config)?;
 
         if feedback_routing.total_detour_overhead_um < initial_routing.total_detour_overhead_um {
             Ok((feedback_placement, feedback_routing, true))
@@ -1149,26 +1295,90 @@ impl FlowRunner {
         config: &FlowConfig,
         initial_routing: RoutingReport,
         initial_timing: TimingReport,
-    ) -> Result<(RoutingReport, TimingReport, bool), FlowError> {
+    ) -> Result<(RoutingReport, TimingReport, RoutingConfig, bool), FlowError> {
         let initial_violations = initial_timing.hold_violations;
+        let mut routing_config =
+            routing_config_with_library_feedback(netlist, pdk, &config.routing);
         if config.min_hold_jtl_length_um <= 0.0 || initial_violations == 0 {
-            return Ok((initial_routing, initial_timing, false));
+            return Ok((initial_routing, initial_timing, routing_config, false));
         }
 
-        let mut routing_config = routing_config_with_library_feedback(netlist, pdk, &config.routing);
         routing_config.detour_margin_um = routing_config
             .detour_margin_um
             .max(config.min_hold_jtl_length_um / 2.0);
-        routing_config
-            .blocked_regions
-            .extend(hold_fix_regions(&initial_routing, routing_config.detour_margin_um));
+        routing_config.blocked_regions.extend(hold_fix_regions(
+            &initial_routing,
+            routing_config.detour_margin_um,
+        ));
 
-        let rerouted = self.router.route(netlist, placement, pdk, &routing_config)?;
-        let rerouted_timing = self.timing.analyze(netlist, &rerouted, pdk, &config.timing)?;
+        let rerouted = self
+            .router
+            .route(netlist, placement, pdk, &routing_config)?;
+        let rerouted_timing = self
+            .timing
+            .analyze(netlist, &rerouted, pdk, &config.timing)?;
         if rerouted_timing.hold_violations < initial_violations {
-            Ok((rerouted, rerouted_timing, true))
+            Ok((rerouted, rerouted_timing, routing_config, true))
         } else {
-            Ok((initial_routing, initial_timing, false))
+            Ok((initial_routing, initial_timing, routing_config, false))
+        }
+    }
+
+    fn apply_route_delay_optimization_if_helpful(
+        &mut self,
+        netlist: &Netlist,
+        placement: &Placement,
+        pdk: &Pdk,
+        config: &FlowConfig,
+        initial_routing: RoutingReport,
+        initial_timing: TimingReport,
+        initial_closure: &TimingClosureSummary,
+    ) -> Result<(RoutingReport, RoutingConfig, TimingReport, bool, bool), FlowError> {
+        let base_routing_config =
+            routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        let reduce_route_delay_actions = reduce_route_delay_actions(initial_closure);
+        let Some(threshold_um) = recommended_prefer_ptl_from_length_um(&reduce_route_delay_actions)
+        else {
+            return Ok((
+                initial_routing,
+                base_routing_config,
+                initial_timing,
+                false,
+                false,
+            ));
+        };
+
+        let mut candidate_routing_config = base_routing_config.clone();
+        candidate_routing_config.prefer_ptl_from_length_um = threshold_um;
+        if let Some(detour_margin_um) = recommended_detour_margin_um(
+            &initial_routing,
+            reduce_route_delay_actions.first().copied(),
+        ) {
+            candidate_routing_config.detour_margin_um = detour_margin_um;
+        }
+
+        let candidate_routing =
+            self.router
+                .route(netlist, placement, pdk, &candidate_routing_config)?;
+        let candidate_timing =
+            self.timing
+                .analyze(netlist, &candidate_routing, pdk, &config.timing)?;
+        if route_delay_candidate_is_better(&candidate_timing, &initial_timing) {
+            Ok((
+                candidate_routing,
+                candidate_routing_config,
+                candidate_timing,
+                true,
+                true,
+            ))
+        } else {
+            Ok((
+                initial_routing,
+                base_routing_config,
+                initial_timing,
+                true,
+                false,
+            ))
         }
     }
 
@@ -1181,22 +1391,25 @@ impl FlowRunner {
         closure: &TimingClosureSummary,
     ) -> Result<TimingClosureLoopReport, FlowError> {
         let mut report = timing_closure_loop_report(artifacts, closure);
-        let Some(action) = closure.actions.iter().find(|action| {
-            action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay
-        }) else {
+        let Some(action) = representative_reduce_route_delay_action(closure) else {
             return Ok(report);
         };
         let Some(threshold_um) = report.recommended_prefer_ptl_from_length_um else {
             return Ok(report);
         };
 
-        let mut candidate_config = routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        let mut candidate_config =
+            routing_config_with_library_feedback(netlist, pdk, &config.routing);
         candidate_config.prefer_ptl_from_length_um = threshold_um;
         if let Some(detour_margin_um) = report.recommended_detour_margin_um {
             candidate_config.detour_margin_um = detour_margin_um;
         }
-        let candidate_routing = self.router.route(netlist, &artifacts.placement, pdk, &candidate_config)?;
-        let candidate_timing = self.timing.analyze(netlist, &candidate_routing, pdk, &config.timing)?;
+        let candidate_routing =
+            self.router
+                .route(netlist, &artifacts.placement, pdk, &candidate_config)?;
+        let candidate_timing =
+            self.timing
+                .analyze(netlist, &candidate_routing, pdk, &config.timing)?;
         let candidate_route = candidate_routing
             .routes
             .iter()
@@ -1209,8 +1422,7 @@ impl FlowRunner {
         report.candidate_route_mode = candidate_route.map(|route| route.mode);
         report.candidate_route_length_um = candidate_route.map(|route| route.length_um);
         report.reduce_route_delay_candidate_improved =
-            candidate_timing.setup_violations < artifacts.timing.setup_violations
-                || candidate_timing.worst_setup_slack_ps > artifacts.timing.worst_setup_slack_ps + 1e-9;
+            route_delay_candidate_is_better(&candidate_timing, &artifacts.timing);
 
         Ok(report)
     }
@@ -1257,7 +1469,12 @@ fn generate_simulation_deck(netlist: &Netlist, artifacts: &CompiledArtifacts) ->
     let mut pin_nets = BTreeSet::new();
 
     for node in netlist.nodes() {
-        deck.push_str(&format!("* node {} {} {}\n", node.id.0, node.name, node_kind_name(&node.kind)));
+        deck.push_str(&format!(
+            "* node {} {} {}\n",
+            node.id.0,
+            node.name,
+            node_kind_name(&node.kind)
+        ));
         if matches!(node.kind, NodeKind::Port) {
             let drive_net = flow_pin_net_name(PinRef {
                 node: node.id,
@@ -1286,9 +1503,16 @@ fn generate_simulation_deck(netlist: &Netlist, artifacts: &CompiledArtifacts) ->
         ));
     }
     for pin_net in pin_nets {
-        deck.push_str(&format!("CLOAD_{} {} 0 1f\n", pin_net.replace('-', "_"), pin_net));
+        deck.push_str(&format!(
+            "CLOAD_{} {} 0 1f\n",
+            pin_net.replace('-', "_"),
+            pin_net
+        ));
     }
-    deck.push_str(&format!(".measure events param={}\n", artifacts.timing.analyzed_arcs));
+    deck.push_str(&format!(
+        ".measure events param={}\n",
+        artifacts.timing.analyzed_arcs
+    ));
     deck.push_str(".tran {tstep} {tstop}\n");
     deck.push_str(".print tran v(all)\n");
     deck.push_str(".end\n");
@@ -1306,7 +1530,6 @@ fn flow_route_resistance_ohm(route: &rflux_route::NetRoute) -> f64 {
     }
 }
 
-
 fn ac_bias_report_from_artifacts(artifacts: &CompiledArtifacts) -> AcBiasReport {
     let routed_nets = artifacts.routing.routes.len();
     let jtl_carrier_candidates = artifacts.routing.jtl_routes;
@@ -1321,7 +1544,8 @@ fn ac_bias_report_from_artifacts(artifacts: &CompiledArtifacts) -> AcBiasReport 
     let estimated_frequency_derate_ratio = if clock_sink_count == 0 {
         1.0
     } else {
-        (1.0 - 0.15 * (clock_sink_count as f64 / (clock_sink_count + jtl_carrier_candidates).max(1) as f64))
+        (1.0 - 0.15
+            * (clock_sink_count as f64 / (clock_sink_count + jtl_carrier_candidates).max(1) as f64))
             .max(0.25)
     };
     let worst_setup_slack_ps = artifacts.timing.worst_setup_slack_ps;
@@ -1336,9 +1560,9 @@ fn ac_bias_report_from_artifacts(artifacts: &CompiledArtifacts) -> AcBiasReport 
     } else {
         ptl_coupling_risk_routes as f64 / routed_nets as f64
     };
-    let feasibility_score =
-        (carrier_ratio * 0.7 + estimated_frequency_derate_ratio * 0.3 - coupling_penalty * 0.4)
-            .clamp(0.0, 1.0);
+    let feasibility_score = (carrier_ratio * 0.7 + estimated_frequency_derate_ratio * 0.3
+        - coupling_penalty * 0.4)
+        .clamp(0.0, 1.0);
     let normalized_power_savings = if routed_nets == 0 {
         0.0
     } else {
@@ -1347,14 +1571,12 @@ fn ac_bias_report_from_artifacts(artifacts: &CompiledArtifacts) -> AcBiasReport 
     let normalized_area_efficiency = (1.0 / estimated_area_overhead_ratio).clamp(0.0, 1.0);
     let normalized_coupling_margin = (1.0 - coupling_penalty).clamp(0.0, 1.0);
     let timing_guardband_score = timing_guardband_score(worst_setup_slack_ps, worst_hold_slack_ps);
-    let optimization_score = (
-        feasibility_score * 0.35
-            + timing_guardband_score * 0.25
-            + estimated_frequency_derate_ratio * 0.15
-            + normalized_area_efficiency * 0.10
-            + normalized_power_savings * 0.08
-            + normalized_coupling_margin * 0.07
-    )
+    let optimization_score = (feasibility_score * 0.35
+        + timing_guardband_score * 0.25
+        + estimated_frequency_derate_ratio * 0.15
+        + normalized_area_efficiency * 0.10
+        + normalized_power_savings * 0.08
+        + normalized_coupling_margin * 0.07)
         .clamp(0.0, 1.0);
 
     AcBiasReport {
@@ -1416,11 +1638,15 @@ fn timing_closure_summary(
     }
     let mut actions = Vec::new();
     if !setup_closed {
-        if let Some(arc) = timing
+        let mut setup_arcs = timing
             .arcs
             .iter()
             .filter(|arc| !arc.is_false_path && arc.setup_slack_ps < 0.0)
-            .min_by(|left, right| left.setup_slack_ps.total_cmp(&right.setup_slack_ps))
+            .collect::<Vec<_>>();
+        setup_arcs.sort_by(|left, right| left.setup_slack_ps.total_cmp(&right.setup_slack_ps));
+        for arc in setup_arcs
+            .into_iter()
+            .take(TIMING_CLOSURE_MAX_ACTIONS_PER_CHECK)
         {
             actions.push(timing_closure_action(
                 TimingClosureCheck::Setup,
@@ -1435,11 +1661,15 @@ fn timing_closure_summary(
         }
     }
     if !hold_closed {
-        if let Some(arc) = timing
+        let mut hold_arcs = timing
             .arcs
             .iter()
             .filter(|arc| !arc.is_false_path && arc.hold_slack_ps < 0.0)
-            .min_by(|left, right| left.hold_slack_ps.total_cmp(&right.hold_slack_ps))
+            .collect::<Vec<_>>();
+        hold_arcs.sort_by(|left, right| left.hold_slack_ps.total_cmp(&right.hold_slack_ps));
+        for arc in hold_arcs
+            .into_iter()
+            .take(TIMING_CLOSURE_MAX_ACTIONS_PER_CHECK)
         {
             actions.push(timing_closure_action(
                 TimingClosureCheck::Hold,
@@ -1454,14 +1684,18 @@ fn timing_closure_summary(
         }
     }
     if capture_window_closure_enabled && !capture_window_closed {
-        if let Some(arc) = timing
+        let mut capture_window_arcs = timing
             .arcs
             .iter()
             .filter(|arc| !arc.is_false_path && arc.capture_window_violation)
-            .min_by(|left, right| {
-                left.capture_window_slack_ps
-                    .total_cmp(&right.capture_window_slack_ps)
-            })
+            .collect::<Vec<_>>();
+        capture_window_arcs.sort_by(|left, right| {
+            left.capture_window_slack_ps
+                .total_cmp(&right.capture_window_slack_ps)
+        });
+        for arc in capture_window_arcs
+            .into_iter()
+            .take(TIMING_CLOSURE_MAX_ACTIONS_PER_CHECK)
         {
             actions.push(timing_closure_action(
                 TimingClosureCheck::CaptureWindow,
@@ -1496,8 +1730,7 @@ fn timing_closure_summary(
     let adjust_sfq_phase_or_pulse_window_actions = actions
         .iter()
         .filter(|action| {
-            action.remediation_kind
-                == TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow
+            action.remediation_kind == TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow
         })
         .count();
     TimingClosureSummary {
@@ -1522,6 +1755,77 @@ fn timing_closure_summary(
         } else {
             "Inspect timing_arcs with setup, hold, or capture-window violations, adjust constraints, SFQ phases, pulse windows, or physical routing, then rerun timing analysis.".to_string()
         },
+    }
+}
+
+fn timing_corner_analysis_report(
+    corner_name: &str,
+    is_default_corner: bool,
+    is_active_corner: bool,
+    timing: &TimingReport,
+    routing: &RoutingReport,
+    config: &TimingConfig,
+) -> TimingCornerAnalysisReport {
+    TimingCornerAnalysisReport {
+        corner_name: corner_name.to_string(),
+        is_default_corner,
+        is_active_corner,
+        worst_setup_slack_ps: timing.worst_setup_slack_ps,
+        worst_hold_slack_ps: timing.worst_hold_slack_ps,
+        critical_path_delay_ps: timing.critical_path_delay_ps,
+        analyzed_arcs: timing.analyzed_arcs,
+        setup_violations: timing.setup_violations,
+        hold_violations: timing.hold_violations,
+        capture_window_violations: timing.capture_window_violations,
+        closure: timing_closure_summary(
+            timing.setup_violations,
+            timing.hold_violations,
+            timing,
+            routing,
+            config,
+        ),
+    }
+}
+
+fn multi_corner_timing_report(
+    active_timing_corner: Option<String>,
+    corners: Vec<TimingCornerAnalysisReport>,
+) -> MultiCornerTimingAnalysisReport {
+    let worst_setup = corners
+        .iter()
+        .min_by(|a, b| {
+            a.worst_setup_slack_ps
+                .partial_cmp(&b.worst_setup_slack_ps)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("multi-corner timing report requires at least one corner");
+    let worst_hold = corners
+        .iter()
+        .min_by(|a, b| {
+            a.worst_hold_slack_ps
+                .partial_cmp(&b.worst_hold_slack_ps)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("multi-corner timing report requires at least one corner");
+    let worst_critical_path = corners
+        .iter()
+        .max_by(|a, b| {
+            a.critical_path_delay_ps
+                .partial_cmp(&b.critical_path_delay_ps)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("multi-corner timing report requires at least one corner");
+
+    MultiCornerTimingAnalysisReport {
+        active_timing_corner,
+        corner_count: corners.len(),
+        worst_setup_corner: worst_setup.corner_name.clone(),
+        worst_hold_corner: worst_hold.corner_name.clone(),
+        worst_critical_path_corner: worst_critical_path.corner_name.clone(),
+        worst_setup_slack_ps: worst_setup.worst_setup_slack_ps,
+        worst_hold_slack_ps: worst_hold.worst_hold_slack_ps,
+        worst_critical_path_delay_ps: worst_critical_path.critical_path_delay_ps,
+        corners,
     }
 }
 
@@ -1557,11 +1861,17 @@ fn timing_closure_remediation_kind(
 ) -> TimingClosureRemediationKind {
     match check {
         TimingClosureCheck::Hold => TimingClosureRemediationKind::AddHoldPadding,
-        TimingClosureCheck::CaptureWindow => TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow,
-        TimingClosureCheck::Setup if matches!(route_mode, RouteMode::Ptl) || route_length_um > 80.0 => {
+        TimingClosureCheck::CaptureWindow => {
+            TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow
+        }
+        TimingClosureCheck::Setup
+            if matches!(route_mode, RouteMode::Ptl) || route_length_um > 80.0 =>
+        {
             TimingClosureRemediationKind::ReduceRouteDelay
         }
-        TimingClosureCheck::Setup => TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming,
+        TimingClosureCheck::Setup => {
+            TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming
+        }
     }
 }
 
@@ -1571,25 +1881,13 @@ fn timing_closure_loop_report(
 ) -> TimingClosureLoopReport {
     let detour_feedback_attempted = artifacts.initial_total_detour_overhead_um > 0.0;
     let final_total_detour_overhead_um = artifacts.routing.total_detour_overhead_um;
-    let reduce_route_delay_action = closure.actions.iter().find(|action| {
-        action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay
-    });
-    let reduce_route_delay_candidate_available = reduce_route_delay_action.is_some();
-    let recommended_prefer_ptl_from_length_um = reduce_route_delay_action.map(|action| {
-        if matches!(action.route_mode, RouteMode::Ptl) {
-            action.route_length_um + 1.0
-        } else {
-            action.route_length_um.max(20.0)
-        }
-    });
-    let recommended_detour_margin_um = reduce_route_delay_action.map(|_action| {
-        if artifacts.routing.detoured_routes > 0 {
-            (artifacts.routing.total_detour_overhead_um / artifacts.routing.detoured_routes as f64)
-                .max(6.0)
-        } else {
-            0.0
-        }
-    });
+    let reduce_route_delay_actions = reduce_route_delay_actions(closure);
+    let reduce_route_delay_action = reduce_route_delay_actions.first().copied();
+    let reduce_route_delay_candidate_available = !reduce_route_delay_actions.is_empty();
+    let recommended_prefer_ptl_from_length_um =
+        recommended_prefer_ptl_from_length_um(&reduce_route_delay_actions);
+    let recommended_detour_margin_um =
+        recommended_detour_margin_um(&artifacts.routing, reduce_route_delay_action);
     let recommended_route_mode = reduce_route_delay_action.map(|action| {
         if matches!(action.route_mode, RouteMode::Ptl) {
             RouteMode::Jtl
@@ -1602,19 +1900,27 @@ fn timing_closure_loop_report(
         reduce_route_delay_action.map(|action| (-action.slack_ps).max(0.0));
     let status = if closure.closed {
         "closed".to_string()
-    } else if artifacts.detour_feedback_applied || artifacts.hold_fix_applied {
+    } else if artifacts.detour_feedback_applied
+        || artifacts.route_delay_optimization_applied
+        || artifacts.hold_fix_applied
+    {
         "improved_open".to_string()
-    } else if detour_feedback_attempted || artifacts.hold_fix_attempted {
+    } else if detour_feedback_attempted
+        || artifacts.route_delay_optimization_attempted
+        || artifacts.hold_fix_attempted
+    {
         "attempted_open".to_string()
     } else {
         "not_attempted_open".to_string()
     };
     let next_step = if closure.closed {
-        "Timing closure loop converged; preserve the applied physical implementation settings.".to_string()
+        "Timing closure loop converged; preserve the applied physical implementation settings."
+            .to_string()
     } else if closure.add_hold_padding_actions > 0 && !artifacts.hold_fix_attempted {
         "Enable hold padding reroute with a positive min_hold_jtl_length_um and rerun compile_layout.".to_string()
-    } else if closure.reduce_route_delay_actions > 0 && !artifacts.detour_feedback_applied {
-        "Apply the recommended route-delay settings or update placement constraints, then rerun compile_layout.".to_string()
+    } else if closure.reduce_route_delay_actions > 0 && !artifacts.route_delay_optimization_applied
+    {
+        "Review the route-delay candidate and update placement constraints or routing limits before rerunning compile_layout.".to_string()
     } else {
         "Review closure.primary_action and rerun compile_layout after applying the selected remediation.".to_string()
     };
@@ -1624,6 +1930,8 @@ fn timing_closure_loop_report(
         detour_feedback_applied: artifacts.detour_feedback_applied,
         initial_total_detour_overhead_um: artifacts.initial_total_detour_overhead_um,
         final_total_detour_overhead_um,
+        route_delay_optimization_attempted: artifacts.route_delay_optimization_attempted,
+        route_delay_optimization_applied: artifacts.route_delay_optimization_applied,
         reduce_route_delay_candidate_available,
         recommended_prefer_ptl_from_length_um,
         recommended_detour_margin_um,
@@ -1646,6 +1954,63 @@ fn timing_closure_loop_report(
     }
 }
 
+fn reduce_route_delay_actions(closure: &TimingClosureSummary) -> Vec<&TimingClosureAction> {
+    closure
+        .actions
+        .iter()
+        .filter(|action| action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay)
+        .collect()
+}
+
+fn representative_reduce_route_delay_action(
+    closure: &TimingClosureSummary,
+) -> Option<&TimingClosureAction> {
+    reduce_route_delay_actions(closure).into_iter().next()
+}
+
+fn recommended_prefer_ptl_from_length_um(actions: &[&TimingClosureAction]) -> Option<f64> {
+    let representative = actions.first()?;
+    if matches!(representative.route_mode, RouteMode::Ptl) {
+        actions
+            .iter()
+            .filter(|action| matches!(action.route_mode, RouteMode::Ptl))
+            .map(|action| action.route_length_um)
+            .reduce(f64::max)
+            .map(|length_um| length_um + 1.0)
+    } else {
+        actions
+            .iter()
+            .filter(|action| !matches!(action.route_mode, RouteMode::Ptl))
+            .map(|action| action.route_length_um)
+            .reduce(f64::min)
+            .map(|length_um| length_um.max(20.0))
+    }
+}
+
+fn recommended_detour_margin_um(
+    routing: &RoutingReport,
+    action: Option<&TimingClosureAction>,
+) -> Option<f64> {
+    action.map(|_action| {
+        if routing.detoured_routes > 0 {
+            (routing.total_detour_overhead_um / routing.detoured_routes as f64).max(6.0)
+        } else {
+            0.0
+        }
+    })
+}
+
+fn route_delay_candidate_is_better(candidate: &TimingReport, current: &TimingReport) -> bool {
+    if candidate.hold_violations > current.hold_violations
+        || candidate.capture_window_violations > current.capture_window_violations
+    {
+        return false;
+    }
+
+    candidate.setup_violations < current.setup_violations
+        || candidate.worst_setup_slack_ps > current.worst_setup_slack_ps + 1e-9
+}
+
 fn default_macro_area_um2() -> f64 {
     48.0
 }
@@ -1655,7 +2020,9 @@ fn default_macro_pipeline_stages() -> u8 {
 }
 
 fn characterized_cell_cost_scale(cell: &SfCell) -> f64 {
-    let area_scale = (cell.area_um2 / default_macro_area_um2()).sqrt().clamp(0.75, 2.5);
+    let area_scale = (cell.area_um2 / default_macro_area_um2())
+        .sqrt()
+        .clamp(0.75, 2.5);
     let pipeline_scale =
         1.0 + (cell.pipeline_stages as f64 - default_macro_pipeline_stages() as f64) * 0.15;
     (area_scale * pipeline_scale).clamp(0.75, 3.0)
@@ -1769,7 +2136,12 @@ fn delay_calibration_sigma_from_simulation(
     };
     let worst_delta = simulation
         .reported_worst_delay_ps
-        .or_else(|| delay_details.iter().map(|detail| detail.delay_ps).reduce(f64::max))
+        .or_else(|| {
+            delay_details
+                .iter()
+                .map(|detail| detail.delay_ps)
+                .reduce(f64::max)
+        })
         .filter(|delay| *delay > 0.0)
         .map(|simulated| (simulated - sta_derived_delay_ps).abs() * 0.35)
         .unwrap_or(0.0);
@@ -1797,7 +2169,7 @@ fn statistical_timing_score(report: &StatisticalTimingAnalysisReport, clock_peri
     }
     (report.worst_pessimistic_setup_slack_ps
         / (report.worst_pessimistic_setup_slack_ps + clock_period_ps.max(1.0)))
-        .clamp(0.0, 1.0)
+    .clamp(0.0, 1.0)
 }
 
 fn placement_halo_scale_candidates(netlist: &Netlist, pdk: &Pdk) -> Vec<f64> {
@@ -1879,9 +2251,8 @@ fn design_optimization_score(
 ) -> f64 {
     let constraint_score = (1.0 / (1.0 + constraints.violation_count as f64)).clamp(0.0, 1.0);
     let ssta_score = statistical_timing_score(statistical, clock_period_ps);
-    let risk_penalty = (statistical.setup_risk_violations as f64
-        + statistical.hold_risk_violations as f64)
-        * 0.04;
+    let risk_penalty =
+        (statistical.setup_risk_violations as f64 + statistical.hold_risk_violations as f64) * 0.04;
     (library_aware_optimization_score(ac_bias, constraints) * 0.50
         + ssta_score * 0.35
         + constraint_score * 0.15
@@ -1928,16 +2299,28 @@ fn match_delay_detail_to_edge(
         if delay_detail_name_matches_edge(driver, sink, detail) {
             score += 4;
         }
-        if detail.name.to_ascii_lowercase().contains(&driver.to_ascii_lowercase()) {
+        if detail
+            .name
+            .to_ascii_lowercase()
+            .contains(&driver.to_ascii_lowercase())
+        {
             score += 2;
         }
-        if detail.name.to_ascii_lowercase().contains(&sink.to_ascii_lowercase()) {
+        if detail
+            .name
+            .to_ascii_lowercase()
+            .contains(&sink.to_ascii_lowercase())
+        {
             score += 2;
         }
         if score == 0 {
             continue;
         }
-        if best.as_ref().map(|(_, _, current)| score > *current).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|(_, _, current)| score > *current)
+            .unwrap_or(true)
+        {
             best = Some((*from, *to, score));
         }
     }
@@ -2002,7 +2385,9 @@ fn characterization_arc_delays_from_simulation(
         unmatched_details.push(detail);
     }
 
-    let mut unused_edge_indices = (0..edges.len()).filter(|index| !used_edges[*index]).collect::<Vec<_>>();
+    let mut unused_edge_indices = (0..edges.len())
+        .filter(|index| !used_edges[*index])
+        .collect::<Vec<_>>();
     for (detail, edge_index) in unmatched_details.iter().zip(unused_edge_indices.drain(..)) {
         let (from, to) = edges[edge_index];
         let driver = &netlist.nodes()[from.node.0];
@@ -2080,21 +2465,17 @@ fn compound_cell_characterization_from_artifacts(
     characterization_config: &CompoundCellCharacterizationConfig,
 ) -> CompoundCellCharacterizationReport {
     let sta_fallback_ps = artifacts.timing.critical_path_delay_ps.max(0.0);
-    let derived_intrinsic_delay_ps =
-        intrinsic_delay_from_simulation(&simulation, sta_fallback_ps);
+    let derived_intrinsic_delay_ps = intrinsic_delay_from_simulation(&simulation, sta_fallback_ps);
     let derived_setup_ps = (artifacts.timing.critical_path_delay_ps * 0.12)
         .max(artifacts.timing.setup_violations as f64);
     let derived_hold_ps = artifacts.timing.worst_hold_slack_ps.max(0.0);
-    let generated_kind = if artifacts.synthesis.tech_map.mapped_nodes > 1 || artifacts.synthesis.node_count > 1 {
-        SfCellKind::Macro
-    } else {
-        SfCellKind::GenericGate
-    };
-    let generated_pipeline_stages = artifacts
-        .clock
-        .phase_count
-        .max(1)
-        .min(u8::MAX as usize) as u8;
+    let generated_kind =
+        if artifacts.synthesis.tech_map.mapped_nodes > 1 || artifacts.synthesis.node_count > 1 {
+            SfCellKind::Macro
+        } else {
+            SfCellKind::GenericGate
+        };
+    let generated_pipeline_stages = artifacts.clock.phase_count.max(1).min(u8::MAX as usize) as u8;
     let delay_details = characterization_delay_details_from_simulation(&simulation);
     let arc_delays = characterization_arc_delays_from_simulation(
         netlist,
@@ -2171,13 +2552,13 @@ fn advanced_constraint_report_from_artifacts(
     let detour_overhead_ratio =
         (artifacts.routing.total_detour_overhead_um / total_length_um).clamp(0.0, 1.0);
     let ptl_coupling_ratio = (artifacts.routing.ptl_routes as f64 / routed_nets).clamp(0.0, 1.0);
-    let jtl_density_per_100um = artifacts.routing.jtl_routes as f64 / (total_length_um / 100.0).max(1.0);
-    let estimated_mechanical_stress_score =
-        (detour_overhead_ratio * 0.55
-            + ptl_coupling_ratio * 0.20
-            + jtl_density_per_100um / 10.0 * 0.15
-            + (normalized_mapped_area / (normalized_mapped_area + 1.0)) * 0.10)
-            .clamp(0.0, 1.0);
+    let jtl_density_per_100um =
+        artifacts.routing.jtl_routes as f64 / (total_length_um / 100.0).max(1.0);
+    let estimated_mechanical_stress_score = (detour_overhead_ratio * 0.55
+        + ptl_coupling_ratio * 0.20
+        + jtl_density_per_100um / 10.0 * 0.15
+        + (normalized_mapped_area / (normalized_mapped_area + 1.0)) * 0.10)
+        .clamp(0.0, 1.0);
     let manufacturing_hotspots = artifacts.routing.detoured_routes
         + usize::from(detour_overhead_ratio > 0.20)
         + usize::from(ptl_coupling_ratio > 0.50);
@@ -2262,10 +2643,13 @@ fn ac_bias_report_better_than(candidate: &AcBiasReport, current: &AcBiasReport) 
         return candidate.ptl_coupling_risk_routes < current.ptl_coupling_risk_routes;
     }
 
-    if candidate.estimated_frequency_derate_ratio > current.estimated_frequency_derate_ratio + 1e-9 {
+    if candidate.estimated_frequency_derate_ratio > current.estimated_frequency_derate_ratio + 1e-9
+    {
         return true;
     }
-    if (candidate.estimated_frequency_derate_ratio - current.estimated_frequency_derate_ratio).abs() > 1e-9 {
+    if (candidate.estimated_frequency_derate_ratio - current.estimated_frequency_derate_ratio).abs()
+        > 1e-9
+    {
         return false;
     }
 
@@ -2316,14 +2700,21 @@ fn detour_feedback_regions(
         .collect()
 }
 
-fn build_clock_summary(netlist: &Netlist, placement: &Placement, clock_phase_count: usize) -> ClockSummary {
+fn build_clock_summary(
+    netlist: &Netlist,
+    placement: &Placement,
+    clock_phase_count: usize,
+) -> ClockSummary {
     let phase_count = clock_phase_count.max(1);
     let mut clock_sinks = 0usize;
     let mut clock_buffers = 0usize;
     let mut assigned_phases = 0usize;
 
     for node in netlist.nodes() {
-        if !matches!(node.kind, rflux_ir::NodeKind::Dff | rflux_ir::NodeKind::MacroCell) {
+        if !matches!(
+            node.kind,
+            rflux_ir::NodeKind::Dff | rflux_ir::NodeKind::MacroCell
+        ) {
             continue;
         }
         clock_sinks += 1;
@@ -2389,6 +2780,7 @@ mod tests {
     use rflux_place::{FixedNodePlacement, Point};
     use rflux_route::{BlockedRegion, NetRoute};
     use rflux_synth::{BoolOptReport, CompilePlan, CompileReport, ConnectionSpec, TechMapReport};
+    use rflux_tech::{InterconnectKind, InterconnectTimingModel, PdkTimingCorner, TimingPoint};
 
     #[test]
     fn compiles_netlist_into_layout_report() {
@@ -2402,11 +2794,17 @@ mod tests {
             connections: vec![
                 ConnectionSpec {
                     from: PinRef { node: a, port: 0 },
-                    to: PinRef { node: gate, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
                 },
                 ConnectionSpec {
                     from: PinRef { node: b, port: 0 },
-                    to: PinRef { node: gate, port: 1 },
+                    to: PinRef {
+                        node: gate,
+                        port: 1,
+                    },
                 },
             ],
             ..CompilePlan::default()
@@ -2424,7 +2822,10 @@ mod tests {
         assert!(report.initial_total_detour_overhead_um >= 0.0);
         assert!(!report.detour_feedback_applied);
         assert_eq!(report.clock.phase_count, 2);
-        assert_eq!(report.timing.initial_hold_violations, report.timing.final_hold_violations);
+        assert_eq!(
+            report.timing.initial_hold_violations,
+            report.timing.final_hold_violations
+        );
         assert_eq!(report.timing.analyzed_arcs, 2);
         assert!(report.timing_closure.closed);
         assert_eq!(report.timing_closure.status, "closed");
@@ -2436,7 +2837,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
@@ -2455,8 +2865,14 @@ mod tests {
             },
         ];
         config.timing.clock_domains = vec![
-            rflux_timing::ClockDomainConstraint { id: 1, period_ps: 10.0 },
-            rflux_timing::ClockDomainConstraint { id: 2, period_ps: 10.0 },
+            rflux_timing::ClockDomainConstraint {
+                id: 1,
+                period_ps: 10.0,
+            },
+            rflux_timing::ClockDomainConstraint {
+                id: 2,
+                period_ps: 10.0,
+            },
         ];
         config.timing.sfq_phase_count = 2;
         config.timing.sfq_pulse_window_ps = 2.5;
@@ -2498,7 +2914,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
@@ -2520,7 +2945,10 @@ mod tests {
         assert_eq!(report.closure.action_count, 1);
         assert_eq!(report.closure.actions.len(), 1);
         assert_eq!(report.closure.actions[0].check, TimingClosureCheck::Setup);
-        assert_eq!(report.closure.primary_action, Some(report.closure.actions[0]));
+        assert_eq!(
+            report.closure.primary_action,
+            Some(report.closure.actions[0])
+        );
         assert_eq!(report.closure.actions[0].priority, 1);
         assert_eq!(
             report.closure.actions[0].remediation_kind,
@@ -2534,8 +2962,20 @@ mod tests {
             1
         );
         assert_eq!(report.closure.add_hold_padding_actions, 0);
-        assert_eq!(report.closure.actions[0].from, PinRef { node: source, port: 0 });
-        assert_eq!(report.closure.actions[0].to, PinRef { node: sink, port: 0 });
+        assert_eq!(
+            report.closure.actions[0].from,
+            PinRef {
+                node: source,
+                port: 0
+            }
+        );
+        assert_eq!(
+            report.closure.actions[0].to,
+            PinRef {
+                node: sink,
+                port: 0
+            }
+        );
         assert!(report.closure.actions[0].slack_ps < 0.0);
         assert!(report
             .closure
@@ -2544,12 +2984,102 @@ mod tests {
     }
 
     #[test]
+    fn analyze_timing_reports_top_closure_actions_for_setup_violations() {
+        let mut netlist = Netlist::new();
+        let sources = (0..4)
+            .map(|index| netlist.add_node(NodeKind::Port, format!("source_{index}")))
+            .collect::<Vec<_>>();
+        let sinks = (0..4)
+            .map(|index| netlist.add_node(NodeKind::Dff, format!("sink_{index}")))
+            .collect::<Vec<_>>();
+        for (index, (source, sink)) in sources.iter().zip(sinks.iter()).enumerate() {
+            netlist
+                .connect(
+                    PinRef {
+                        node: *source,
+                        port: index as u16,
+                    },
+                    PinRef {
+                        node: *sink,
+                        port: 0,
+                    },
+                )
+                .expect("source to sink");
+        }
+
+        let mut config = FlowConfig::default();
+        config.timing.node_constraints = sinks
+            .iter()
+            .enumerate()
+            .map(|(index, sink)| rflux_timing::NodeTimingConstraint {
+                node: *sink,
+                input_arrival_ps: None,
+                required_ps: Some(18.0 + index as f64),
+                clock_domain: None,
+            })
+            .collect();
+
+        let report = FlowRunner::new()
+            .analyze_timing(&mut netlist, &Pdk::minimal("test"), &config)
+            .expect("timing should succeed");
+
+        assert_eq!(report.setup_violations, 4);
+        assert!(!report.closure.closed);
+        assert_eq!(report.closure.failing_checks, vec!["setup"]);
+        assert_eq!(report.closure.action_count, 3);
+        assert_eq!(report.closure.actions.len(), 3);
+        assert!(report
+            .closure
+            .actions
+            .iter()
+            .all(|action| action.check == TimingClosureCheck::Setup));
+        assert_eq!(
+            report.closure.primary_action,
+            Some(report.closure.actions[0])
+        );
+        assert!(report
+            .closure
+            .actions
+            .windows(2)
+            .all(|pair| pair[0].slack_ps <= pair[1].slack_ps));
+        let mut expected_top_arcs = report
+            .timing_arcs
+            .iter()
+            .filter(|arc| arc.setup_slack_ps < 0.0)
+            .collect::<Vec<_>>();
+        expected_top_arcs
+            .sort_by(|left, right| left.setup_slack_ps.total_cmp(&right.setup_slack_ps));
+        assert_eq!(
+            report
+                .closure
+                .actions
+                .iter()
+                .map(|action| action.to)
+                .collect::<Vec<_>>(),
+            expected_top_arcs
+                .iter()
+                .take(3)
+                .map(|arc| arc.to)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn analyze_timing_reports_open_closure_for_capture_window_violations() {
         let mut netlist = Netlist::new();
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
@@ -2584,7 +3114,10 @@ mod tests {
         assert!(!report.closure.capture_window_closed);
         assert_eq!(report.closure.failing_checks, vec!["capture_window"]);
         assert_eq!(report.closure.action_count, 1);
-        assert_eq!(report.closure.actions[0].check, TimingClosureCheck::CaptureWindow);
+        assert_eq!(
+            report.closure.actions[0].check,
+            TimingClosureCheck::CaptureWindow
+        );
         assert_eq!(
             report.closure.actions[0].remediation_kind,
             TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow
@@ -2606,7 +3139,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let report = FlowRunner::new()
@@ -2622,8 +3164,7 @@ mod tests {
         assert_eq!(report.timing_arcs[0].route_mode, RouteMode::Jtl);
         assert!(report.timing_arcs[0].setup_sigma_ps > 0.0);
         assert!(
-            report.timing_arcs[0].pessimistic_setup_slack_ps
-                < report.timing_arcs[0].setup_slack_ps
+            report.timing_arcs[0].pessimistic_setup_slack_ps < report.timing_arcs[0].setup_slack_ps
         );
     }
 
@@ -2633,7 +3174,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let report = FlowRunner::new()
@@ -2656,18 +3206,33 @@ mod tests {
         let source = netlist.add_node(NodeKind::CellInstance, "source");
         let sink = netlist.add_node(NodeKind::CellInstance, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
         config.placement.fixed_nodes = vec![
             FixedNodePlacement {
                 node: source,
-                point: Point { x_um: 0.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 0.0,
+                },
             },
             FixedNodePlacement {
                 node: sink,
-                point: Point { x_um: 120.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 120.0,
+                    y_um: 0.0,
+                },
             },
         ];
         config.routing.prefer_ptl_from_length_um = 60.0;
@@ -2683,7 +3248,9 @@ mod tests {
         assert!(report.optimized.timing_guardband_score >= 0.0);
         assert!(report.optimized.feasibility_score >= report.baseline.feasibility_score);
         assert!(report.optimization_applied);
-        assert!(report.optimized_prefer_ptl_from_length_um > report.baseline_prefer_ptl_from_length_um);
+        assert!(
+            report.optimized_prefer_ptl_from_length_um > report.baseline_prefer_ptl_from_length_um
+        );
     }
 
     #[test]
@@ -2692,18 +3259,33 @@ mod tests {
         let source = netlist.add_node(NodeKind::CellInstance, "source");
         let sink = netlist.add_node(NodeKind::CellInstance, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
         config.placement.fixed_nodes = vec![
             FixedNodePlacement {
                 node: source,
-                point: Point { x_um: 0.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 0.0,
+                },
             },
             FixedNodePlacement {
                 node: sink,
-                point: Point { x_um: 100.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 100.0,
+                    y_um: 0.0,
+                },
             },
         ];
         config.routing.prefer_ptl_from_length_um = 200.0;
@@ -2732,10 +3314,28 @@ mod tests {
         let gate = characterization_netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = characterization_netlist.add_node(NodeKind::Port, "sink");
         characterization_netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         characterization_netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let mut runner = FlowRunner::new();
@@ -2766,14 +3366,26 @@ mod tests {
         let consumer_sink = consumer_netlist.add_node(NodeKind::Dff, "consumer_sink");
         consumer_netlist
             .connect(
-                PinRef { node: consumer_source, port: 0 },
-                PinRef { node: macro_buf, port: 0 },
+                PinRef {
+                    node: consumer_source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
             )
             .expect("consumer source to macro_buf");
         consumer_netlist
             .connect(
-                PinRef { node: macro_buf, port: 0 },
-                PinRef { node: consumer_sink, port: 0 },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_sink,
+                    port: 0,
+                },
             )
             .expect("macro_buf to consumer sink");
 
@@ -2819,10 +3431,28 @@ mod tests {
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = netlist.add_node(NodeKind::Port, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let report = FlowRunner::new()
@@ -2854,10 +3484,28 @@ mod tests {
         let gate = characterization_netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = characterization_netlist.add_node(NodeKind::Port, "sink");
         characterization_netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         characterization_netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let mut runner = FlowRunner::new();
@@ -2883,19 +3531,35 @@ mod tests {
         let consumer_sink = consumer_netlist.add_node(NodeKind::Dff, "consumer_sink");
         consumer_netlist
             .connect(
-                PinRef { node: consumer_source, port: 0 },
-                PinRef { node: macro_buf, port: 0 },
+                PinRef {
+                    node: consumer_source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
             )
             .expect("consumer source to macro_buf");
         consumer_netlist
             .connect(
-                PinRef { node: macro_buf, port: 0 },
-                PinRef { node: consumer_sink, port: 0 },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_sink,
+                    port: 0,
+                },
             )
             .expect("macro_buf to consumer sink");
 
         let baseline_timing = FlowRunner::new()
-            .analyze_timing(&mut consumer_netlist.clone(), &base_pdk, &FlowConfig::default())
+            .analyze_timing(
+                &mut consumer_netlist.clone(),
+                &base_pdk,
+                &FlowConfig::default(),
+            )
             .expect("baseline timing should succeed");
         let characterized_timing = FlowRunner::new()
             .analyze_timing(
@@ -2905,7 +3569,11 @@ mod tests {
             )
             .expect("characterized timing should succeed");
         let baseline_bias = FlowRunner::new()
-            .analyze_ac_bias(&mut consumer_netlist.clone(), &base_pdk, &FlowConfig::default())
+            .analyze_ac_bias(
+                &mut consumer_netlist.clone(),
+                &base_pdk,
+                &FlowConfig::default(),
+            )
             .expect("baseline ac bias should succeed");
         let characterized_bias = FlowRunner::new()
             .analyze_ac_bias(
@@ -3019,38 +3687,58 @@ mod tests {
         let base = PlacementConfig::default();
         let base_routing = RoutingConfig::default();
         let base_pdk = Pdk::minimal("test");
-        let characterized_pdk = base_pdk.with_characterized_cell(rflux_tech::CharacterizedCellLibraryEntry {
-            cell: SfCell {
-                name: "macro_buf".to_string(),
-                kind: SfCellKind::Macro,
-                area_um2: 120.0,
-                pipeline_stages: 4,
-            },
-            timing: CellTimingModel {
-                kind: SfCellKind::Macro,
-                intrinsic_delay_ps: 20.0,
-                setup_ps: 5.0,
-                hold_ps: 4.0,
-            },
-            metadata: None,
-        });
+        let characterized_pdk =
+            base_pdk.with_characterized_cell(rflux_tech::CharacterizedCellLibraryEntry {
+                cell: SfCell {
+                    name: "macro_buf".to_string(),
+                    kind: SfCellKind::Macro,
+                    area_um2: 120.0,
+                    pipeline_stages: 4,
+                },
+                timing: CellTimingModel {
+                    kind: SfCellKind::Macro,
+                    intrinsic_delay_ps: 20.0,
+                    setup_ps: 5.0,
+                    hold_ps: 4.0,
+                },
+                metadata: None,
+            });
 
         let mut netlist = Netlist::new();
         let source = netlist.add_node(NodeKind::Port, "source");
         let macro_buf = netlist.add_node(NodeKind::MacroCell, "macro_buf");
         let sink = netlist.add_node(NodeKind::Port, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: macro_buf, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+            )
             .expect("source to macro_buf");
         netlist
-            .connect(PinRef { node: macro_buf, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("macro_buf to sink");
 
         let baseline_placement =
             placement_config_with_library_feedback(&netlist, &base_pdk, &base, 1.0);
         let characterized_placement =
             placement_config_with_library_feedback(&netlist, &characterized_pdk, &base, 1.0);
-        let baseline_routing = routing_config_with_library_feedback(&netlist, &base_pdk, &base_routing);
+        let baseline_routing =
+            routing_config_with_library_feedback(&netlist, &base_pdk, &base_routing);
         let characterized_routing =
             routing_config_with_library_feedback(&netlist, &characterized_pdk, &base_routing);
 
@@ -3094,6 +3782,7 @@ mod tests {
                 jtl_routes: 1,
                 ptl_routes: 0,
             },
+            effective_routing_config: RoutingConfig::default(),
             clock: ClockSummary {
                 clock_sinks: 1,
                 clock_buffers: 0,
@@ -3115,6 +3804,8 @@ mod tests {
             initial_hold_violations: 0,
             hold_fix_attempted: false,
             detour_feedback_applied: false,
+            route_delay_optimization_attempted: false,
+            route_delay_optimization_applied: false,
             hold_fix_applied: false,
         };
         let simulation = SimulationReport {
@@ -3151,10 +3842,28 @@ mod tests {
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = netlist.add_node(NodeKind::Port, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let report = compound_cell_characterization_from_artifacts(
@@ -3213,6 +3922,7 @@ mod tests {
                 jtl_routes: 1,
                 ptl_routes: 0,
             },
+            effective_routing_config: RoutingConfig::default(),
             clock: ClockSummary {
                 clock_sinks: 1,
                 clock_buffers: 0,
@@ -3234,6 +3944,8 @@ mod tests {
             initial_hold_violations: 0,
             hold_fix_attempted: false,
             detour_feedback_applied: false,
+            route_delay_optimization_attempted: false,
+            route_delay_optimization_applied: false,
             hold_fix_applied: false,
         };
         let simulation = SimulationReport {
@@ -3270,10 +3982,28 @@ mod tests {
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = netlist.add_node(NodeKind::Port, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let report = compound_cell_characterization_from_artifacts(
@@ -3339,6 +4069,7 @@ mod tests {
                 jtl_routes: 1,
                 ptl_routes: 0,
             },
+            effective_routing_config: RoutingConfig::default(),
             clock: ClockSummary {
                 clock_sinks: 1,
                 clock_buffers: 0,
@@ -3360,6 +4091,8 @@ mod tests {
             initial_hold_violations: 0,
             hold_fix_attempted: false,
             detour_feedback_applied: false,
+            route_delay_optimization_attempted: false,
+            route_delay_optimization_applied: false,
             hold_fix_applied: false,
         };
         let simulation = SimulationReport {
@@ -3396,10 +4129,28 @@ mod tests {
         let gate = characterization_netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = characterization_netlist.add_node(NodeKind::Port, "sink");
         characterization_netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         characterization_netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let characterization = compound_cell_characterization_from_artifacts(
@@ -3420,30 +4171,54 @@ mod tests {
         let consumer_sink = consumer.add_node(NodeKind::Dff, "consumer_sink");
         consumer
             .connect(
-                PinRef { node: consumer_source, port: 0 },
-                PinRef { node: consumer_macro, port: 0 },
+                PinRef {
+                    node: consumer_source,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_macro,
+                    port: 0,
+                },
             )
             .expect("consumer source to macro_buf");
         consumer
             .connect(
-                PinRef { node: consumer_macro, port: 0 },
-                PinRef { node: consumer_sink, port: 0 },
+                PinRef {
+                    node: consumer_macro,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_sink,
+                    port: 0,
+                },
             )
             .expect("macro_buf to consumer sink");
 
         let routing = RoutingReport {
             routes: vec![
                 NetRoute {
-                    from: PinRef { node: consumer_source, port: 0 },
-                    to: PinRef { node: consumer_macro, port: 0 },
+                    from: PinRef {
+                        node: consumer_source,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: consumer_macro,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
                 },
                 NetRoute {
-                    from: PinRef { node: consumer_macro, port: 0 },
-                    to: PinRef { node: consumer_sink, port: 0 },
+                    from: PinRef {
+                        node: consumer_macro,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: consumer_sink,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
@@ -3458,7 +4233,12 @@ mod tests {
         };
 
         let timing = StaticTimingAnalyzer::new()
-            .analyze(&consumer, &routing, &characterized_pdk, &TimingConfig::default())
+            .analyze(
+                &consumer,
+                &routing,
+                &characterized_pdk,
+                &TimingConfig::default(),
+            )
             .expect("timing should succeed");
         let macro_arc = timing
             .arcs
@@ -3471,31 +4251,32 @@ mod tests {
     #[test]
     fn characterized_arc_delay_table_feeds_sta_arc_assembly() {
         let base_pdk = Pdk::minimal("test");
-        let characterized_pdk = base_pdk.with_characterized_cell(rflux_tech::CharacterizedCellLibraryEntry {
-            cell: SfCell {
-                name: "macro_buf".to_string(),
-                kind: SfCellKind::Macro,
-                area_um2: 60.0,
-                pipeline_stages: 2,
-            },
-            timing: CellTimingModel {
-                kind: SfCellKind::Macro,
-                intrinsic_delay_ps: 14.0,
-                setup_ps: 8.0,
-                hold_ps: 5.0,
-            },
-            metadata: Some(rflux_tech::CharacterizationArtifactMetadata {
-                arc_delays: vec![rflux_tech::CharacterizationArcDelay {
-                    name: "macro_to_sink".to_string(),
-                    driver_cell_name: "macro_buf".to_string(),
-                    from_port: 0,
-                    sink_cell_name: "sink".to_string(),
-                    to_port: 0,
-                    delay_ps: 41.0,
-                }],
-                ..rflux_tech::CharacterizationArtifactMetadata::default()
-            }),
-        });
+        let characterized_pdk =
+            base_pdk.with_characterized_cell(rflux_tech::CharacterizedCellLibraryEntry {
+                cell: SfCell {
+                    name: "macro_buf".to_string(),
+                    kind: SfCellKind::Macro,
+                    area_um2: 60.0,
+                    pipeline_stages: 2,
+                },
+                timing: CellTimingModel {
+                    kind: SfCellKind::Macro,
+                    intrinsic_delay_ps: 14.0,
+                    setup_ps: 8.0,
+                    hold_ps: 5.0,
+                },
+                metadata: Some(rflux_tech::CharacterizationArtifactMetadata {
+                    arc_delays: vec![rflux_tech::CharacterizationArcDelay {
+                        name: "macro_to_sink".to_string(),
+                        driver_cell_name: "macro_buf".to_string(),
+                        from_port: 0,
+                        sink_cell_name: "sink".to_string(),
+                        to_port: 0,
+                        delay_ps: 41.0,
+                    }],
+                    ..rflux_tech::CharacterizationArtifactMetadata::default()
+                }),
+            });
 
         let mut consumer = Netlist::new();
         let mut runner = FlowRunner::new();
@@ -3504,14 +4285,26 @@ mod tests {
         let consumer_sink = consumer.add_node(NodeKind::Dff, "sink");
         consumer
             .connect(
-                PinRef { node: consumer_source, port: 0 },
-                PinRef { node: consumer_macro, port: 0 },
+                PinRef {
+                    node: consumer_source,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_macro,
+                    port: 0,
+                },
             )
             .expect("consumer source to macro_buf");
         consumer
             .connect(
-                PinRef { node: consumer_macro, port: 0 },
-                PinRef { node: consumer_sink, port: 0 },
+                PinRef {
+                    node: consumer_macro,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_sink,
+                    port: 0,
+                },
             )
             .expect("macro_buf to consumer sink");
 
@@ -3519,7 +4312,12 @@ mod tests {
             .compile_artifacts(&mut consumer, &characterized_pdk, &FlowConfig::default())
             .expect("artifacts should compile");
         let timing = StaticTimingAnalyzer::new()
-            .analyze(&consumer, &artifacts.routing, &characterized_pdk, &FlowConfig::default().timing)
+            .analyze(
+                &consumer,
+                &artifacts.routing,
+                &characterized_pdk,
+                &FlowConfig::default().timing,
+            )
             .expect("timing should succeed");
         let macro_arc = timing
             .arcs
@@ -3536,10 +4334,28 @@ mod tests {
         let gate = characterization_netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = characterization_netlist.add_node(NodeKind::Port, "sink");
         characterization_netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         characterization_netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let mut runner = FlowRunner::new();
@@ -3562,14 +4378,26 @@ mod tests {
         let consumer_sink = consumer.add_node(NodeKind::Dff, "consumer_sink");
         consumer
             .connect(
-                PinRef { node: consumer_source, port: 0 },
-                PinRef { node: macro_buf, port: 0 },
+                PinRef {
+                    node: consumer_source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
             )
             .expect("consumer source to macro_buf");
         consumer
             .connect(
-                PinRef { node: macro_buf, port: 0 },
-                PinRef { node: consumer_sink, port: 0 },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_sink,
+                    port: 0,
+                },
             )
             .expect("macro_buf to consumer sink");
 
@@ -3598,10 +4426,28 @@ mod tests {
         let gate = characterization_netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = characterization_netlist.add_node(NodeKind::Port, "sink");
         characterization_netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         characterization_netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let mut runner = FlowRunner::new();
@@ -3624,14 +4470,26 @@ mod tests {
         let consumer_sink = consumer_netlist.add_node(NodeKind::Dff, "consumer_sink");
         consumer_netlist
             .connect(
-                PinRef { node: consumer_source, port: 0 },
-                PinRef { node: macro_buf, port: 0 },
+                PinRef {
+                    node: consumer_source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
             )
             .expect("consumer source to macro_buf");
         consumer_netlist
             .connect(
-                PinRef { node: macro_buf, port: 0 },
-                PinRef { node: consumer_sink, port: 0 },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: consumer_sink,
+                    port: 0,
+                },
             )
             .expect("macro_buf to consumer sink");
 
@@ -3657,10 +4515,28 @@ mod tests {
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = netlist.add_node(NodeKind::Port, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("source to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let report = FlowRunner::new()
@@ -3676,11 +4552,16 @@ mod tests {
             .expect("characterization should succeed");
 
         assert!(report.generated_library_json.contains("metadata"));
-        assert!(report.generated_library_json.contains("sta_derived_delay_ps"));
+        assert!(report
+            .generated_library_json
+            .contains("sta_derived_delay_ps"));
         let entry: rflux_tech::CharacterizedCellLibraryEntry =
             serde_json::from_str(&report.generated_library_json).expect("artifact should parse");
         let metadata = entry.metadata.expect("metadata should be present");
-        assert_eq!(metadata.sta_derived_delay_ps, Some(report.derived_intrinsic_delay_ps));
+        assert_eq!(
+            metadata.sta_derived_delay_ps,
+            Some(report.derived_intrinsic_delay_ps)
+        );
     }
 
     #[test]
@@ -3689,18 +4570,33 @@ mod tests {
         let source = netlist.add_node(NodeKind::CellInstance, "source");
         let sink = netlist.add_node(NodeKind::CellInstance, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
         config.placement.fixed_nodes = vec![
             FixedNodePlacement {
                 node: source,
-                point: Point { x_um: 0.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 0.0,
+                },
             },
             FixedNodePlacement {
                 node: sink,
-                point: Point { x_um: 120.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 120.0,
+                    y_um: 0.0,
+                },
             },
         ];
         config.routing.prefer_ptl_from_length_um = 60.0;
@@ -3728,8 +4624,14 @@ mod tests {
 
         assert!(report.violation_count >= 3);
         assert!(report.manufacturing_hotspots > 0);
-        assert!(report.violations.iter().any(|violation| violation.category == "thermal"));
-        assert!(report.violations.iter().any(|violation| violation.category == "manufacturing"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| violation.category == "thermal"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| violation.category == "manufacturing"));
     }
 
     #[test]
@@ -3790,7 +4692,16 @@ mod tests {
         let input = netlist.add_node(NodeKind::Port, "input");
         let output = netlist.add_node(NodeKind::Port, "output");
         netlist
-            .connect(PinRef { node: input, port: 0 }, PinRef { node: output, port: 0 })
+            .connect(
+                PinRef {
+                    node: input,
+                    port: 0,
+                },
+                PinRef {
+                    node: output,
+                    port: 0,
+                },
+            )
             .expect("input to output");
 
         let mut config = FlowConfig::default();
@@ -3814,19 +4725,276 @@ mod tests {
     }
 
     #[test]
+    fn timing_closure_loop_recommends_route_delay_threshold_from_top_actions() {
+        let mut netlist = Netlist::new();
+        let sources = (0..4)
+            .map(|index| netlist.add_node(NodeKind::CellInstance, format!("source_{index}")))
+            .collect::<Vec<_>>();
+        let sinks = (0..4)
+            .map(|index| netlist.add_node(NodeKind::Dff, format!("sink_{index}")))
+            .collect::<Vec<_>>();
+        for (index, (source, sink)) in sources.iter().zip(sinks.iter()).enumerate() {
+            netlist
+                .connect(
+                    PinRef {
+                        node: *source,
+                        port: index as u16,
+                    },
+                    PinRef {
+                        node: *sink,
+                        port: 0,
+                    },
+                )
+                .expect("source to sink");
+        }
+
+        let mut config = FlowConfig::default();
+        config.routing.prefer_ptl_from_length_um = 60.0;
+        config.placement.fixed_nodes = vec![
+            FixedNodePlacement {
+                node: sources[0],
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 0.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sinks[0],
+                point: Point {
+                    x_um: 90.0,
+                    y_um: 0.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sources[1],
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 24.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sinks[1],
+                point: Point {
+                    x_um: 120.0,
+                    y_um: 24.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sources[2],
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 48.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sinks[2],
+                point: Point {
+                    x_um: 110.0,
+                    y_um: 48.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sources[3],
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 72.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sinks[3],
+                point: Point {
+                    x_um: 100.0,
+                    y_um: 72.0,
+                },
+            },
+        ];
+        config.timing.node_constraints = vec![
+            rflux_timing::NodeTimingConstraint {
+                node: sinks[0],
+                input_arrival_ps: None,
+                required_ps: Some(10.0),
+                clock_domain: None,
+            },
+            rflux_timing::NodeTimingConstraint {
+                node: sinks[1],
+                input_arrival_ps: None,
+                required_ps: Some(24.0),
+                clock_domain: None,
+            },
+            rflux_timing::NodeTimingConstraint {
+                node: sinks[2],
+                input_arrival_ps: None,
+                required_ps: Some(22.0),
+                clock_domain: None,
+            },
+            rflux_timing::NodeTimingConstraint {
+                node: sinks[3],
+                input_arrival_ps: None,
+                required_ps: Some(20.0),
+                clock_domain: None,
+            },
+        ];
+
+        let report = FlowRunner::new()
+            .compile_layout(&mut netlist, &Pdk::minimal("test"), &config)
+            .expect("flow should succeed");
+
+        assert_eq!(report.timing.setup_violations, 4);
+        assert_eq!(report.timing_closure.reduce_route_delay_actions, 3);
+        let reduce_route_delay_actions = report
+            .timing_closure
+            .actions
+            .iter()
+            .filter(|action| {
+                action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay
+            })
+            .collect::<Vec<_>>();
+        let representative_action = reduce_route_delay_actions[0];
+        let longest_top_action_length_um = reduce_route_delay_actions
+            .iter()
+            .map(|action| action.route_length_um)
+            .reduce(f64::max)
+            .expect("top reduce-route actions");
+        assert_eq!(
+            report.timing_closure_loop.estimated_route_length_um,
+            Some(representative_action.route_length_um)
+        );
+        assert_eq!(
+            report
+                .timing_closure_loop
+                .recommended_prefer_ptl_from_length_um,
+            Some(longest_top_action_length_um + 1.0)
+        );
+        assert!(
+            report
+                .timing_closure_loop
+                .reduce_route_delay_candidate_attempted
+        );
+        assert_eq!(
+            report.timing_closure_loop.candidate_route_length_um,
+            Some(representative_action.route_length_um)
+        );
+    }
+
+    #[test]
+    fn applies_route_delay_optimization_when_candidate_improves_setup() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::CellInstance, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink");
+
+        let mut pdk = Pdk::minimal("route-delay-optimization");
+        pdk.interconnect_timing = vec![
+            InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 4.0,
+                    },
+                    TimingPoint {
+                        length_um: 120.0,
+                        delay_ps: 10.0,
+                    },
+                ],
+            },
+            InterconnectTimingModel {
+                kind: InterconnectKind::Ptl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 4.0,
+                    },
+                    TimingPoint {
+                        length_um: 120.0,
+                        delay_ps: 40.0,
+                    },
+                ],
+            },
+        ];
+
+        let mut config = FlowConfig::default();
+        config.routing.prefer_ptl_from_length_um = 60.0;
+        config.placement.fixed_nodes = vec![
+            FixedNodePlacement {
+                node: source,
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 0.0,
+                },
+            },
+            FixedNodePlacement {
+                node: sink,
+                point: Point {
+                    x_um: 100.0,
+                    y_um: 0.0,
+                },
+            },
+        ];
+        config.timing.node_constraints = vec![rflux_timing::NodeTimingConstraint {
+            node: sink,
+            input_arrival_ps: None,
+            required_ps: Some(30.0),
+            clock_domain: None,
+        }];
+
+        let report = FlowRunner::new()
+            .compile_layout(&mut netlist, &pdk, &config)
+            .expect("flow should succeed");
+
+        assert!(
+            report
+                .timing_closure_loop
+                .route_delay_optimization_attempted
+        );
+        assert!(report.timing_closure_loop.route_delay_optimization_applied);
+        assert_eq!(report.routing.ptl_routes, 0);
+        assert_eq!(report.routing.jtl_routes, 1);
+        assert_eq!(report.routing.effective_prefer_ptl_from_length_um, 121.0);
+        assert_eq!(report.routing.effective_detour_margin_um, 0.0);
+        assert!(report.timing.setup_violations < 1);
+        assert_eq!(report.timing_closure.status, "closed");
+        assert_eq!(report.timing_closure_loop.status, "closed");
+    }
+
+    #[test]
     fn applies_hold_fix_reroute_when_jtl_path_is_too_short() {
         let mut netlist = Netlist::new();
         let source = netlist.add_node(NodeKind::CellInstance, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let mut config = FlowConfig::default();
         config.timing.clock_period_ps = 120.0;
         config.min_hold_jtl_length_um = 60.0;
         let mut pdk = Pdk::minimal("test");
-        if let Some(model) = pdk.cell_timing.iter_mut().find(|model| model.kind == rflux_tech::SfCellKind::Dff) {
+        if let Some(model) = pdk
+            .cell_timing
+            .iter_mut()
+            .find(|model| model.kind == rflux_tech::SfCellKind::Dff)
+        {
             model.hold_ps = 20.0;
         }
 
@@ -3857,7 +5025,13 @@ mod tests {
         let a = netlist.add_node(NodeKind::Port, "a");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: a, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("a to sink");
 
         let report = FlowRunner::new()
@@ -3869,23 +5043,117 @@ mod tests {
     }
 
     #[test]
+    fn analyzes_timing_across_pdk_corners() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
+            .expect("source to gate");
+        netlist
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("gate to sink");
+
+        let mut pdk = Pdk::minimal("corner-signoff").with_active_timing_corner("slow");
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: Some("ss".to_string()),
+            voltage_v: Some(2.4),
+            temperature_k: Some(4.2),
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 28.0,
+                setup_ps: 8.0,
+                hold_ps: 4.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 8.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 24.0,
+                    },
+                ],
+            }],
+        });
+
+        let report = FlowRunner::new()
+            .analyze_timing_corners(&mut netlist, &pdk, &FlowConfig::default())
+            .expect("multi-corner timing analysis should succeed");
+
+        assert_eq!(report.active_timing_corner.as_deref(), Some("slow"));
+        assert_eq!(report.corner_count, 2);
+        assert_eq!(report.corners[0].corner_name, "default");
+        assert!(report.corners[0].is_default_corner);
+        assert!(!report.corners[0].is_active_corner);
+        assert_eq!(report.corners[1].corner_name, "slow");
+        assert!(!report.corners[1].is_default_corner);
+        assert!(report.corners[1].is_active_corner);
+        assert_eq!(report.worst_setup_corner, "slow");
+        assert_eq!(report.worst_critical_path_corner, "slow");
+        assert!(
+            report.corners[1].critical_path_delay_ps > report.corners[0].critical_path_delay_ps
+        );
+        assert!(report.corners[1].worst_setup_slack_ps < report.corners[0].worst_setup_slack_ps);
+    }
+
+    #[test]
     fn verifies_ptl_macro_boundary_and_event_simulation() {
         let mut netlist = Netlist::new();
         let macro_node = netlist.add_node(NodeKind::MacroCell, "macro");
         let sink = netlist.add_node(NodeKind::CellInstance, "sink");
         netlist
-            .connect(PinRef { node: macro_node, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("macro to sink");
 
         let mut config = FlowConfig::default();
         config.placement.fixed_nodes = vec![
             FixedNodePlacement {
                 node: macro_node,
-                point: Point { x_um: 0.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 0.0,
+                    y_um: 0.0,
+                },
             },
             FixedNodePlacement {
                 node: sink,
-                point: Point { x_um: 120.0, y_um: 0.0 },
+                point: Point {
+                    x_um: 120.0,
+                    y_um: 0.0,
+                },
             },
         ];
         config.routing.prefer_ptl_from_length_um = 60.0;
@@ -3916,7 +5184,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::CellInstance, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let artifacts = FlowRunner::new()
@@ -3938,7 +5215,16 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "a");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let report = FlowRunner::new()
@@ -3953,14 +5239,23 @@ mod tests {
             )
             .expect("verification should succeed");
 
-        assert_eq!(report.simulation.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.simulation.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.simulation.external_result.as_deref(),
             Some("internal_transient_linear_rc")
         );
         assert!(report.simulation.simulated_events > 0);
         assert!(report.simulation.waveform_path.is_some());
-        assert!(report.simulation.reported_worst_delay_ps.unwrap_or_default() > 0.0);
+        assert!(
+            report
+                .simulation
+                .reported_worst_delay_ps
+                .unwrap_or_default()
+                > 0.0
+        );
     }
 
     #[test]
@@ -4021,18 +5316,72 @@ mod tests {
         assert_eq!(delay_details.len(), 1);
         assert_eq!(delay_details[0].name, "ptl_link");
         assert_eq!(delay_details[0].delay_ps, 11.25);
-        assert_eq!(delay_details[0].from_ref.as_ref().map(|endpoint| endpoint.raw.as_str()), Some("n0:0"));
-        assert_eq!(delay_details[0].from_ref.as_ref().map(|endpoint| endpoint.node.as_str()), Some("n0"));
-        assert_eq!(delay_details[0].from_ref.as_ref().and_then(|endpoint| endpoint.port), Some(0));
-        assert_eq!(delay_details[0].to_ref.as_ref().map(|endpoint| endpoint.raw.as_str()), Some("n1:0"));
-        assert_eq!(delay_details[0].to_ref.as_ref().map(|endpoint| endpoint.node.as_str()), Some("n1"));
-        assert_eq!(delay_details[0].to_ref.as_ref().and_then(|endpoint| endpoint.port), Some(0));
+        assert_eq!(
+            delay_details[0]
+                .from_ref
+                .as_ref()
+                .map(|endpoint| endpoint.raw.as_str()),
+            Some("n0:0")
+        );
+        assert_eq!(
+            delay_details[0]
+                .from_ref
+                .as_ref()
+                .map(|endpoint| endpoint.node.as_str()),
+            Some("n0")
+        );
+        assert_eq!(
+            delay_details[0]
+                .from_ref
+                .as_ref()
+                .and_then(|endpoint| endpoint.port),
+            Some(0)
+        );
+        assert_eq!(
+            delay_details[0]
+                .to_ref
+                .as_ref()
+                .map(|endpoint| endpoint.raw.as_str()),
+            Some("n1:0")
+        );
+        assert_eq!(
+            delay_details[0]
+                .to_ref
+                .as_ref()
+                .map(|endpoint| endpoint.node.as_str()),
+            Some("n1")
+        );
+        assert_eq!(
+            delay_details[0]
+                .to_ref
+                .as_ref()
+                .and_then(|endpoint| endpoint.port),
+            Some(0)
+        );
         assert!(measurement_details.is_empty());
         assert_eq!(violation_details.len(), 1);
         assert_eq!(violation_details[0].kind, "setup");
         assert_eq!(violation_details[0].detail, "crossing_1_2");
-        assert_eq!(violation_details[0].at_ref.as_ref().map(|endpoint| endpoint.raw.as_str()), Some("n1:0"));
-        assert_eq!(violation_details[0].at_ref.as_ref().map(|endpoint| endpoint.node.as_str()), Some("n1"));
-        assert_eq!(violation_details[0].at_ref.as_ref().and_then(|endpoint| endpoint.port), Some(0));
+        assert_eq!(
+            violation_details[0]
+                .at_ref
+                .as_ref()
+                .map(|endpoint| endpoint.raw.as_str()),
+            Some("n1:0")
+        );
+        assert_eq!(
+            violation_details[0]
+                .at_ref
+                .as_ref()
+                .map(|endpoint| endpoint.node.as_str()),
+            Some("n1")
+        );
+        assert_eq!(
+            violation_details[0]
+                .at_ref
+                .as_ref()
+                .and_then(|endpoint| endpoint.port),
+            Some(0)
+        );
     }
 }

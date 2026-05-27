@@ -26,7 +26,10 @@ pub struct Placement {
 
 impl Placement {
     pub fn point_of(&self, node: NodeId) -> Option<Point> {
-        self.nodes.iter().find(|placed| placed.node == node).map(|placed| placed.point)
+        self.nodes
+            .iter()
+            .find(|placed| placed.node == node)
+            .map(|placed| placed.point)
     }
 }
 
@@ -83,13 +86,21 @@ impl LevelizedPlacer {
         Self
     }
 
-    pub fn place(&self, netlist: &Netlist, config: &PlacementConfig) -> Result<Placement, PlaceError> {
+    pub fn place(
+        &self,
+        netlist: &Netlist,
+        config: &PlacementConfig,
+    ) -> Result<Placement, PlaceError> {
         let levels = compute_node_levels(netlist)?;
         let (indegree, outdegree) = degree_maps(netlist);
         let output_port_level = netlist
             .nodes()
             .iter()
-            .filter(|node| !(matches!(node.kind, NodeKind::Port) && indegree[node.id.0] > 0 && outdegree[node.id.0] == 0))
+            .filter(|node| {
+                !(matches!(node.kind, NodeKind::Port)
+                    && indegree[node.id.0] > 0
+                    && outdegree[node.id.0] == 0)
+            })
             .map(|node| levels[node.id.0])
             .max()
             .unwrap_or(0)
@@ -116,29 +127,30 @@ impl LevelizedPlacer {
         let mut height_um = 0.0_f64;
 
         for node in netlist.nodes() {
-            let (level, slot) = if let Some((fixed_level, fixed_slot)) = find_fixed_slot(config, node.id) {
-                release_fixed_reservation(&mut fixed_reservations, fixed_level, fixed_slot);
-                let slot = legalize_fixed_slot(&mut occupied_slots, fixed_level, fixed_slot);
-                (fixed_level, slot)
-            } else {
-                let min_level = default_level_for_node(
-                    node.kind.clone(),
-                    node.id,
-                    &levels,
-                    &indegree,
-                    &outdegree,
-                    output_port_level,
-                );
-                let level = legalize_level_for_congestion(config, &nodes_per_level, min_level);
-                ensure_level_capacity(&mut next_slot_per_level, level);
-                let slot = next_available_slot(
-                    &fixed_reservations,
-                    &mut occupied_slots,
-                    &mut next_slot_per_level,
-                    level,
-                );
-                (level, slot)
-            };
+            let (level, slot) =
+                if let Some((fixed_level, fixed_slot)) = find_fixed_slot(config, node.id) {
+                    release_fixed_reservation(&mut fixed_reservations, fixed_level, fixed_slot);
+                    let slot = legalize_fixed_slot(&mut occupied_slots, fixed_level, fixed_slot);
+                    (fixed_level, slot)
+                } else {
+                    let min_level = default_level_for_node(
+                        node.kind.clone(),
+                        node.id,
+                        &levels,
+                        &indegree,
+                        &outdegree,
+                        output_port_level,
+                    );
+                    let level = legalize_level_for_congestion(config, &nodes_per_level, min_level);
+                    ensure_level_capacity(&mut next_slot_per_level, level);
+                    let slot = next_available_slot(
+                        &fixed_reservations,
+                        &mut occupied_slots,
+                        &mut next_slot_per_level,
+                        level,
+                    );
+                    (level, slot)
+                };
             let point = Point {
                 x_um: level as f64 * config.x_pitch_um,
                 y_um: slot as f64 * config.y_pitch_um,
@@ -159,8 +171,16 @@ impl LevelizedPlacer {
 
         Ok(Placement {
             nodes,
-            width_um: if netlist.node_count() == 0 { 0.0 } else { width_um + config.x_pitch_um },
-            height_um: if netlist.node_count() == 0 { 0.0 } else { height_um + config.y_pitch_um },
+            width_um: if netlist.node_count() == 0 {
+                0.0
+            } else {
+                width_um + config.x_pitch_um
+            },
+            height_um: if netlist.node_count() == 0 {
+                0.0
+            } else {
+                height_um + config.y_pitch_um
+            },
         })
     }
 }
@@ -170,7 +190,11 @@ fn fixed_slot_map(config: &PlacementConfig) -> BTreeMap<usize, BTreeMap<usize, u
     for fixed in &config.fixed_nodes {
         let level = snap_to_grid(fixed.point.x_um, config.x_pitch_um);
         let slot = snap_to_grid(fixed.point.y_um, config.y_pitch_um);
-        *reserved_slots.entry(level).or_default().entry(slot).or_default() += 1;
+        *reserved_slots
+            .entry(level)
+            .or_default()
+            .entry(slot)
+            .or_default() += 1;
     }
     reserved_slots
 }
@@ -217,18 +241,26 @@ fn reserve_region_slots(
 
     for level in min_level..=max_level {
         for slot in min_slot..=max_slot {
-            *reserved_slots.entry(level).or_default().entry(slot).or_default() += 1;
+            *reserved_slots
+                .entry(level)
+                .or_default()
+                .entry(slot)
+                .or_default() += 1;
         }
     }
 }
 
 fn find_fixed_slot(config: &PlacementConfig, node: NodeId) -> Option<(usize, usize)> {
-    config.fixed_nodes.iter().find(|fixed| fixed.node == node).map(|fixed| {
-        (
-            snap_to_grid(fixed.point.x_um, config.x_pitch_um),
-            snap_to_grid(fixed.point.y_um, config.y_pitch_um),
-        )
-    })
+    config
+        .fixed_nodes
+        .iter()
+        .find(|fixed| fixed.node == node)
+        .map(|fixed| {
+            (
+                snap_to_grid(fixed.point.x_um, config.x_pitch_um),
+                snap_to_grid(fixed.point.y_um, config.y_pitch_um),
+            )
+        })
 }
 
 fn next_available_slot(
@@ -238,7 +270,9 @@ fn next_available_slot(
     level: usize,
 ) -> usize {
     let mut slot = next_slot_per_level[level];
-    while occupied_slots.get(&level).is_some_and(|slots| slots.contains(&slot))
+    while occupied_slots
+        .get(&level)
+        .is_some_and(|slots| slots.contains(&slot))
         || fixed_reservations
             .get(&level)
             .and_then(|slots| slots.get(&slot))
@@ -259,7 +293,10 @@ fn legalize_fixed_slot(
     requested_slot: usize,
 ) -> usize {
     let mut slot = requested_slot;
-    while occupied_slots.get(&level).is_some_and(|slots| slots.contains(&slot)) {
+    while occupied_slots
+        .get(&level)
+        .is_some_and(|slots| slots.contains(&slot))
+    {
         slot += 1;
     }
     occupied_slots.entry(level).or_default().insert(slot);
@@ -394,10 +431,16 @@ mod tests {
         let b = netlist.add_node(NodeKind::CellInstance, "b");
         let c = netlist.add_node(NodeKind::CellInstance, "c");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
-        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 }).expect("b to c");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 })
+            .expect("b to c");
 
-        let placement = placer.place(&netlist, &PlacementConfig::default()).expect("placement should succeed");
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement should succeed");
 
         assert_eq!(placement.point_of(a).expect("a point").x_um, 0.0);
         assert_eq!(placement.point_of(b).expect("b point").x_um, 40.0);
@@ -411,10 +454,16 @@ mod tests {
         let a = netlist.add_node(NodeKind::CellInstance, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
 
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
-        netlist.connect(PinRef { node: b, port: 1 }, PinRef { node: a, port: 1 }).expect("b to a");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: a, port: 1 })
+            .expect("b to a");
 
-        let err = placer.place(&netlist, &PlacementConfig::default()).expect_err("cycle should fail");
+        let err = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect_err("cycle should fail");
         assert_eq!(err, PlaceError::Cycle);
     }
 
@@ -431,7 +480,10 @@ mod tests {
                 &PlacementConfig {
                     fixed_nodes: vec![FixedNodePlacement {
                         node: b,
-                        point: Point { x_um: 120.0, y_um: 48.0 },
+                        point: Point {
+                            x_um: 120.0,
+                            y_um: 48.0,
+                        },
                     }],
                     blocked_regions: Vec::new(),
                     ..PlacementConfig::default()
@@ -439,8 +491,20 @@ mod tests {
             )
             .expect("placement should succeed");
 
-        assert_eq!(placement.point_of(a).expect("a point"), Point { x_um: 0.0, y_um: 0.0 });
-        assert_eq!(placement.point_of(b).expect("b point"), Point { x_um: 120.0, y_um: 48.0 });
+        assert_eq!(
+            placement.point_of(a).expect("a point"),
+            Point {
+                x_um: 0.0,
+                y_um: 0.0
+            }
+        );
+        assert_eq!(
+            placement.point_of(b).expect("b point"),
+            Point {
+                x_um: 120.0,
+                y_um: 48.0
+            }
+        );
     }
 
     #[test]
@@ -457,11 +521,17 @@ mod tests {
                     fixed_nodes: vec![
                         FixedNodePlacement {
                             node: a,
-                            point: Point { x_um: 80.0, y_um: 24.0 },
+                            point: Point {
+                                x_um: 80.0,
+                                y_um: 24.0,
+                            },
                         },
                         FixedNodePlacement {
                             node: b,
-                            point: Point { x_um: 80.0, y_um: 24.0 },
+                            point: Point {
+                                x_um: 80.0,
+                                y_um: 24.0,
+                            },
                         },
                     ],
                     blocked_regions: Vec::new(),
@@ -470,8 +540,20 @@ mod tests {
             )
             .expect("placement should succeed");
 
-        assert_eq!(placement.point_of(a).expect("a point"), Point { x_um: 80.0, y_um: 24.0 });
-        assert_eq!(placement.point_of(b).expect("b point"), Point { x_um: 80.0, y_um: 48.0 });
+        assert_eq!(
+            placement.point_of(a).expect("a point"),
+            Point {
+                x_um: 80.0,
+                y_um: 24.0
+            }
+        );
+        assert_eq!(
+            placement.point_of(b).expect("b point"),
+            Point {
+                x_um: 80.0,
+                y_um: 48.0
+            }
+        );
     }
 
     #[test]
@@ -483,13 +565,33 @@ mod tests {
         let output = netlist.add_node(NodeKind::Port, "output");
 
         netlist
-            .connect(PinRef { node: input, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: input,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("input to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: output, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: output,
+                    port: 0,
+                },
+            )
             .expect("gate to output");
 
-        let placement = placer.place(&netlist, &PlacementConfig::default()).expect("placement should succeed");
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement should succeed");
 
         assert_eq!(placement.point_of(input).expect("input point").x_um, 0.0);
         assert_eq!(placement.point_of(gate).expect("gate point").x_um, 40.0);
@@ -505,10 +607,28 @@ mod tests {
         let output = netlist.add_node(NodeKind::Port, "output");
 
         netlist
-            .connect(PinRef { node: input, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: input,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("input to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: output, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: output,
+                    port: 0,
+                },
+            )
             .expect("gate to output");
 
         let placement = placer
@@ -517,7 +637,10 @@ mod tests {
                 &PlacementConfig {
                     fixed_nodes: vec![FixedNodePlacement {
                         node: output,
-                        point: Point { x_um: 120.0, y_um: 48.0 },
+                        point: Point {
+                            x_um: 120.0,
+                            y_um: 48.0,
+                        },
                     }],
                     blocked_regions: Vec::new(),
                     ..PlacementConfig::default()
@@ -525,7 +648,13 @@ mod tests {
             )
             .expect("placement should succeed");
 
-        assert_eq!(placement.point_of(output).expect("output point"), Point { x_um: 120.0, y_um: 48.0 });
+        assert_eq!(
+            placement.point_of(output).expect("output point"),
+            Point {
+                x_um: 120.0,
+                y_um: 48.0
+            }
+        );
         assert_eq!(placement.width_um, 160.0);
     }
 
@@ -551,8 +680,20 @@ mod tests {
             )
             .expect("placement should succeed");
 
-        assert_eq!(placement.point_of(a).expect("a point"), Point { x_um: 0.0, y_um: 48.0 });
-        assert_eq!(placement.point_of(b).expect("b point"), Point { x_um: 0.0, y_um: 72.0 });
+        assert_eq!(
+            placement.point_of(a).expect("a point"),
+            Point {
+                x_um: 0.0,
+                y_um: 48.0
+            }
+        );
+        assert_eq!(
+            placement.point_of(b).expect("b point"),
+            Point {
+                x_um: 0.0,
+                y_um: 72.0
+            }
+        );
     }
 
     #[test]
@@ -573,8 +714,20 @@ mod tests {
             )
             .expect("placement should succeed");
 
-        assert_eq!(placement.point_of(macro_node).expect("macro point"), Point { x_um: 0.0, y_um: 0.0 });
-        assert_eq!(placement.point_of(follower).expect("follower point"), Point { x_um: 0.0, y_um: 48.0 });
+        assert_eq!(
+            placement.point_of(macro_node).expect("macro point"),
+            Point {
+                x_um: 0.0,
+                y_um: 0.0
+            }
+        );
+        assert_eq!(
+            placement.point_of(follower).expect("follower point"),
+            Point {
+                x_um: 0.0,
+                y_um: 48.0
+            }
+        );
     }
 
     #[test]
@@ -613,7 +766,10 @@ mod tests {
                 &PlacementConfig {
                     fixed_nodes: vec![FixedNodePlacement {
                         node: a,
-                        point: Point { x_um: 0.0, y_um: 0.0 },
+                        point: Point {
+                            x_um: 0.0,
+                            y_um: 0.0,
+                        },
                     }],
                     blocked_regions: vec![BlockedRegion {
                         min_x_um: 0.0,
@@ -626,7 +782,19 @@ mod tests {
             )
             .expect("placement should succeed");
 
-        assert_eq!(placement.point_of(a).expect("a point"), Point { x_um: 0.0, y_um: 0.0 });
-        assert_eq!(placement.point_of(b).expect("b point"), Point { x_um: 0.0, y_um: 48.0 });
+        assert_eq!(
+            placement.point_of(a).expect("a point"),
+            Point {
+                x_um: 0.0,
+                y_um: 0.0
+            }
+        );
+        assert_eq!(
+            placement.point_of(b).expect("b point"),
+            Point {
+                x_um: 0.0,
+                y_um: 48.0
+            }
+        );
     }
 }

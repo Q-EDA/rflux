@@ -2,9 +2,7 @@ use std::collections::VecDeque;
 
 use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
 use rflux_route::{RouteMode, RoutingReport};
-use rflux_tech::{
-    CharacterizationArtifactMetadata, InterconnectKind, Pdk, SfCell, SfCellKind,
-};
+use rflux_tech::{CharacterizationArtifactMetadata, InterconnectKind, Pdk, SfCell, SfCellKind};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -276,7 +274,10 @@ impl StaticTimingAnalyzer {
         for &node_index in topo.iter().rev() {
             for &edge_index in &adjacency[node_index] {
                 let (from, to) = edges[edge_index];
-                if matches!(crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind), Some(CrossingConstraintKind::FalsePath)) {
+                if matches!(
+                    crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind),
+                    Some(CrossingConstraintKind::FalsePath)
+                ) {
                     continue;
                 }
                 let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to)?;
@@ -299,10 +300,12 @@ impl StaticTimingAnalyzer {
         let mut false_path_arcs = 0usize;
 
         for (from, to) in edges {
-            let (cell_delay_ps, wire_delay_ps) = arc_components_ps(netlist, routing, pdk, from, to)?;
+            let (cell_delay_ps, wire_delay_ps) =
+                arc_components_ps(netlist, routing, pdk, from, to)?;
             let sink_arrival = arrival[from.node.0] + cell_delay_ps + wire_delay_ps;
             let setup_requirement = setup_time_ps(netlist, pdk, to.node.0)?;
-            let base_required_ps = required[to.node.0].min(endpoint_required_ps(config, Some(to), to.node));
+            let base_required_ps =
+                required[to.node.0].min(endpoint_required_ps(config, Some(to), to.node));
             let is_false_path = matches!(
                 crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind),
                 Some(CrossingConstraintKind::FalsePath)
@@ -458,8 +461,9 @@ impl StaticTimingAnalyzer {
                 let arc = &report.arcs[edge_index];
                 let sigma = statistical_arc_sigma_ps(netlist, pdk, arc, statistical_config);
                 let candidate_arrival_ps = arc.arrival_ps;
-                let candidate_local_setup_sigma_ps =
-                    (path_local_setup_sigma[from.node.0].powi(2) + sigma.local_setup_sigma_ps.powi(2)).sqrt();
+                let candidate_local_setup_sigma_ps = (path_local_setup_sigma[from.node.0].powi(2)
+                    + sigma.local_setup_sigma_ps.powi(2))
+                .sqrt();
                 let candidate_global_setup_sigma_ps =
                     path_global_setup_sigma[from.node.0] + sigma.global_setup_sigma_ps;
                 let candidate_setup_sigma_ps = (candidate_local_setup_sigma_ps.powi(2)
@@ -475,7 +479,7 @@ impl StaticTimingAnalyzer {
                     && candidate_setup_sigma_ps
                         > (path_local_setup_sigma[to.node.0].powi(2)
                             + path_global_setup_sigma[to.node.0].powi(2))
-                            .sqrt()
+                        .sqrt()
                 {
                     path_local_setup_sigma[to.node.0] = candidate_local_setup_sigma_ps;
                     path_global_setup_sigma[to.node.0] = candidate_global_setup_sigma_ps;
@@ -487,12 +491,15 @@ impl StaticTimingAnalyzer {
             let sigma = statistical_arc_sigma_ps(netlist, pdk, arc, statistical_config);
             let local_total_setup_sigma_ps =
                 (sigma.local_setup_sigma_ps.powi(2) + sigma.global_setup_sigma_ps.powi(2)).sqrt();
-            let cross_domain_sigma_ps = crossing_uncertainty_sigma_ps(config, statistical_config, arc.from, arc.to);
-            let setup_sigma_ps = ((arc_setup_sigma[edge_index].max(local_total_setup_sigma_ps)).powi(2)
+            let cross_domain_sigma_ps =
+                crossing_uncertainty_sigma_ps(config, statistical_config, arc.from, arc.to);
+            let setup_sigma_ps = ((arc_setup_sigma[edge_index].max(local_total_setup_sigma_ps))
+                .powi(2)
                 + statistical_config.clock_uncertainty_sigma_ps.powi(2)
                 + cross_domain_sigma_ps.powi(2))
             .sqrt();
-            let hold_sigma_ps = ((sigma.local_hold_sigma_ps.powi(2) + sigma.global_hold_sigma_ps.powi(2))
+            let hold_sigma_ps = ((sigma.local_hold_sigma_ps.powi(2)
+                + sigma.global_hold_sigma_ps.powi(2))
                 + statistical_config.clock_uncertainty_sigma_ps.powi(2)
                 + cross_domain_sigma_ps.powi(2))
             .sqrt();
@@ -511,8 +518,10 @@ impl StaticTimingAnalyzer {
                 hold_risk_violations += 1;
             }
 
-            worst_pessimistic_setup_slack_ps = worst_pessimistic_setup_slack_ps.min(pessimistic_setup_slack_ps);
-            worst_pessimistic_hold_slack_ps = worst_pessimistic_hold_slack_ps.min(pessimistic_hold_slack_ps);
+            worst_pessimistic_setup_slack_ps =
+                worst_pessimistic_setup_slack_ps.min(pessimistic_setup_slack_ps);
+            worst_pessimistic_hold_slack_ps =
+                worst_pessimistic_hold_slack_ps.min(pessimistic_hold_slack_ps);
             arcs.push(StatisticalTimingArcReport {
                 from: arc.from,
                 to: arc.to,
@@ -608,9 +617,11 @@ fn statistical_arc_sigma_ps_with_context(
     }
     let route_sensitivity = statistical_route_sensitivity(arc.route_mode, arc.route_length_um);
     let cell_sigma_ratio = statistical_config.cell_delay_sigma_ratio * cell_sensitivity;
-    let global_cell_sigma_ratio = statistical_config.global_cell_delay_sigma_ratio * cell_sensitivity;
+    let global_cell_sigma_ratio =
+        statistical_config.global_cell_delay_sigma_ratio * cell_sensitivity;
     let wire_sigma_ratio = statistical_config.wire_delay_sigma_ratio * route_sensitivity;
-    let global_wire_sigma_ratio = statistical_config.global_wire_delay_sigma_ratio * route_sensitivity;
+    let global_wire_sigma_ratio =
+        statistical_config.global_wire_delay_sigma_ratio * route_sensitivity;
     let local_setup_sigma_ps = ((arc.cell_delay_ps * cell_sigma_ratio).powi(2)
         + (arc.wire_delay_ps * wire_sigma_ratio).powi(2))
     .sqrt();
@@ -727,14 +738,18 @@ fn route_length_um(routing: &RoutingReport, from: PinRef, to: PinRef) -> Result<
         .ok_or(TimingError::MissingRoute(from, to))
 }
 
-    fn route_mode_for_arc(routing: &RoutingReport, from: PinRef, to: PinRef) -> Result<RouteMode, TimingError> {
-        routing
+fn route_mode_for_arc(
+    routing: &RoutingReport,
+    from: PinRef,
+    to: PinRef,
+) -> Result<RouteMode, TimingError> {
+    routing
         .routes
         .iter()
         .find(|route| route.from == from && route.to == to)
         .map(|route| route.mode)
         .ok_or(TimingError::MissingRoute(from, to))
-    }
+}
 
 fn setup_time_ps(netlist: &Netlist, pdk: &Pdk, node_index: usize) -> Result<f64, TimingError> {
     let node = &netlist.nodes()[node_index];
@@ -830,7 +845,9 @@ fn crossing_constraint_for_arc(
     config
         .crossing_constraints
         .iter()
-        .find(|constraint| constraint.from_domain == from_domain && constraint.to_domain == to_domain)
+        .find(|constraint| {
+            constraint.from_domain == from_domain && constraint.to_domain == to_domain
+        })
         .copied()
 }
 
@@ -854,13 +871,16 @@ fn crossing_uncertainty_sigma_ps(
         return 0.0;
     }
 
-    let kind_sigma_ps = match crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind) {
-        Some(CrossingConstraintKind::MaxDelay) => statistical_config.max_delay_cross_domain_uncertainty_sigma_ps,
-        Some(CrossingConstraintKind::Multicycle) => {
-            statistical_config.multicycle_cross_domain_uncertainty_sigma_ps
-        }
-        _ => 0.0,
-    };
+    let kind_sigma_ps =
+        match crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind) {
+            Some(CrossingConstraintKind::MaxDelay) => {
+                statistical_config.max_delay_cross_domain_uncertainty_sigma_ps
+            }
+            Some(CrossingConstraintKind::Multicycle) => {
+                statistical_config.multicycle_cross_domain_uncertainty_sigma_ps
+            }
+            _ => 0.0,
+        };
 
     (statistical_config.cross_domain_uncertainty_sigma_ps.powi(2) + kind_sigma_ps.powi(2)).sqrt()
 }
@@ -919,14 +939,18 @@ fn apply_crossing_constraint(
     sink_arrival_ps: f64,
 ) -> (f64, f64) {
     let Some(constraint) = crossing_constraint_for_arc(config, from, to) else {
-        return (base_required_ps, base_required_ps - sink_arrival_ps - setup_requirement_ps);
+        return (
+            base_required_ps,
+            base_required_ps - sink_arrival_ps - setup_requirement_ps,
+        );
     };
 
     match constraint.kind {
         CrossingConstraintKind::FalsePath => (f64::INFINITY, f64::INFINITY),
         CrossingConstraintKind::MaxDelay => {
             let max_delay_ps = constraint.value_ps.unwrap_or(config.clock_period_ps);
-            let arc_required_ps = base_required_ps.min(source_arrival_ps + max_delay_ps + setup_requirement_ps);
+            let arc_required_ps =
+                base_required_ps.min(source_arrival_ps + max_delay_ps + setup_requirement_ps);
             (arc_required_ps, max_delay_ps - arc_delay_ps)
         }
         CrossingConstraintKind::Multicycle => {
@@ -934,9 +958,13 @@ fn apply_crossing_constraint(
             let period_ps = domain_of_pin(config, to)
                 .and_then(|domain_id| domain_period_ps(config, domain_id))
                 .unwrap_or(config.clock_period_ps);
-            let multicycle_required_ps = source_arrival_ps + cycles * period_ps + setup_requirement_ps;
+            let multicycle_required_ps =
+                source_arrival_ps + cycles * period_ps + setup_requirement_ps;
             let arc_required_ps = base_required_ps.max(multicycle_required_ps);
-            (arc_required_ps, arc_required_ps - sink_arrival_ps - setup_requirement_ps)
+            (
+                arc_required_ps,
+                arc_required_ps - sink_arrival_ps - setup_requirement_ps,
+            )
         }
     }
 }
@@ -965,6 +993,7 @@ mod tests {
     use super::*;
     use rflux_ir::PinRef;
     use rflux_route::{NetRoute, RoutingReport};
+    use rflux_tech::{CellTimingModel, InterconnectTimingModel, PdkTimingCorner, TimingPoint};
 
     #[test]
     fn computes_setup_and_hold_slack_from_routed_paths() {
@@ -973,25 +1002,49 @@ mod tests {
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: a, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("a to gate");
         netlist
-            .connect(PinRef { node: gate, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("gate to sink");
 
         let routing = RoutingReport {
             routes: vec![
                 NetRoute {
                     from: PinRef { node: a, port: 0 },
-                    to: PinRef { node: gate, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
                 },
                 NetRoute {
-                    from: PinRef { node: gate, port: 0 },
-                    to: PinRef { node: sink, port: 0 },
+                    from: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
                     mode: RouteMode::Ptl,
                     segments: Vec::new(),
                     direct_length_um: 80.0,
@@ -1006,7 +1059,12 @@ mod tests {
         };
 
         let report = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &Pdk::minimal("test"), &TimingConfig::default())
+            .analyze(
+                &netlist,
+                &routing,
+                &Pdk::minimal("test"),
+                &TimingConfig::default(),
+            )
             .expect("timing should succeed");
 
         assert_eq!(report.analyzed_arcs, 2);
@@ -1021,13 +1079,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::CellInstance, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 0.0,
@@ -1041,7 +1114,12 @@ mod tests {
         };
 
         let report = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &Pdk::minimal("test"), &TimingConfig::default())
+            .analyze(
+                &netlist,
+                &routing,
+                &Pdk::minimal("test"),
+                &TimingConfig::default(),
+            )
             .expect("timing should succeed");
 
         assert_eq!(report.setup_violations, 0);
@@ -1056,25 +1134,55 @@ mod tests {
         let macro_buf = netlist.add_node(NodeKind::MacroCell, "macro_buf");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: macro_buf, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+            )
             .expect("source to macro_buf");
         netlist
-            .connect(PinRef { node: macro_buf, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("macro_buf to sink");
 
         let routing = RoutingReport {
             routes: vec![
                 NetRoute {
-                    from: PinRef { node: source, port: 0 },
-                    to: PinRef { node: macro_buf, port: 0 },
+                    from: PinRef {
+                        node: source,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: macro_buf,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
                 },
                 NetRoute {
-                    from: PinRef { node: macro_buf, port: 0 },
-                    to: PinRef { node: sink, port: 0 },
+                    from: PinRef {
+                        node: macro_buf,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
@@ -1112,7 +1220,12 @@ mod tests {
             .analyze(&netlist, &routing, &base_pdk, &TimingConfig::default())
             .expect("baseline timing should succeed");
         let characterized = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &characterized_pdk, &TimingConfig::default())
+            .analyze(
+                &netlist,
+                &routing,
+                &characterized_pdk,
+                &TimingConfig::default(),
+            )
             .expect("characterized timing should succeed");
         let baseline_macro_arc = baseline
             .arcs
@@ -1132,31 +1245,184 @@ mod tests {
     }
 
     #[test]
-    fn sta_prefers_characterized_arc_delay_table_over_cell_intrinsic() {
+    fn sta_uses_active_pdk_timing_corner_for_cell_and_wire_delay() {
         let mut netlist = Netlist::new();
         let source = netlist.add_node(NodeKind::Port, "source");
-        let macro_buf = netlist.add_node(NodeKind::MacroCell, "macro_buf");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: macro_buf, port: 0 })
-            .expect("source to macro_buf");
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
+            .expect("source to gate");
         netlist
-            .connect(PinRef { node: macro_buf, port: 0 }, PinRef { node: sink, port: 0 })
-            .expect("macro_buf to sink");
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("gate to sink");
 
         let routing = RoutingReport {
             routes: vec![
                 NetRoute {
-                    from: PinRef { node: source, port: 0 },
-                    to: PinRef { node: macro_buf, port: 0 },
+                    from: PinRef {
+                        node: source,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
                 },
                 NetRoute {
-                    from: PinRef { node: macro_buf, port: 0 },
-                    to: PinRef { node: sink, port: 0 },
+                    from: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
+                    mode: RouteMode::Jtl,
+                    segments: Vec::new(),
+                    direct_length_um: 40.0,
+                    length_um: 40.0,
+                },
+            ],
+            total_length_um: 80.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 2,
+            ptl_routes: 0,
+        };
+
+        let base_pdk = Pdk::minimal("test");
+        let mut slow_pdk = base_pdk.with_active_timing_corner("slow");
+        slow_pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: Some("ss".to_string()),
+            voltage_v: Some(2.4),
+            temperature_k: Some(4.2),
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 28.0,
+                setup_ps: 8.0,
+                hold_ps: 4.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 8.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 24.0,
+                    },
+                ],
+            }],
+        });
+
+        let baseline = StaticTimingAnalyzer::new()
+            .analyze(&netlist, &routing, &base_pdk, &TimingConfig::default())
+            .expect("baseline timing should succeed");
+        let slow = StaticTimingAnalyzer::new()
+            .analyze(&netlist, &routing, &slow_pdk, &TimingConfig::default())
+            .expect("slow-corner timing should succeed");
+        let baseline_gate_arc = baseline
+            .arcs
+            .iter()
+            .find(|arc| arc.from.node == gate)
+            .expect("baseline gate arc should exist");
+        let slow_gate_arc = slow
+            .arcs
+            .iter()
+            .find(|arc| arc.from.node == gate)
+            .expect("slow gate arc should exist");
+
+        assert!(slow.critical_path_delay_ps > baseline.critical_path_delay_ps);
+        assert!(slow.worst_setup_slack_ps < baseline.worst_setup_slack_ps);
+        assert_eq!(baseline_gate_arc.cell_delay_ps, 8.0);
+        assert_eq!(slow_gate_arc.cell_delay_ps, 28.0);
+        assert_eq!(baseline_gate_arc.wire_delay_ps, 18.0);
+        assert_eq!(slow_gate_arc.wire_delay_ps, 24.0);
+    }
+
+    #[test]
+    fn sta_prefers_characterized_arc_delay_table_over_cell_intrinsic() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let macro_buf = netlist.add_node(NodeKind::MacroCell, "macro_buf");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+            )
+            .expect("source to macro_buf");
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_buf,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("macro_buf to sink");
+
+        let routing = RoutingReport {
+            routes: vec![
+                NetRoute {
+                    from: PinRef {
+                        node: source,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: macro_buf,
+                        port: 0,
+                    },
+                    mode: RouteMode::Jtl,
+                    segments: Vec::new(),
+                    direct_length_um: 40.0,
+                    length_um: 40.0,
+                },
+                NetRoute {
+                    from: PinRef {
+                        node: macro_buf,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 40.0,
@@ -1201,7 +1467,12 @@ mod tests {
             .expect("characterized artifact json should parse");
 
         let report = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &characterized_pdk, &TimingConfig::default())
+            .analyze(
+                &netlist,
+                &routing,
+                &characterized_pdk,
+                &TimingConfig::default(),
+            )
             .expect("timing should succeed");
         let macro_arc = report
             .arcs
@@ -1217,13 +1488,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1269,13 +1555,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1305,7 +1606,10 @@ mod tests {
                         clock_domain: Some(1),
                     }],
                     pin_constraints: Vec::new(),
-                    clock_domains: vec![ClockDomainConstraint { id: 1, period_ps: 24.0 }],
+                    clock_domains: vec![ClockDomainConstraint {
+                        id: 1,
+                        period_ps: 24.0,
+                    }],
                     crossing_constraints: Vec::new(),
                 },
             )
@@ -1321,13 +1625,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1366,8 +1685,14 @@ mod tests {
                     ],
                     pin_constraints: Vec::new(),
                     clock_domains: vec![
-                        ClockDomainConstraint { id: 10, period_ps: 12.0 },
-                        ClockDomainConstraint { id: 11, period_ps: 12.0 },
+                        ClockDomainConstraint {
+                            id: 10,
+                            period_ps: 12.0,
+                        },
+                        ClockDomainConstraint {
+                            id: 11,
+                            period_ps: 12.0,
+                        },
                     ],
                     crossing_constraints: Vec::new(),
                 },
@@ -1391,13 +1716,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1427,7 +1767,10 @@ mod tests {
                         clock_domain: None,
                     }],
                     pin_constraints: vec![PinTimingConstraint {
-                        pin: PinRef { node: sink, port: 0 },
+                        pin: PinRef {
+                            node: sink,
+                            port: 0,
+                        },
                         input_arrival_ps: None,
                         required_ps: Some(20.0),
                         clock_domain: None,
@@ -1448,13 +1791,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1493,8 +1851,14 @@ mod tests {
                     ],
                     pin_constraints: Vec::new(),
                     clock_domains: vec![
-                        ClockDomainConstraint { id: 1, period_ps: 10.0 },
-                        ClockDomainConstraint { id: 2, period_ps: 10.0 },
+                        ClockDomainConstraint {
+                            id: 1,
+                            period_ps: 10.0,
+                        },
+                        ClockDomainConstraint {
+                            id: 2,
+                            period_ps: 10.0,
+                        },
                     ],
                     crossing_constraints: vec![CrossingConstraint {
                         from_domain: 1,
@@ -1519,13 +1883,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1564,8 +1943,14 @@ mod tests {
                     ],
                     pin_constraints: Vec::new(),
                     clock_domains: vec![
-                        ClockDomainConstraint { id: 1, period_ps: 10.0 },
-                        ClockDomainConstraint { id: 2, period_ps: 10.0 },
+                        ClockDomainConstraint {
+                            id: 1,
+                            period_ps: 10.0,
+                        },
+                        ClockDomainConstraint {
+                            id: 2,
+                            period_ps: 10.0,
+                        },
                     ],
                     crossing_constraints: vec![CrossingConstraint {
                         from_domain: 1,
@@ -1588,13 +1973,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1638,13 +2038,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1683,8 +2098,14 @@ mod tests {
                     ],
                     pin_constraints: Vec::new(),
                     clock_domains: vec![
-                        ClockDomainConstraint { id: 1, period_ps: 10.0 },
-                        ClockDomainConstraint { id: 2, period_ps: 10.0 },
+                        ClockDomainConstraint {
+                            id: 1,
+                            period_ps: 10.0,
+                        },
+                        ClockDomainConstraint {
+                            id: 2,
+                            period_ps: 10.0,
+                        },
                     ],
                     crossing_constraints: vec![CrossingConstraint {
                         from_domain: 1,
@@ -1710,25 +2131,55 @@ mod tests {
         let stage = netlist.add_node(NodeKind::CellInstance, "stage");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: stage, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: stage,
+                    port: 0,
+                },
+            )
             .expect("source to stage");
         netlist
-            .connect(PinRef { node: stage, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: stage,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("stage to sink");
 
         let routing = RoutingReport {
             routes: vec![
                 NetRoute {
-                    from: PinRef { node: source, port: 0 },
-                    to: PinRef { node: stage, port: 0 },
+                    from: PinRef {
+                        node: source,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: stage,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 30.0,
                     length_um: 30.0,
                 },
                 NetRoute {
-                    from: PinRef { node: stage, port: 0 },
-                    to: PinRef { node: sink, port: 0 },
+                    from: PinRef {
+                        node: stage,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
                     mode: RouteMode::Ptl,
                     segments: Vec::new(),
                     direct_length_um: 60.0,
@@ -1786,25 +2237,55 @@ mod tests {
         let stage = netlist.add_node(NodeKind::CellInstance, "stage");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: stage, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: stage,
+                    port: 0,
+                },
+            )
             .expect("source to stage");
         netlist
-            .connect(PinRef { node: stage, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: stage,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("stage to sink");
 
         let routing = RoutingReport {
             routes: vec![
                 NetRoute {
-                    from: PinRef { node: source, port: 0 },
-                    to: PinRef { node: stage, port: 0 },
+                    from: PinRef {
+                        node: source,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: stage,
+                        port: 0,
+                    },
                     mode: RouteMode::Jtl,
                     segments: Vec::new(),
                     direct_length_um: 30.0,
                     length_um: 30.0,
                 },
                 NetRoute {
-                    from: PinRef { node: stage, port: 0 },
-                    to: PinRef { node: sink, port: 0 },
+                    from: PinRef {
+                        node: stage,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
                     mode: RouteMode::Ptl,
                     segments: Vec::new(),
                     direct_length_um: 60.0,
@@ -1882,13 +2363,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1943,8 +2439,14 @@ mod tests {
 
         assert!((uncertain.arcs[0].setup_sigma_ps - 2.5).abs() < 1e-9);
         assert!((uncertain.arcs[0].hold_sigma_ps - 2.5).abs() < 1e-9);
-        assert!(uncertain.arcs[0].pessimistic_setup_slack_ps < baseline.arcs[0].pessimistic_setup_slack_ps);
-        assert!(uncertain.arcs[0].pessimistic_hold_slack_ps < baseline.arcs[0].pessimistic_hold_slack_ps);
+        assert!(
+            uncertain.arcs[0].pessimistic_setup_slack_ps
+                < baseline.arcs[0].pessimistic_setup_slack_ps
+        );
+        assert!(
+            uncertain.arcs[0].pessimistic_hold_slack_ps
+                < baseline.arcs[0].pessimistic_hold_slack_ps
+        );
     }
 
     #[test]
@@ -1953,13 +2455,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -1993,8 +2510,14 @@ mod tests {
             ],
             pin_constraints: Vec::new(),
             clock_domains: vec![
-                ClockDomainConstraint { id: 1, period_ps: 10.0 },
-                ClockDomainConstraint { id: 2, period_ps: 10.0 },
+                ClockDomainConstraint {
+                    id: 1,
+                    period_ps: 10.0,
+                },
+                ClockDomainConstraint {
+                    id: 2,
+                    period_ps: 10.0,
+                },
             ],
             crossing_constraints: Vec::new(),
         };
@@ -2041,8 +2564,14 @@ mod tests {
 
         assert!((uncertain.arcs[0].setup_sigma_ps - 1.5).abs() < 1e-9);
         assert!((uncertain.arcs[0].hold_sigma_ps - 1.5).abs() < 1e-9);
-        assert!(uncertain.arcs[0].pessimistic_setup_slack_ps < baseline.arcs[0].pessimistic_setup_slack_ps);
-        assert!(uncertain.arcs[0].pessimistic_hold_slack_ps < baseline.arcs[0].pessimistic_hold_slack_ps);
+        assert!(
+            uncertain.arcs[0].pessimistic_setup_slack_ps
+                < baseline.arcs[0].pessimistic_setup_slack_ps
+        );
+        assert!(
+            uncertain.arcs[0].pessimistic_hold_slack_ps
+                < baseline.arcs[0].pessimistic_hold_slack_ps
+        );
     }
 
     #[test]
@@ -2051,13 +2580,28 @@ mod tests {
         let source = netlist.add_node(NodeKind::Port, "source");
         let sink = netlist.add_node(NodeKind::Dff, "sink");
         netlist
-            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
             .expect("source to sink");
 
         let routing = RoutingReport {
             routes: vec![NetRoute {
-                from: PinRef { node: source, port: 0 },
-                to: PinRef { node: sink, port: 0 },
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
                 mode: RouteMode::Jtl,
                 segments: Vec::new(),
                 direct_length_um: 40.0,
@@ -2091,8 +2635,14 @@ mod tests {
             ],
             pin_constraints: Vec::new(),
             clock_domains: vec![
-                ClockDomainConstraint { id: 1, period_ps: 10.0 },
-                ClockDomainConstraint { id: 2, period_ps: 10.0 },
+                ClockDomainConstraint {
+                    id: 1,
+                    period_ps: 10.0,
+                },
+                ClockDomainConstraint {
+                    id: 2,
+                    period_ps: 10.0,
+                },
             ],
             crossing_constraints: vec![CrossingConstraint {
                 from_domain: 1,
@@ -2130,8 +2680,14 @@ mod tests {
     #[test]
     fn statistical_timing_increases_wire_sigma_for_long_ptl_routes() {
         let jtl_arc = TimingArcReport {
-            from: PinRef { node: NodeId(0), port: 0 },
-            to: PinRef { node: NodeId(1), port: 0 },
+            from: PinRef {
+                node: NodeId(0),
+                port: 0,
+            },
+            to: PinRef {
+                node: NodeId(1),
+                port: 0,
+            },
             is_false_path: false,
             driver_kind: SfCellKind::GenericGate,
             route_mode: RouteMode::Jtl,
@@ -2179,8 +2735,14 @@ mod tests {
     #[test]
     fn statistical_timing_increases_cell_sigma_for_more_sensitive_devices() {
         let gate_arc = TimingArcReport {
-            from: PinRef { node: NodeId(0), port: 0 },
-            to: PinRef { node: NodeId(1), port: 0 },
+            from: PinRef {
+                node: NodeId(0),
+                port: 0,
+            },
+            to: PinRef {
+                node: NodeId(1),
+                port: 0,
+            },
             is_false_path: false,
             driver_kind: SfCellKind::GenericGate,
             route_mode: RouteMode::Jtl,
@@ -2226,8 +2788,14 @@ mod tests {
     #[test]
     fn statistical_timing_uses_characterized_cell_metadata_for_sigma_sensitivity() {
         let macro_arc = TimingArcReport {
-            from: PinRef { node: NodeId(0), port: 0 },
-            to: PinRef { node: NodeId(1), port: 0 },
+            from: PinRef {
+                node: NodeId(0),
+                port: 0,
+            },
+            to: PinRef {
+                node: NodeId(1),
+                port: 0,
+            },
             is_false_path: false,
             driver_kind: SfCellKind::Macro,
             route_mode: RouteMode::Jtl,
@@ -2280,8 +2848,14 @@ mod tests {
     #[test]
     fn statistical_timing_uses_waveform_calibration_metadata_for_sigma() {
         let macro_arc = TimingArcReport {
-            from: PinRef { node: NodeId(0), port: 0 },
-            to: PinRef { node: NodeId(1), port: 0 },
+            from: PinRef {
+                node: NodeId(0),
+                port: 0,
+            },
+            to: PinRef {
+                node: NodeId(1),
+                port: 0,
+            },
             is_false_path: false,
             driver_kind: SfCellKind::Macro,
             route_mode: RouteMode::Jtl,
@@ -2377,7 +2951,12 @@ mod tests {
         };
 
         let err = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &Pdk::minimal("test"), &TimingConfig::default())
+            .analyze(
+                &netlist,
+                &routing,
+                &Pdk::minimal("test"),
+                &TimingConfig::default(),
+            )
             .expect_err("cycles must fail");
 
         assert!(matches!(err, TimingError::CyclicNetlist));

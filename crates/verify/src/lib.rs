@@ -3,7 +3,13 @@ use rflux_synth::{
     Compiler, EquivalenceSatProblem, SatEquivalenceReport, SequentialEquivalenceReport,
 };
 
-pub use rflux_synth::{BoundedSequentialEquivalenceReport, BoundedSequentialEquivalenceStepReport, EquivalenceCheckKind, EquivalenceCheckTarget, EquivalenceSatProblem as ExportedEquivalenceSatProblem, SatEquivalenceReport as CombinationalEquivalenceReport, SequentialEquivalenceReport as SingleStepSequentialEquivalenceReport};
+pub use rflux_synth::{
+    BoundedSequentialEquivalenceReport, BoundedSequentialEquivalenceStepReport,
+    EquivalenceCheckKind, EquivalenceCheckTarget,
+    EquivalenceSatProblem as ExportedEquivalenceSatProblem,
+    SatEquivalenceReport as CombinationalEquivalenceReport,
+    SequentialEquivalenceReport as SingleStepSequentialEquivalenceReport,
+};
 
 #[derive(Debug, Default)]
 pub struct Verifier {
@@ -76,18 +82,66 @@ mod tests {
         let b_l = lhs.add_node(NodeKind::Port, "b");
         let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "lhs_and", Some(LogicOp::And));
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: and_l, port: 0 }).expect("a->and");
-        lhs.connect(PinRef { node: b_l, port: 0 }, PinRef { node: and_l, port: 1 }).expect("b->and");
-        lhs.connect(PinRef { node: and_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("and->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .expect("a->and");
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .expect("b->and");
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let b_r = rhs.add_node(NodeKind::Port, "b");
         let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "rhs_and", Some(LogicOp::And));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: b_r, port: 0 }, PinRef { node: and_r, port: 0 }).expect("b->and");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: and_r, port: 1 }).expect("a->and");
-        rhs.connect(PinRef { node: and_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("and->out");
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .expect("b->and");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .expect("a->and");
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("and->out");
 
         let report = verifier
             .check_boolean_equivalence(&lhs, &rhs)
@@ -108,9 +162,39 @@ mod tests {
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "state");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
-        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
@@ -118,10 +202,50 @@ mod tests {
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node_with_logic(NodeKind::Dff, "state", Some(LogicOp::DffEnable));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dffe");
-        rhs.connect(PinRef { node: enable_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("enable->dffe");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 2 }).expect("clock->dffe");
-        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dffe->out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dffe");
+        rhs.connect(
+            PinRef {
+                node: enable_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("enable->dffe");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 2,
+            },
+        )
+        .expect("clock->dffe");
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("dffe->out");
 
         let report = verifier
             .check_single_step_sequential_equivalence(&lhs, &rhs)
@@ -142,9 +266,39 @@ mod tests {
         let clock_l = lhs.add_node(NodeKind::Port, "clock");
         let dff_l = lhs.add_node(NodeKind::Dff, "state");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
-        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
-        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .expect("data->dff");
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .expect("clock->dff");
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("dff->out");
 
         let mut rhs = Netlist::new();
         let data_r = rhs.add_node(NodeKind::Port, "data");
@@ -152,10 +306,50 @@ mod tests {
         let clock_r = rhs.add_node(NodeKind::Port, "clock");
         let dff_r = rhs.add_node_with_logic(NodeKind::Dff, "state", Some(LogicOp::DffEnable));
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dffe");
-        rhs.connect(PinRef { node: enable_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("enable->dffe");
-        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 2 }).expect("clock->dffe");
-        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dffe->out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .expect("data->dffe");
+        rhs.connect(
+            PinRef {
+                node: enable_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .expect("enable->dffe");
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 2,
+            },
+        )
+        .expect("clock->dffe");
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("dffe->out");
 
         let report = verifier
             .check_bounded_sequential_equivalence(&lhs, &rhs, 4)
@@ -175,14 +369,38 @@ mod tests {
         let mut lhs = Netlist::new();
         let a_l = lhs.add_node(NodeKind::Port, "a");
         let out_l = lhs.add_node(NodeKind::Port, "out");
-        lhs.connect(PinRef { node: a_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("a->out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .expect("a->out");
 
         let mut rhs = Netlist::new();
         let a_r = rhs.add_node(NodeKind::Port, "a");
         let split_r = rhs.add_node(NodeKind::Splitter, "split");
         let out_r = rhs.add_node(NodeKind::Port, "out");
-        rhs.connect(PinRef { node: a_r, port: 0 }, PinRef { node: split_r, port: 0 }).expect("a->split");
-        rhs.connect(PinRef { node: split_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("split->out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: split_r,
+                port: 0,
+            },
+        )
+        .expect("a->split");
+        rhs.connect(
+            PinRef {
+                node: split_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .expect("split->out");
 
         let problem = verifier
             .build_boolean_equivalence_problem(&lhs, &rhs)

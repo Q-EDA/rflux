@@ -1,16 +1,16 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::fs;
 use rflux_flow::{
     AcBiasOptimizationReport, AcBiasReport, AdvancedConstraintConfig, AdvancedConstraintReport,
     AdvancedConstraintViolation, CompoundCellCharacterizationConfig,
     CompoundCellCharacterizationReport, FlowConfig, FlowRunner, LayoutReport,
-    LibraryAwareAcBiasOptimizationReport, LibraryAwareDesignOptimizationReport, SimulationBackend,
-    SimulationConfig, SimulationMode, SimulationReport,
-    StatisticalTimingAnalysisReport, TimingAnalysisReport, VerificationReport,
+    LibraryAwareAcBiasOptimizationReport, LibraryAwareDesignOptimizationReport,
+    MultiCornerTimingAnalysisReport, SimulationBackend, SimulationConfig, SimulationMode,
+    SimulationReport, StatisticalTimingAnalysisReport, TimingAnalysisReport,
+    TimingCornerAnalysisReport, VerificationReport,
 };
-use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
 use rflux_io::{read_bench_netlist, read_netlist_as, NetlistInputFormat};
+use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
 use rflux_place::{FixedNodePlacement, Point};
 use rflux_route::{BlockedRegion, RouteMode};
 use rflux_sim::{simulate_file as simulate_file_core, simulate_text as simulate_text_core};
@@ -24,6 +24,7 @@ use rflux_timing::{
     PinTimingConstraint, StatisticalTimingConfig, TimingConfig,
 };
 use rflux_verify::Verifier;
+use std::fs;
 
 #[derive(Clone)]
 #[pyclass]
@@ -590,6 +591,10 @@ struct PyLayoutReport {
     #[pyo3(get)]
     detour_feedback_applied: bool,
     #[pyo3(get)]
+    effective_prefer_ptl_from_length_um: f64,
+    #[pyo3(get)]
+    effective_detour_margin_um: f64,
+    #[pyo3(get)]
     jtl_routes: usize,
     #[pyo3(get)]
     ptl_routes: usize,
@@ -610,6 +615,10 @@ struct PyTimingClosureLoopReport {
     initial_total_detour_overhead_um: f64,
     #[pyo3(get)]
     final_total_detour_overhead_um: f64,
+    #[pyo3(get)]
+    route_delay_optimization_attempted: bool,
+    #[pyo3(get)]
+    route_delay_optimization_applied: bool,
     #[pyo3(get)]
     reduce_route_delay_candidate_available: bool,
     #[pyo3(get)]
@@ -785,6 +794,56 @@ struct PyTimingAnalysisReport {
     closure: PyTimingClosureSummary,
     #[pyo3(get)]
     timing_arcs: Vec<PyTimingArcReport>,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyTimingCornerAnalysisReport {
+    #[pyo3(get)]
+    corner_name: String,
+    #[pyo3(get)]
+    is_default_corner: bool,
+    #[pyo3(get)]
+    is_active_corner: bool,
+    #[pyo3(get)]
+    worst_setup_slack_ps: f64,
+    #[pyo3(get)]
+    worst_hold_slack_ps: f64,
+    #[pyo3(get)]
+    critical_path_delay_ps: f64,
+    #[pyo3(get)]
+    analyzed_timing_arcs: usize,
+    #[pyo3(get)]
+    setup_violations: usize,
+    #[pyo3(get)]
+    hold_violations: usize,
+    #[pyo3(get)]
+    capture_window_violations: usize,
+    #[pyo3(get)]
+    closure: PyTimingClosureSummary,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyMultiCornerTimingAnalysisReport {
+    #[pyo3(get)]
+    active_timing_corner: Option<String>,
+    #[pyo3(get)]
+    corner_count: usize,
+    #[pyo3(get)]
+    worst_setup_corner: String,
+    #[pyo3(get)]
+    worst_hold_corner: String,
+    #[pyo3(get)]
+    worst_critical_path_corner: String,
+    #[pyo3(get)]
+    worst_setup_slack_ps: f64,
+    #[pyo3(get)]
+    worst_hold_slack_ps: f64,
+    #[pyo3(get)]
+    worst_critical_path_delay_ps: f64,
+    #[pyo3(get)]
+    corners: Vec<PyTimingCornerAnalysisReport>,
 }
 
 #[pyclass]
@@ -1071,6 +1130,25 @@ impl PyPdk {
     }
 
     #[getter]
+    fn active_timing_corner(&self) -> Option<String> {
+        self.inner.active_timing_corner.clone()
+    }
+
+    fn timing_corner_names(&self) -> Vec<String> {
+        self.inner
+            .timing_corner_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn with_active_timing_corner(&self, name: &str) -> Self {
+        Self {
+            inner: self.inner.with_active_timing_corner(name),
+        }
+    }
+
+    #[getter]
     fn cell_library_name(&self) -> String {
         self.inner.cell_library_name().to_string()
     }
@@ -1133,7 +1211,10 @@ impl PyPdk {
         })
     }
 
-    fn merge_characterized_library_entries(&self, serialized_entries: Vec<String>) -> PyResult<Self> {
+    fn merge_characterized_library_entries(
+        &self,
+        serialized_entries: Vec<String>,
+    ) -> PyResult<Self> {
         let references = serialized_entries
             .iter()
             .map(String::as_str)
@@ -1456,6 +1537,8 @@ impl From<LayoutReport> for PyLayoutReport {
             total_detour_overhead_um: value.routing.total_detour_overhead_um,
             detoured_routes: value.routing.detoured_routes,
             detour_feedback_applied: value.detour_feedback_applied,
+            effective_prefer_ptl_from_length_um: value.routing.effective_prefer_ptl_from_length_um,
+            effective_detour_margin_um: value.routing.effective_detour_margin_um,
             jtl_routes: value.routing.jtl_routes,
             ptl_routes: value.routing.ptl_routes,
             node_count: value.synthesis.node_count,
@@ -1471,6 +1554,8 @@ impl From<rflux_flow::TimingClosureLoopReport> for PyTimingClosureLoopReport {
             detour_feedback_applied: value.detour_feedback_applied,
             initial_total_detour_overhead_um: value.initial_total_detour_overhead_um,
             final_total_detour_overhead_um: value.final_total_detour_overhead_um,
+            route_delay_optimization_attempted: value.route_delay_optimization_attempted,
+            route_delay_optimization_applied: value.route_delay_optimization_applied,
             reduce_route_delay_candidate_available: value.reduce_route_delay_candidate_available,
             recommended_prefer_ptl_from_length_um: value.recommended_prefer_ptl_from_length_um,
             recommended_detour_margin_um: value.recommended_detour_margin_um,
@@ -1520,7 +1605,11 @@ impl From<rflux_flow::TimingClosureSummary> for PyTimingClosureSummary {
             add_hold_padding_actions: value.add_hold_padding_actions,
             adjust_sfq_phase_or_pulse_window_actions: value
                 .adjust_sfq_phase_or_pulse_window_actions,
-            actions: value.actions.into_iter().map(PyTimingClosureAction::from).collect(),
+            actions: value
+                .actions
+                .into_iter()
+                .map(PyTimingClosureAction::from)
+                .collect(),
             next_step: value.next_step,
         }
     }
@@ -1622,6 +1711,44 @@ impl From<TimingAnalysisReport> for PyTimingAnalysisReport {
     }
 }
 
+impl From<TimingCornerAnalysisReport> for PyTimingCornerAnalysisReport {
+    fn from(value: TimingCornerAnalysisReport) -> Self {
+        Self {
+            corner_name: value.corner_name,
+            is_default_corner: value.is_default_corner,
+            is_active_corner: value.is_active_corner,
+            worst_setup_slack_ps: value.worst_setup_slack_ps,
+            worst_hold_slack_ps: value.worst_hold_slack_ps,
+            critical_path_delay_ps: value.critical_path_delay_ps,
+            analyzed_timing_arcs: value.analyzed_arcs,
+            setup_violations: value.setup_violations,
+            hold_violations: value.hold_violations,
+            capture_window_violations: value.capture_window_violations,
+            closure: value.closure.into(),
+        }
+    }
+}
+
+impl From<MultiCornerTimingAnalysisReport> for PyMultiCornerTimingAnalysisReport {
+    fn from(value: MultiCornerTimingAnalysisReport) -> Self {
+        Self {
+            active_timing_corner: value.active_timing_corner,
+            corner_count: value.corner_count,
+            worst_setup_corner: value.worst_setup_corner,
+            worst_hold_corner: value.worst_hold_corner,
+            worst_critical_path_corner: value.worst_critical_path_corner,
+            worst_setup_slack_ps: value.worst_setup_slack_ps,
+            worst_hold_slack_ps: value.worst_hold_slack_ps,
+            worst_critical_path_delay_ps: value.worst_critical_path_delay_ps,
+            corners: value
+                .corners
+                .into_iter()
+                .map(PyTimingCornerAnalysisReport::from)
+                .collect(),
+        }
+    }
+}
+
 impl From<StatisticalTimingAnalysisReport> for PyStatisticalTimingAnalysisReport {
     fn from(value: StatisticalTimingAnalysisReport) -> Self {
         Self {
@@ -1704,8 +1831,12 @@ impl From<LibraryAwareDesignOptimizationReport> for PyLibraryAwareDesignOptimiza
             optimized_constraints: value.optimized_constraints.into(),
             characterized_cells_merged: value.characterized_cells_merged,
             design_optimization_score: value.design_optimization_score,
-            baseline_cell_delay_sigma_ratio: value.baseline_statistical_config.cell_delay_sigma_ratio,
-            optimized_cell_delay_sigma_ratio: value.optimized_statistical_config.cell_delay_sigma_ratio,
+            baseline_cell_delay_sigma_ratio: value
+                .baseline_statistical_config
+                .cell_delay_sigma_ratio,
+            optimized_cell_delay_sigma_ratio: value
+                .optimized_statistical_config
+                .cell_delay_sigma_ratio,
             baseline_sigma_multiplier: value.baseline_statistical_config.sigma_multiplier,
             optimized_sigma_multiplier: value.optimized_statistical_config.sigma_multiplier,
             baseline_placement_halo_scale: value.baseline_placement_halo_scale,
@@ -2004,9 +2135,11 @@ fn ensure_plan_nodes(netlist: &mut Netlist, plan: &PyCompilePlan) {
         referenced_nodes.insert(connection.from_pin.node);
         referenced_nodes.insert(connection.to_pin.node);
         sink_nodes.insert(connection.to_pin.node);
-        max_index = Some(max_index.map_or(connection.from_pin.node.max(connection.to_pin.node), |m| {
-            m.max(connection.from_pin.node).max(connection.to_pin.node)
-        }));
+        max_index = Some(
+            max_index.map_or(connection.from_pin.node.max(connection.to_pin.node), |m| {
+                m.max(connection.from_pin.node).max(connection.to_pin.node)
+            }),
+        );
     }
     for pin in &plan.balancing_sources {
         referenced_nodes.insert(pin.node);
@@ -2155,9 +2288,18 @@ fn to_flow_config(
             input_arrival_ps: TimingConfig::default().input_arrival_ps,
             sfq_phase_count: TimingConfig::default().sfq_phase_count,
             sfq_pulse_window_ps: TimingConfig::default().sfq_pulse_window_ps,
-            node_constraints: timing_constraints.iter().map(to_timing_constraint).collect(),
-            pin_constraints: pin_timing_constraints.iter().map(to_pin_timing_constraint).collect(),
-            clock_domains: clock_domains.iter().map(to_clock_domain_constraint).collect(),
+            node_constraints: timing_constraints
+                .iter()
+                .map(to_timing_constraint)
+                .collect(),
+            pin_constraints: pin_timing_constraints
+                .iter()
+                .map(to_pin_timing_constraint)
+                .collect(),
+            clock_domains: clock_domains
+                .iter()
+                .map(to_clock_domain_constraint)
+                .collect(),
             crossing_constraints: crossing_constraints
                 .iter()
                 .map(to_crossing_constraint)
@@ -2272,14 +2414,20 @@ impl Circuit {
     #[pyo3(signature = (kind, name, logic_op=None))]
     fn add_node(&mut self, kind: &str, name: String, logic_op: Option<String>) -> PyResult<usize> {
         let node_kind = parse_node_kind(kind)?;
-        let logic_op = logic_op
-            .as_deref()
-            .map(parse_logic_op)
-            .transpose()?;
-        Ok(self.netlist.add_node_with_logic(node_kind, name, logic_op).0)
+        let logic_op = logic_op.as_deref().map(parse_logic_op).transpose()?;
+        Ok(self
+            .netlist
+            .add_node_with_logic(node_kind, name, logic_op)
+            .0)
     }
 
-    fn connect(&mut self, from_node: usize, from_port: u16, to_node: usize, to_port: u16) -> PyResult<()> {
+    fn connect(
+        &mut self,
+        from_node: usize,
+        from_port: u16,
+        to_node: usize,
+        to_port: u16,
+    ) -> PyResult<()> {
         self.netlist
             .connect(
                 PinRef {
@@ -2303,21 +2451,22 @@ impl Circuit {
     }
 
     fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let items = self
-            .netlist
-            .nodes()
-            .iter()
-            .map(|node| (node.id.0, node_kind_name(&node.kind).to_string(), node.name.clone()));
+        let items = self.netlist.nodes().iter().map(|node| {
+            (
+                node.id.0,
+                node_kind_name(&node.kind).to_string(),
+                node.name.clone(),
+            )
+        });
         Ok(PyList::new_bound(py, items))
     }
 
     fn edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let items = self.netlist.edge_pairs().into_iter().map(|(from, to)| {
-            (
-                (from.node.0, from.port),
-                (to.node.0, to.port),
-            )
-        });
+        let items = self
+            .netlist
+            .edge_pairs()
+            .into_iter()
+            .map(|(from, to)| ((from.node.0, from.port), (to.node.0, to.port)));
         Ok(PyList::new_bound(py, items))
     }
 
@@ -2360,7 +2509,10 @@ fn build_flow_pdk(
 
 #[pyfunction]
 #[pyo3(signature = (serialized_entries, base_name="py-minimal-pdk"))]
-fn merge_characterized_library(serialized_entries: Vec<String>, base_name: &str) -> PyResult<String> {
+fn merge_characterized_library(
+    serialized_entries: Vec<String>,
+    base_name: &str,
+) -> PyResult<String> {
     let pdk = build_flow_pdk(base_name, None, Some(serialized_entries))?;
     pdk.to_json()
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
@@ -2392,8 +2544,7 @@ fn read_bench_text(text: &str, name: Option<String>) -> PyResult<Circuit> {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             .as_nanos()
     ));
-    fs::write(&temp_path, text)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+    fs::write(&temp_path, text).map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
     let result = read_netlist_as(&temp_path, NetlistInputFormat::Bench)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     let _ = fs::remove_file(&temp_path);
@@ -2404,7 +2555,10 @@ fn read_bench_text(text: &str, name: Option<String>) -> PyResult<Circuit> {
 }
 
 #[pyfunction]
-fn compile_plan(mut circuit: PyRefMut<'_, Circuit>, plan: &PyCompilePlan) -> PyResult<PyCompileReport> {
+fn compile_plan(
+    mut circuit: PyRefMut<'_, Circuit>,
+    plan: &PyCompilePlan,
+) -> PyResult<PyCompileReport> {
     ensure_plan_nodes(&mut circuit.netlist, plan);
 
     let rust_plan = CompilePlan {
@@ -2488,7 +2642,10 @@ fn compile_layout(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
     let config = to_flow_config(
         plan,
@@ -2533,7 +2690,10 @@ fn analyze_timing(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -2557,6 +2717,49 @@ fn analyze_timing(
     let mut runner = FlowRunner::new();
     let report = runner
         .analyze_timing(&mut circuit.netlist, &pdk, &config)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(report.into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (circuit, pdk, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None))]
+fn analyze_timing_corners(
+    mut circuit: PyRefMut<'_, Circuit>,
+    pdk: &PyPdk,
+    plan: Option<&PyCompilePlan>,
+    fixed_nodes: Option<Vec<PyFixedNodePlacement>>,
+    blocked_regions: Option<Vec<PyBlockedRegion>>,
+    timing_constraints: Option<Vec<PyNodeTimingConstraint>>,
+    pin_timing_constraints: Option<Vec<PyPinTimingConstraint>>,
+    clock_domains: Option<Vec<PyClockDomainConstraint>>,
+    crossing_constraints: Option<Vec<PyCrossingConstraint>>,
+) -> PyResult<PyMultiCornerTimingAnalysisReport> {
+    if let Some(plan) = plan {
+        ensure_plan_nodes(&mut circuit.netlist, plan);
+    }
+    if let Some(fixed_nodes) = &fixed_nodes {
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
+    }
+
+    let config = to_flow_config(
+        plan,
+        fixed_nodes,
+        blocked_regions,
+        timing_constraints,
+        pin_timing_constraints,
+        clock_domains,
+        crossing_constraints,
+        None,
+        None,
+        None,
+    )?;
+
+    let mut runner = FlowRunner::new();
+    let report = runner
+        .analyze_timing_corners(&mut circuit.netlist, &pdk.inner, &config)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(report.into())
 }
@@ -2588,7 +2791,10 @@ fn analyze_timing_statistical(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -2622,10 +2828,15 @@ fn analyze_timing_statistical(
         cross_domain_uncertainty_sigma_ps: cross_domain_uncertainty_sigma_ps
             .unwrap_or(StatisticalTimingConfig::default().cross_domain_uncertainty_sigma_ps),
         max_delay_cross_domain_uncertainty_sigma_ps: max_delay_cross_domain_uncertainty_sigma_ps
-            .unwrap_or(StatisticalTimingConfig::default().max_delay_cross_domain_uncertainty_sigma_ps),
+            .unwrap_or(
+                StatisticalTimingConfig::default().max_delay_cross_domain_uncertainty_sigma_ps,
+            ),
         multicycle_cross_domain_uncertainty_sigma_ps: multicycle_cross_domain_uncertainty_sigma_ps
-            .unwrap_or(StatisticalTimingConfig::default().multicycle_cross_domain_uncertainty_sigma_ps),
-        sigma_multiplier: sigma_multiplier.unwrap_or(StatisticalTimingConfig::default().sigma_multiplier),
+            .unwrap_or(
+                StatisticalTimingConfig::default().multicycle_cross_domain_uncertainty_sigma_ps,
+            ),
+        sigma_multiplier: sigma_multiplier
+            .unwrap_or(StatisticalTimingConfig::default().sigma_multiplier),
     };
 
     let mut runner = FlowRunner::new();
@@ -2651,7 +2862,10 @@ fn analyze_ac_bias(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -2693,7 +2907,10 @@ fn optimize_ac_bias(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -2780,10 +2997,15 @@ fn optimize_design_with_characterized_library(
         cross_domain_uncertainty_sigma_ps: cross_domain_uncertainty_sigma_ps
             .unwrap_or(StatisticalTimingConfig::default().cross_domain_uncertainty_sigma_ps),
         max_delay_cross_domain_uncertainty_sigma_ps: max_delay_cross_domain_uncertainty_sigma_ps
-            .unwrap_or(StatisticalTimingConfig::default().max_delay_cross_domain_uncertainty_sigma_ps),
+            .unwrap_or(
+                StatisticalTimingConfig::default().max_delay_cross_domain_uncertainty_sigma_ps,
+            ),
         multicycle_cross_domain_uncertainty_sigma_ps: multicycle_cross_domain_uncertainty_sigma_ps
-            .unwrap_or(StatisticalTimingConfig::default().multicycle_cross_domain_uncertainty_sigma_ps),
-        sigma_multiplier: sigma_multiplier.unwrap_or(StatisticalTimingConfig::default().sigma_multiplier),
+            .unwrap_or(
+                StatisticalTimingConfig::default().multicycle_cross_domain_uncertainty_sigma_ps,
+            ),
+        sigma_multiplier: sigma_multiplier
+            .unwrap_or(StatisticalTimingConfig::default().sigma_multiplier),
     };
     let base_pdk = Pdk::minimal("py-minimal-pdk");
     let report = FlowRunner::new()
@@ -2868,7 +3090,10 @@ fn characterize_compound_cell(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -2922,7 +3147,10 @@ fn analyze_advanced_constraints(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -2975,7 +3203,10 @@ fn verify_layout(
         ensure_plan_nodes(&mut circuit.netlist, plan);
     }
     if let Some(fixed_nodes) = &fixed_nodes {
-        ensure_node_capacity(&mut circuit.netlist, fixed_nodes.iter().map(|fixed| fixed.node));
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
     }
 
     let config = to_flow_config(
@@ -3101,6 +3332,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTimingClosureLoopReport>()?;
     m.add_class::<PyTimingArcReport>()?;
     m.add_class::<PyTimingAnalysisReport>()?;
+    m.add_class::<PyTimingCornerAnalysisReport>()?;
+    m.add_class::<PyMultiCornerTimingAnalysisReport>()?;
     m.add_class::<PyStatisticalTimingArcReport>()?;
     m.add_class::<PyStatisticalTimingAnalysisReport>()?;
     m.add_class::<PyAcBiasReport>()?;
@@ -3132,19 +3365,29 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_netlist, m)?)?;
     m.add_function(wrap_pyfunction!(compile_layout, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_timing, m)?)?;
+    m.add_function(wrap_pyfunction!(analyze_timing_corners, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_timing_statistical, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_ac_bias, m)?)?;
     m.add_function(wrap_pyfunction!(merge_characterized_library, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_ac_bias, m)?)?;
-    m.add_function(wrap_pyfunction!(optimize_ac_bias_with_characterized_library, m)?)?;
-    m.add_function(wrap_pyfunction!(optimize_design_with_characterized_library, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        optimize_ac_bias_with_characterized_library,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        optimize_design_with_characterized_library,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(characterize_compound_cell, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_advanced_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(verify_layout, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_text, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_file, m)?)?;
     m.add_function(wrap_pyfunction!(check_equivalence, m)?)?;
-    m.add_function(wrap_pyfunction!(check_single_step_sequential_equivalence, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        check_single_step_sequential_equivalence,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(check_bounded_sequential_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(read_bench_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_bench_text, m)?)?;

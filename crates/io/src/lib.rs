@@ -1,9 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::path::Path;
-use std::collections::{HashMap, HashSet};
 
 use libreda_db::chip::Chip;
 use libreda_db::prelude::HierarchyBase;
@@ -38,7 +38,7 @@ pub enum IoError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json parse error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(String),
     #[error("lef/def error: {0}")]
     LefDef(String),
     #[error("top cell not found")]
@@ -50,12 +50,52 @@ pub enum IoError {
     #[error("unsupported {kind} schema version {version}")]
     UnsupportedSchemaVersion { kind: &'static str, version: u64 },
     #[error("invalid {kind} JSON envelope: {detail}")]
-    InvalidJsonEnvelope { kind: &'static str, detail: &'static str },
+    InvalidJsonEnvelope {
+        kind: &'static str,
+        detail: &'static str,
+    },
     #[error("expected {expected_kind} JSON envelope, found {found_kind}")]
     UnexpectedJsonKind {
         expected_kind: &'static str,
         found_kind: String,
     },
+}
+
+#[derive(Debug, Clone)]
+struct BenchNamedSignal {
+    name: String,
+    line: usize,
+}
+
+fn format_location_detail(
+    detail: impl Into<String>,
+    line: Option<usize>,
+    column: Option<usize>,
+) -> String {
+    let detail = detail.into();
+    match (line, column) {
+        (Some(line), Some(column)) if line > 0 && column > 0 => {
+            format!("at line {line}, column {column}: {detail}")
+        }
+        (Some(line), _) if line > 0 => format!("at line {line}: {detail}"),
+        _ => detail,
+    }
+}
+
+fn json_error(error: serde_json::Error) -> IoError {
+    IoError::Json(format_location_detail(
+        error.to_string(),
+        Some(error.line()),
+        Some(error.column()),
+    ))
+}
+
+fn bench_parse_error(detail: impl Into<String>) -> IoError {
+    IoError::BenchParse(detail.into())
+}
+
+fn bench_parse_error_at_line(line: usize, detail: impl Into<String>) -> IoError {
+    IoError::BenchParse(format_location_detail(detail, Some(line), None))
 }
 
 impl IoError {
@@ -105,18 +145,19 @@ pub fn write_ir_json(path: impl AsRef<Path>, netlist: &Netlist) -> Result<(), Io
         "schema_version": IR_JSON_SCHEMA_VERSION,
         "kind": IR_JSON_KIND,
         "payload": netlist,
-    }))?;
+    }))
+    .map_err(json_error)?;
     fs::write(path, content)?;
     Ok(())
 }
 
 pub fn read_ir_json(path: impl AsRef<Path>) -> Result<Netlist, IoError> {
     let content = fs::read_to_string(path)?;
-    let json: Value = serde_json::from_str(&content)?;
+    let json: Value = serde_json::from_str(&content).map_err(json_error)?;
     if let Some(payload) = extract_versioned_payload(&json, IR_JSON_KIND, IR_JSON_SCHEMA_VERSION)? {
-        return Ok(serde_json::from_value(payload)?);
+        return serde_json::from_value(payload).map_err(json_error);
     }
-    Ok(serde_json::from_value(json)?)
+    serde_json::from_value(json).map_err(json_error)
 }
 
 pub fn read_bench_netlist(path: impl AsRef<Path>) -> Result<Netlist, IoError> {
@@ -142,7 +183,10 @@ pub fn read_netlist(path: impl AsRef<Path>) -> Result<Netlist, IoError> {
     read_netlist_as(path, detect_netlist_input_format(path))
 }
 
-pub fn read_netlist_as(path: impl AsRef<Path>, format: NetlistInputFormat) -> Result<Netlist, IoError> {
+pub fn read_netlist_as(
+    path: impl AsRef<Path>,
+    format: NetlistInputFormat,
+) -> Result<Netlist, IoError> {
     match format {
         NetlistInputFormat::IrJson => read_ir_json(path),
         NetlistInputFormat::Bench => read_bench_netlist(path),
@@ -154,18 +198,20 @@ pub fn write_pdk_json(path: impl AsRef<Path>, pdk: &Pdk) -> Result<(), IoError> 
         "schema_version": PDK_JSON_SCHEMA_VERSION,
         "kind": PDK_JSON_KIND,
         "payload": pdk,
-    }))?;
+    }))
+    .map_err(json_error)?;
     fs::write(path, content)?;
     Ok(())
 }
 
 pub fn read_pdk_json(path: impl AsRef<Path>) -> Result<Pdk, IoError> {
     let content = fs::read_to_string(path)?;
-    let json: Value = serde_json::from_str(&content)?;
-    if let Some(payload) = extract_versioned_payload(&json, PDK_JSON_KIND, PDK_JSON_SCHEMA_VERSION)? {
-        return Ok(serde_json::from_value(payload)?);
+    let json: Value = serde_json::from_str(&content).map_err(json_error)?;
+    if let Some(payload) = extract_versioned_payload(&json, PDK_JSON_KIND, PDK_JSON_SCHEMA_VERSION)?
+    {
+        return serde_json::from_value(payload).map_err(json_error);
     }
-    Ok(serde_json::from_value(json)?)
+    serde_json::from_value(json).map_err(json_error)
 }
 
 fn extract_versioned_payload(
@@ -184,13 +230,12 @@ fn extract_versioned_payload(
         return Ok(None);
     }
 
-    let schema_version = object
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or(IoError::InvalidJsonEnvelope {
+    let schema_version = object.get("schema_version").and_then(Value::as_u64).ok_or(
+        IoError::InvalidJsonEnvelope {
             kind: expected_kind,
             detail: "missing schema_version",
-        })?;
+        },
+    )?;
     if schema_version != expected_schema_version {
         return Err(IoError::UnsupportedSchemaVersion {
             kind: expected_kind,
@@ -227,6 +272,7 @@ struct BenchGateSpec {
     output: String,
     op: String,
     inputs: Vec<String>,
+    line: usize,
 }
 
 fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
@@ -234,22 +280,29 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
     let mut output_names = Vec::new();
     let mut gates = Vec::new();
 
-    for line in text.lines() {
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = line_index + 1;
         let trimmed = line.split('#').next().unwrap_or("").trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        if let Some(name) = parse_bench_decl(trimmed, "INPUT")? {
-            input_names.push(name.to_string());
+        if let Some(name) = parse_bench_decl(trimmed, "INPUT", line_number)? {
+            input_names.push(BenchNamedSignal {
+                name: name.to_string(),
+                line: line_number,
+            });
             continue;
         }
-        if let Some(name) = parse_bench_decl(trimmed, "OUTPUT")? {
-            output_names.push(name.to_string());
+        if let Some(name) = parse_bench_decl(trimmed, "OUTPUT", line_number)? {
+            output_names.push(BenchNamedSignal {
+                name: name.to_string(),
+                line: line_number,
+            });
             continue;
         }
 
-        gates.push(parse_bench_gate(trimmed)?);
+        gates.push(parse_bench_gate(trimmed, line_number)?);
     }
 
     ensure_unique_bench_signal_names(&input_names)?;
@@ -261,19 +314,19 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
     let mut next_output_port = HashMap::<String, u16>::new();
 
     for name in input_names {
-        let node_id = netlist.add_node(NodeKind::Port, &name);
-        signal_driver.insert(name, node_id);
+        let node_id = netlist.add_node(NodeKind::Port, &name.name);
+        signal_driver.insert(name.name, node_id);
     }
 
     for gate in gates {
         let expected_inputs = bench_expected_inputs(&gate.op).ok_or_else(|| {
-            IoError::BenchParse(format!(
+            bench_parse_error_at_line(gate.line, format!(
                 "unsupported gate op '{}'; supported ops are AND/OR/XOR/XNOR/NOT/NAND/NOR/BUF/BUFF/MUX/DFF/DFFE/MAJ/AOI21/OAI21/AOI22/OAI22/AOI31/OAI31/AOI211/OAI211/AOI311/OAI311/AOI321/OAI321/AOI221/OAI221/AOI222/OAI222/AOI322/OAI322/AOI421/OAI421/AOI422/OAI422/AOI431/OAI431/AOI432/OAI432/AOI433/OAI433/AOI441/OAI441/AOI442/OAI442/AOI443/OAI443/AOI444/OAI444/AOI2221/OAI2221",
                 gate.op
             ))
         })?;
         if gate.inputs.len() != expected_inputs {
-            return Err(IoError::BenchParse(format!(
+            return Err(bench_parse_error_at_line(gate.line, format!(
                 "gate '{}' op {} expects {} input(s), got {}",
                 gate.output,
                 gate.op,
@@ -311,7 +364,11 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
             }
             "XNOR" => {
                 let inner_name = format!("{}__bench_xnor_inner", gate.output);
-                let xor_node = netlist.add_node_with_logic(NodeKind::CellInstance, &inner_name, Some(LogicOp::Xor));
+                let xor_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &inner_name,
+                    Some(LogicOp::Xor),
+                );
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
@@ -319,18 +376,32 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     &gate.inputs,
                     xor_node,
                 )?;
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
                 netlist
                     .connect(
-                        PinRef { node: xor_node, port: 0 },
-                        PinRef { node: not_node, port: 0 },
+                        PinRef {
+                            node: xor_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
             "NAND" => {
                 let inner_name = format!("{}__bench_nand_inner", gate.output);
-                let and_node = netlist.add_node_with_logic(NodeKind::CellInstance, &inner_name, Some(LogicOp::And));
+                let and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &inner_name,
+                    Some(LogicOp::And),
+                );
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
@@ -338,18 +409,32 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     &gate.inputs,
                     and_node,
                 )?;
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
                 netlist
                     .connect(
-                        PinRef { node: and_node, port: 0 },
-                        PinRef { node: not_node, port: 0 },
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
             "NOR" => {
                 let inner_name = format!("{}__bench_nor_inner", gate.output);
-                let or_node = netlist.add_node_with_logic(NodeKind::CellInstance, &inner_name, Some(LogicOp::Or));
+                let or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &inner_name,
+                    Some(LogicOp::Or),
+                );
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
@@ -357,11 +442,21 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     &gate.inputs,
                     or_node,
                 )?;
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
                 netlist
                     .connect(
-                        PinRef { node: or_node, port: 0 },
-                        PinRef { node: not_node, port: 0 },
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
@@ -372,11 +467,31 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let right_and_name = format!("{}__bench_maj_bc", gate.output);
                 let left_or_name = format!("{}__bench_maj_or0", gate.output);
 
-                let ab_node = netlist.add_node_with_logic(NodeKind::CellInstance, &left_and_name, Some(LogicOp::And));
-                let ac_node = netlist.add_node_with_logic(NodeKind::CellInstance, &mid_and_name, Some(LogicOp::And));
-                let bc_node = netlist.add_node_with_logic(NodeKind::CellInstance, &right_and_name, Some(LogicOp::And));
-                let or0_node = netlist.add_node_with_logic(NodeKind::CellInstance, &left_or_name, Some(LogicOp::Or));
-                let maj_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Or));
+                let ab_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_and_name,
+                    Some(LogicOp::And),
+                );
+                let ac_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &mid_and_name,
+                    Some(LogicOp::And),
+                );
+                let bc_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_and_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_or_name,
+                    Some(LogicOp::Or),
+                );
+                let maj_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Or),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -400,25 +515,73 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     bc_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: ab_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: ab_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: ac_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: ac_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: maj_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: maj_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: bc_node, port: 0 }, PinRef { node: maj_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: bc_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: maj_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 maj_node
             }
             "AOI21" => {
                 let and_name = format!("{}__bench_aoi21_and", gate.output);
                 let or_name = format!("{}__bench_aoi21_or", gate.output);
-                let and_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and_name, Some(LogicOp::And));
-                let or_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and_name,
+                    Some(LogicOp::And),
+                );
+                let or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -428,10 +591,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and_node, port: 0 }, PinRef { node: or_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -439,20 +614,44 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: or_node, port: 1 },
+                        PinRef {
+                            node: or_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
             "OAI21" => {
                 let or_name = format!("{}__bench_oai21_or", gate.output);
                 let and_name = format!("{}__bench_oai21_and", gate.output);
-                let or_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or_name, Some(LogicOp::Or));
-                let and_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or_name,
+                    Some(LogicOp::Or),
+                );
+                let and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -462,10 +661,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or_node, port: 0 }, PinRef { node: and_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -473,11 +684,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: and_node, port: 1 },
+                        PinRef {
+                            node: and_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -486,12 +709,26 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let right_and_name = format!("{}__bench_aoi22_and1", gate.output);
                 let or_name = format!("{}__bench_aoi22_or", gate.output);
 
-                let left_and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &left_and_name, Some(LogicOp::And));
-                let right_and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &right_and_name, Some(LogicOp::And));
-                let or_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let left_and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_and_name,
+                    Some(LogicOp::And),
+                );
+                let right_and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_and_name,
+                    Some(LogicOp::And),
+                );
+                let or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -513,7 +750,10 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: left_and_node,
                             port: 0,
                         },
-                        PinRef { node: or_node, port: 0 },
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
@@ -522,11 +762,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: right_and_node,
                             port: 0,
                         },
-                        PinRef { node: or_node, port: 1 },
+                        PinRef {
+                            node: or_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -535,12 +787,26 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let right_or_name = format!("{}__bench_oai22_or1", gate.output);
                 let and_name = format!("{}__bench_oai22_and", gate.output);
 
-                let left_or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &left_or_name, Some(LogicOp::Or));
-                let right_or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &right_or_name, Some(LogicOp::Or));
-                let and_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let left_or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_or_name,
+                    Some(LogicOp::Or),
+                );
+                let right_or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_or_name,
+                    Some(LogicOp::Or),
+                );
+                let and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -562,7 +828,10 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: left_or_node,
                             port: 0,
                         },
-                        PinRef { node: and_node, port: 0 },
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
@@ -571,11 +840,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: right_or_node,
                             port: 0,
                         },
-                        PinRef { node: and_node, port: 1 },
+                        PinRef {
+                            node: and_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -584,12 +865,26 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and1_name = format!("{}__bench_aoi31_and1", gate.output);
                 let or_name = format!("{}__bench_aoi31_or", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let or_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -599,10 +894,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -610,14 +917,30 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: or_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -625,11 +948,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: or_node, port: 1 },
+                        PinRef {
+                            node: or_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -638,12 +973,26 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or1_name = format!("{}__bench_oai31_or1", gate.output);
                 let and_name = format!("{}__bench_oai31_and", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let and_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -653,10 +1002,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -664,14 +1025,30 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: and_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -679,11 +1056,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: and_node, port: 1 },
+                        PinRef {
+                            node: and_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -692,13 +1081,26 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi211_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi211_or1", gate.output);
 
-                let and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -708,10 +1110,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -719,26 +1133,54 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: or0_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
                     .connect(
                         PinRef {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -747,13 +1189,26 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai211_and0", gate.output);
                 let and1_name = format!("{}__bench_oai211_and1", gate.output);
 
-                let or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -763,10 +1218,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -774,26 +1241,54 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: and0_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
                     .connect(
                         PinRef {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -803,15 +1298,31 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi311_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi311_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -821,10 +1332,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -832,29 +1355,60 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
                     .connect(
                         PinRef {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: or0_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let fifth_input = signal_driver.get(&gate.inputs[4]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[4]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[4]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -862,11 +1416,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fifth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[4]),
                         },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -876,15 +1442,31 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai311_and0", gate.output);
                 let and1_name = format!("{}__bench_oai311_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -894,10 +1476,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -905,29 +1499,60 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
                     .connect(
                         PinRef {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: and0_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let fifth_input = signal_driver.get(&gate.inputs[4]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[4]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[4]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -935,11 +1560,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fifth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[4]),
                         },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -950,17 +1587,36 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi321_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi321_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -970,10 +1626,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -981,14 +1649,30 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -996,14 +1680,29 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let fifth_input = signal_driver.get(&gate.inputs[4]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[4]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[4]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -1011,14 +1710,29 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fifth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[4]),
                         },
-                        PinRef { node: or0_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let sixth_input = signal_driver.get(&gate.inputs[5]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[5]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[5]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -1026,11 +1740,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: sixth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[5]),
                         },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1041,17 +1767,36 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai321_and0", gate.output);
                 let and1_name = format!("{}__bench_oai321_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1061,10 +1806,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 let third_input = signal_driver.get(&gate.inputs[2]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[2]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[2]
+                    ))
                 })?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -1072,14 +1829,30 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: third_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
                         },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let fourth_input = signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[3]))
-                })?;
+                let fourth_input =
+                    signal_driver.get(&gate.inputs[3]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[3]
+                        ))
+                    })?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -1087,14 +1860,29 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fourth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
                         },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let fifth_input = signal_driver.get(&gate.inputs[4]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[4]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[4]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -1102,14 +1890,29 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fifth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[4]),
                         },
-                        PinRef { node: and0_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let sixth_input = signal_driver.get(&gate.inputs[5]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[5]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[5]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -1117,11 +1920,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: sixth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[5]),
                         },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1132,23 +1947,46 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi322_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi322_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
                     &signal_driver,
-                    &[gate.inputs[0].clone(), gate.inputs[1].clone(), gate.inputs[2].clone()],
+                    &[
+                        gate.inputs[0].clone(),
+                        gate.inputs[1].clone(),
+                        gate.inputs[2].clone(),
+                    ],
                     and0_node,
                 )?;
                 connect_bench_gate_inputs(
@@ -1166,19 +2004,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and2_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1189,23 +2072,46 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai322_and0", gate.output);
                 let and1_name = format!("{}__bench_oai322_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
                     &signal_driver,
-                    &[gate.inputs[0].clone(), gate.inputs[1].clone(), gate.inputs[2].clone()],
+                    &[
+                        gate.inputs[0].clone(),
+                        gate.inputs[1].clone(),
+                        gate.inputs[2].clone(),
+                    ],
                     or0_node,
                 )?;
                 connect_bench_gate_inputs(
@@ -1223,19 +2129,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or2_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1247,19 +2198,41 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi421_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi421_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1269,21 +2242,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1294,22 +2297,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: or0_node, port: 1 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1321,19 +2366,41 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai421_and0", gate.output);
                 let and1_name = format!("{}__bench_oai421_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1343,21 +2410,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1368,22 +2465,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: and0_node, port: 1 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1396,21 +2535,46 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi422_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi422_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1420,21 +2584,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1452,19 +2646,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and4_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1477,21 +2716,46 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai422_and0", gate.output);
                 let and1_name = format!("{}__bench_oai422_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1501,21 +2765,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1533,19 +2827,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or4_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1558,21 +2897,46 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi431_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi431_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1582,21 +2946,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1607,31 +3001,88 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and4_node, port: 1 },
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: or0_node, port: 1 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1644,21 +3095,46 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai431_and0", gate.output);
                 let and1_name = format!("{}__bench_oai431_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1668,21 +3144,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1693,31 +3199,88 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or4_node, port: 1 },
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: and0_node, port: 1 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1731,23 +3294,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi432_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi432_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let and5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and5_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let and5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and5_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1757,21 +3348,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1782,12 +3403,27 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and4_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1798,19 +3434,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and5_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and5_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1824,23 +3505,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai432_and0", gate.output);
                 let and1_name = format!("{}__bench_oai432_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let or5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or5_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let or5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or5_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1850,21 +3559,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1875,12 +3614,27 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or4_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -1891,19 +3645,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or5_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or5_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1913,15 +3712,31 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let left_or_name = format!("{}__bench_aoi221_or0", gate.output);
                 let right_or_name = format!("{}__bench_aoi221_or1", gate.output);
 
-                let left_and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &left_and_name, Some(LogicOp::And));
-                let right_and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &right_and_name, Some(LogicOp::And));
-                let left_or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &left_or_name, Some(LogicOp::Or));
-                let right_or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &right_or_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let left_and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_and_name,
+                    Some(LogicOp::And),
+                );
+                let right_and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_and_name,
+                    Some(LogicOp::And),
+                );
+                let left_or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_or_name,
+                    Some(LogicOp::Or),
+                );
+                let right_or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_or_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -1943,7 +3758,10 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: left_and_node,
                             port: 0,
                         },
-                        PinRef { node: left_or_node, port: 0 },
+                        PinRef {
+                            node: left_or_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
@@ -1952,11 +3770,17 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: right_and_node,
                             port: 0,
                         },
-                        PinRef { node: left_or_node, port: 1 },
+                        PinRef {
+                            node: left_or_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let fifth_input = signal_driver.get(&gate.inputs[4]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[4]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[4]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -1964,7 +3788,10 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: left_or_node,
                             port: 0,
                         },
-                        PinRef { node: right_or_node, port: 0 },
+                        PinRef {
+                            node: right_or_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
@@ -1973,11 +3800,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fifth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[4]),
                         },
-                        PinRef { node: right_or_node, port: 1 },
+                        PinRef {
+                            node: right_or_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: right_or_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: right_or_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -1987,15 +3826,31 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let left_and_name = format!("{}__bench_oai221_and0", gate.output);
                 let right_and_name = format!("{}__bench_oai221_and1", gate.output);
 
-                let left_or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &left_or_name, Some(LogicOp::Or));
-                let right_or_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &right_or_name, Some(LogicOp::Or));
-                let left_and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &left_and_name, Some(LogicOp::And));
-                let right_and_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &right_and_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let left_or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_or_name,
+                    Some(LogicOp::Or),
+                );
+                let right_or_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_or_name,
+                    Some(LogicOp::Or),
+                );
+                let left_and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &left_and_name,
+                    Some(LogicOp::And),
+                );
+                let right_and_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &right_and_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2017,7 +3872,10 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: left_or_node,
                             port: 0,
                         },
-                        PinRef { node: left_and_node, port: 0 },
+                        PinRef {
+                            node: left_and_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
@@ -2026,11 +3884,17 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: right_or_node,
                             port: 0,
                         },
-                        PinRef { node: left_and_node, port: 1 },
+                        PinRef {
+                            node: left_and_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 let fifth_input = signal_driver.get(&gate.inputs[4]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[4]))
+                    IoError::BenchParse(format!(
+                        "signal '{}' used before definition",
+                        gate.inputs[4]
+                    ))
                 })?;
                 netlist
                     .connect(
@@ -2038,7 +3902,10 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: left_and_node,
                             port: 0,
                         },
-                        PinRef { node: right_and_node, port: 0 },
+                        PinRef {
+                            node: right_and_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
@@ -2047,11 +3914,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: fifth_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[4]),
                         },
-                        PinRef { node: right_and_node, port: 1 },
+                        PinRef {
+                            node: right_and_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: right_and_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: right_and_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2062,17 +3941,36 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi222_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi222_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2096,19 +3994,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and2_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2119,17 +4062,36 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai222_and0", gate.output);
                 let and1_name = format!("{}__bench_oai222_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2153,19 +4115,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or2_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2180,25 +4187,56 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi433_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi433_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let and5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and5_name, Some(LogicOp::And));
-                let and6_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and6_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let and5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and5_name,
+                    Some(LogicOp::And),
+                );
+                let and6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and6_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2208,21 +4246,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2233,12 +4301,27 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and4_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2249,28 +4332,88 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and5_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and5_node, port: 0 }, PinRef { node: and6_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[9]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[9]) },
-                        PinRef { node: and6_node, port: 1 },
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and6_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[9]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[9]),
+                        },
+                        PinRef {
+                            node: and6_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and6_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2285,25 +4428,56 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai433_and0", gate.output);
                 let and1_name = format!("{}__bench_oai433_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let or5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or5_name, Some(LogicOp::Or));
-                let or6_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or6_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let or5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or5_name,
+                    Some(LogicOp::Or),
+                );
+                let or6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or6_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2313,21 +4487,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2338,12 +4542,27 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or4_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2354,28 +4573,88 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or5_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or5_node, port: 0 }, PinRef { node: or6_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[9]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[9]) },
-                        PinRef { node: or6_node, port: 1 },
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or6_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[9]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[9]),
+                        },
+                        PinRef {
+                            node: or6_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or6_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2389,23 +4668,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi441_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi441_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let and5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and5_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let and5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and5_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2415,21 +4722,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2440,40 +4777,112 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and4_node, port: 1 },
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: and5_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: and5_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: and5_node, port: 0 }, PinRef { node: or0_node, port: 1 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[8]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[8]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[8]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[8]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2487,23 +4896,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai441_and0", gate.output);
                 let and1_name = format!("{}__bench_oai441_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let or5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or5_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let or5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or5_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2513,21 +4950,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2538,40 +5005,112 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or4_node, port: 1 },
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: or5_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: or5_node, port: 1 },
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: or5_node, port: 0 }, PinRef { node: and0_node, port: 1 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[8]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[8]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[8]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[8]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2586,25 +5125,56 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi442_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi442_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let and5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and5_name, Some(LogicOp::And));
-                let and6_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and6_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let and5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and5_name,
+                    Some(LogicOp::And),
+                );
+                let and6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and6_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2614,21 +5184,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2639,21 +5239,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and4_node, port: 1 },
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: and5_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: and5_node, port: 1 },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2664,19 +5294,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and6_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and5_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and6_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2691,25 +5366,56 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai442_and0", gate.output);
                 let and1_name = format!("{}__bench_oai442_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let or5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or5_name, Some(LogicOp::Or));
-                let or6_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or6_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let or5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or5_name,
+                    Some(LogicOp::Or),
+                );
+                let or6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or6_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2719,21 +5425,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2744,21 +5480,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or4_node, port: 1 },
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: or5_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: or5_node, port: 1 },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2769,19 +5535,64 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or6_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or5_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or6_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2797,27 +5608,61 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi443_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi443_or1", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let and5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and5_name, Some(LogicOp::And));
-                let and6_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and6_name, Some(LogicOp::And));
-                let and7_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and7_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let and5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and5_name,
+                    Some(LogicOp::And),
+                );
+                let and6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and6_name,
+                    Some(LogicOp::And),
+                );
+                let and7_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and7_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2827,21 +5672,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: and1_node, port: 1 },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2852,21 +5727,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: and4_node, port: 1 },
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and4_node, port: 0 }, PinRef { node: and5_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: and5_node, port: 1 },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2877,28 +5782,88 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and6_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and6_node, port: 0 }, PinRef { node: and7_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[10]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]) },
-                        PinRef { node: and7_node, port: 1 },
+                        PinRef {
+                            node: and6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and7_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[10]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]),
+                        },
+                        PinRef {
+                            node: and7_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and5_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and7_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and7_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -2914,27 +5879,61 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai443_and0", gate.output);
                 let and1_name = format!("{}__bench_oai443_and1", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let or5_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or5_name, Some(LogicOp::Or));
-                let or6_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or6_name, Some(LogicOp::Or));
-                let or7_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or7_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let or5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or5_name,
+                    Some(LogicOp::Or),
+                );
+                let or6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or6_name,
+                    Some(LogicOp::Or),
+                );
+                let or7_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or7_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -2944,21 +5943,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or0_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                        PinRef { node: or1_node, port: 1 },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2969,21 +5998,51 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or3_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                        PinRef { node: or4_node, port: 1 },
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or4_node, port: 0 }, PinRef { node: or5_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                        PinRef { node: or5_node, port: 1 },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
@@ -2994,28 +6053,88 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or6_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or6_node, port: 0 }, PinRef { node: or7_node, port: 0 })
-                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist
                     .connect(
-                        PinRef { node: signal_driver[&gate.inputs[10]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]) },
-                        PinRef { node: or7_node, port: 1 },
+                        PinRef {
+                            node: or6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or7_node,
+                            port: 0,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[10]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]),
+                        },
+                        PinRef {
+                            node: or7_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or5_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or7_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or7_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -3032,18 +6151,66 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or0_name = format!("{}__bench_aoi444_or0", gate.output);
                 let or1_name = format!("{}__bench_aoi444_or1", gate.output);
 
-                let and0_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let and3_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and3_name, Some(LogicOp::And));
-                let and4_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and4_name, Some(LogicOp::And));
-                let and5_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and5_name, Some(LogicOp::And));
-                let and6_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and6_name, Some(LogicOp::And));
-                let and7_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and7_name, Some(LogicOp::And));
-                let and8_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and8_name, Some(LogicOp::And));
-                let or0_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let and3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and3_name,
+                    Some(LogicOp::And),
+                );
+                let and4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and4_name,
+                    Some(LogicOp::And),
+                );
+                let and5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and5_name,
+                    Some(LogicOp::And),
+                );
+                let and6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and6_name,
+                    Some(LogicOp::And),
+                );
+                let and7_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and7_name,
+                    Some(LogicOp::And),
+                );
+                let and8_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and8_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -3052,16 +6219,54 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     &[gate.inputs[0].clone(), gate.inputs[1].clone()],
                     and0_node,
                 )?;
-                netlist.connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(
-                    PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) },
-                    PinRef { node: and1_node, port: 1 },
-                ).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(
-                    PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) },
-                    PinRef { node: and2_node, port: 1 },
-                ).map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
@@ -3069,16 +6274,54 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     &[gate.inputs[4].clone(), gate.inputs[5].clone()],
                     and3_node,
                 )?;
-                netlist.connect(PinRef { node: and3_node, port: 0 }, PinRef { node: and4_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(
-                    PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) },
-                    PinRef { node: and4_node, port: 1 },
-                ).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and4_node, port: 0 }, PinRef { node: and5_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(
-                    PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) },
-                    PinRef { node: and5_node, port: 1 },
-                ).map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: and4_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: and5_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
@@ -3086,21 +6329,114 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     &[gate.inputs[8].clone(), gate.inputs[9].clone()],
                     and6_node,
                 )?;
-                netlist.connect(PinRef { node: and6_node, port: 0 }, PinRef { node: and7_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(
-                    PinRef { node: signal_driver[&gate.inputs[10]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]) },
-                    PinRef { node: and7_node, port: 1 },
-                ).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and7_node, port: 0 }, PinRef { node: and8_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(
-                    PinRef { node: signal_driver[&gate.inputs[11]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[11]) },
-                    PinRef { node: and8_node, port: 1 },
-                ).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or0_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and5_node, port: 0 }, PinRef { node: or0_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and8_node, port: 0 }, PinRef { node: or1_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or1_node, port: 0 }, PinRef { node: not_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and7_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[10]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]),
+                        },
+                        PinRef {
+                            node: and7_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and7_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and8_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[11]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[11]),
+                        },
+                        PinRef {
+                            node: and8_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and8_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
             "OAI444" => {
@@ -3116,39 +6452,292 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and0_name = format!("{}__bench_oai444_and0", gate.output);
                 let and1_name = format!("{}__bench_oai444_and1", gate.output);
 
-                let or0_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let or3_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or3_name, Some(LogicOp::Or));
-                let or4_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or4_name, Some(LogicOp::Or));
-                let or5_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or5_name, Some(LogicOp::Or));
-                let or6_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or6_name, Some(LogicOp::Or));
-                let or7_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or7_name, Some(LogicOp::Or));
-                let or8_node = netlist.add_node_with_logic(NodeKind::CellInstance, &or8_name, Some(LogicOp::Or));
-                let and0_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node = netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let or3_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or3_name,
+                    Some(LogicOp::Or),
+                );
+                let or4_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or4_name,
+                    Some(LogicOp::Or),
+                );
+                let or5_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or5_name,
+                    Some(LogicOp::Or),
+                );
+                let or6_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or6_name,
+                    Some(LogicOp::Or),
+                );
+                let or7_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or7_name,
+                    Some(LogicOp::Or),
+                );
+                let or8_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or8_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
-                connect_bench_gate_inputs(&mut netlist, &mut next_output_port, &signal_driver, &[gate.inputs[0].clone(), gate.inputs[1].clone()], or0_node)?;
-                netlist.connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: signal_driver[&gate.inputs[2]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]) }, PinRef { node: or1_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: signal_driver[&gate.inputs[3]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]) }, PinRef { node: or2_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                connect_bench_gate_inputs(&mut netlist, &mut next_output_port, &signal_driver, &[gate.inputs[4].clone(), gate.inputs[5].clone()], or3_node)?;
-                netlist.connect(PinRef { node: or3_node, port: 0 }, PinRef { node: or4_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: signal_driver[&gate.inputs[6]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]) }, PinRef { node: or4_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or4_node, port: 0 }, PinRef { node: or5_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: signal_driver[&gate.inputs[7]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]) }, PinRef { node: or5_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                connect_bench_gate_inputs(&mut netlist, &mut next_output_port, &signal_driver, &[gate.inputs[8].clone(), gate.inputs[9].clone()], or6_node)?;
-                netlist.connect(PinRef { node: or6_node, port: 0 }, PinRef { node: or7_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: signal_driver[&gate.inputs[10]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]) }, PinRef { node: or7_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or7_node, port: 0 }, PinRef { node: or8_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: signal_driver[&gate.inputs[11]], port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[11]) }, PinRef { node: or8_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and0_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or5_node, port: 0 }, PinRef { node: and0_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: or8_node, port: 0 }, PinRef { node: and1_node, port: 1 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
-                netlist.connect(PinRef { node: and1_node, port: 0 }, PinRef { node: not_node, port: 0 }).map_err(|error| IoError::BenchParse(error.to_string()))?;
+                connect_bench_gate_inputs(
+                    &mut netlist,
+                    &mut next_output_port,
+                    &signal_driver,
+                    &[gate.inputs[0].clone(), gate.inputs[1].clone()],
+                    or0_node,
+                )?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[2]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[2]),
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[3]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[3]),
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                connect_bench_gate_inputs(
+                    &mut netlist,
+                    &mut next_output_port,
+                    &signal_driver,
+                    &[gate.inputs[4].clone(), gate.inputs[5].clone()],
+                    or3_node,
+                )?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or3_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[6]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
+                        },
+                        PinRef {
+                            node: or4_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or4_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[7]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[7]),
+                        },
+                        PinRef {
+                            node: or5_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                connect_bench_gate_inputs(
+                    &mut netlist,
+                    &mut next_output_port,
+                    &signal_driver,
+                    &[gate.inputs[8].clone(), gate.inputs[9].clone()],
+                    or6_node,
+                )?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or6_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or7_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[10]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[10]),
+                        },
+                        PinRef {
+                            node: or7_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or7_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or8_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: signal_driver[&gate.inputs[11]],
+                            port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[11]),
+                        },
+                        PinRef {
+                            node: or8_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or5_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: or8_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
+                netlist
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
+                    .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
             "AOI2221" => {
@@ -3159,19 +6748,41 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let or1_name = format!("{}__bench_aoi2221_or1", gate.output);
                 let or2_name = format!("{}__bench_aoi2221_or2", gate.output);
 
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -3195,22 +6806,71 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     and2_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: or0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: or0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: or1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: or1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let seventh_input = signal_driver.get(&gate.inputs[6]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[6]))
-                })?;
+                let seventh_input =
+                    signal_driver.get(&gate.inputs[6]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[6]
+                        ))
+                    })?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: or2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -3218,11 +6878,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: seventh_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
                         },
-                        PinRef { node: or2_node, port: 1 },
+                        PinRef {
+                            node: or2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -3234,19 +6906,41 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                 let and1_name = format!("{}__bench_oai2221_and1", gate.output);
                 let and2_name = format!("{}__bench_oai2221_and2", gate.output);
 
-                let or0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or0_name, Some(LogicOp::Or));
-                let or1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or1_name, Some(LogicOp::Or));
-                let or2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &or2_name, Some(LogicOp::Or));
-                let and0_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and0_name, Some(LogicOp::And));
-                let and1_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and1_name, Some(LogicOp::And));
-                let and2_node =
-                    netlist.add_node_with_logic(NodeKind::CellInstance, &and2_name, Some(LogicOp::And));
-                let not_node = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(LogicOp::Not));
+                let or0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or0_name,
+                    Some(LogicOp::Or),
+                );
+                let or1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or1_name,
+                    Some(LogicOp::Or),
+                );
+                let or2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &or2_name,
+                    Some(LogicOp::Or),
+                );
+                let and0_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and0_name,
+                    Some(LogicOp::And),
+                );
+                let and1_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and1_name,
+                    Some(LogicOp::And),
+                );
+                let and2_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &and2_name,
+                    Some(LogicOp::And),
+                );
+                let not_node = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(LogicOp::Not),
+                );
 
                 connect_bench_gate_inputs(
                     &mut netlist,
@@ -3270,22 +6964,71 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                     or2_node,
                 )?;
                 netlist
-                    .connect(PinRef { node: or0_node, port: 0 }, PinRef { node: and0_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: or0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or1_node, port: 0 }, PinRef { node: and0_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and0_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and0_node, port: 0 }, PinRef { node: and1_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and0_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: or2_node, port: 0 }, PinRef { node: and1_node, port: 1 })
+                    .connect(
+                        PinRef {
+                            node: or2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and1_node,
+                            port: 1,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
-                let seventh_input = signal_driver.get(&gate.inputs[6]).copied().ok_or_else(|| {
-                    IoError::BenchParse(format!("signal '{}' used before definition", gate.inputs[6]))
-                })?;
+                let seventh_input =
+                    signal_driver.get(&gate.inputs[6]).copied().ok_or_else(|| {
+                        IoError::BenchParse(format!(
+                            "signal '{}' used before definition",
+                            gate.inputs[6]
+                        ))
+                    })?;
                 netlist
-                    .connect(PinRef { node: and1_node, port: 0 }, PinRef { node: and2_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and1_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
                     .connect(
@@ -3293,11 +7036,23 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                             node: seventh_input,
                             port: alloc_bench_output_port(&mut next_output_port, &gate.inputs[6]),
                         },
-                        PinRef { node: and2_node, port: 1 },
+                        PinRef {
+                            node: and2_node,
+                            port: 1,
+                        },
                     )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 netlist
-                    .connect(PinRef { node: and2_node, port: 0 }, PinRef { node: not_node, port: 0 })
+                    .connect(
+                        PinRef {
+                            node: and2_node,
+                            port: 0,
+                        },
+                        PinRef {
+                            node: not_node,
+                            port: 0,
+                        },
+                    )
                     .map_err(|error| IoError::BenchParse(error.to_string()))?;
                 not_node
             }
@@ -3308,7 +7063,11 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
                         gate.op
                     ))
                 })?;
-                let node_id = netlist.add_node_with_logic(NodeKind::CellInstance, &gate.output, Some(logic_op));
+                let node_id = netlist.add_node_with_logic(
+                    NodeKind::CellInstance,
+                    &gate.output,
+                    Some(logic_op),
+                );
                 connect_bench_gate_inputs(
                     &mut netlist,
                     &mut next_output_port,
@@ -3323,16 +7082,16 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
     }
 
     for output_name in output_names {
-        let Some(&src_node) = signal_driver.get(&output_name) else {
-            return Err(IoError::BenchParse(format!(
-                "output signal '{}' has no driver",
-                output_name
-            )));
+        let Some(&src_node) = signal_driver.get(&output_name.name) else {
+            return Err(bench_parse_error_at_line(
+                output_name.line,
+                format!("output signal '{}' has no driver", output_name.name),
+            ));
         };
-        let output_node = netlist.add_node(NodeKind::Port, &output_name);
+        let output_node = netlist.add_node(NodeKind::Port, &output_name.name);
         let src_pin = PinRef {
             node: src_node,
-            port: alloc_bench_output_port(&mut next_output_port, &output_name),
+            port: alloc_bench_output_port(&mut next_output_port, &output_name.name),
         };
         let dst_pin = PinRef {
             node: output_node,
@@ -3348,19 +7107,22 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
 
 fn order_bench_gates(
     gates: Vec<BenchGateSpec>,
-    input_names: &[String],
+    input_names: &[BenchNamedSignal],
 ) -> Result<Vec<BenchGateSpec>, IoError> {
-    let input_set = input_names.iter().cloned().collect::<HashSet<_>>();
+    let input_set = input_names
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<HashSet<_>>();
     let mut gate_outputs = HashSet::new();
     for gate in &gates {
         if input_set.contains(&gate.output) {
-            return Err(IoError::BenchParse(format!(
+            return Err(bench_parse_error_at_line(gate.line, format!(
                 "signal '{}' defined more than once",
                 gate.output
             )));
         }
         if !gate_outputs.insert(gate.output.clone()) {
-            return Err(IoError::BenchParse(format!(
+            return Err(bench_parse_error_at_line(gate.line, format!(
                 "signal '{}' defined more than once",
                 gate.output
             )));
@@ -3369,8 +7131,8 @@ fn order_bench_gates(
 
     for gate in &gates {
         for input in &gate.inputs {
-            if !input_names.iter().any(|name| name == input) && !gate_outputs.contains(input) {
-                return Err(IoError::BenchParse(format!(
+            if !input_names.iter().any(|name| &name.name == input) && !gate_outputs.contains(input) {
+                return Err(bench_parse_error_at_line(gate.line, format!(
                     "signal '{}' used before definition",
                     input
                 )));
@@ -3378,7 +7140,10 @@ fn order_bench_gates(
         }
     }
 
-    let mut known_signals = input_names.iter().cloned().collect::<HashSet<_>>();
+    let mut known_signals = input_names
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<HashSet<_>>();
     let mut remaining = gates.into_iter().map(Some).collect::<Vec<_>>();
     let mut ordered = Vec::new();
 
@@ -3401,8 +7166,15 @@ fn order_bench_gates(
         }
 
         if !progress {
-            return Err(IoError::BenchParse(
-                "bench gate dependency cycle or self-reference detected".to_string(),
+            let line = remaining
+                .iter()
+                .flatten()
+                .map(|gate| gate.line)
+                .min()
+                .unwrap_or(0);
+            return Err(bench_parse_error_at_line(
+                line,
+                "bench gate dependency cycle or self-reference detected",
             ));
         }
     }
@@ -3410,17 +7182,24 @@ fn order_bench_gates(
     Ok(ordered)
 }
 
-fn ensure_unique_bench_signal_names(names: &[String]) -> Result<(), IoError> {
+fn ensure_unique_bench_signal_names(names: &[BenchNamedSignal]) -> Result<(), IoError> {
     let mut seen = HashSet::new();
     for name in names {
-        if !seen.insert(name) {
-            return Err(IoError::BenchParse(format!("signal '{}' defined more than once", name)));
+        if !seen.insert(&name.name) {
+            return Err(bench_parse_error_at_line(name.line, format!(
+                "signal '{}' defined more than once",
+                name.name
+            )));
         }
     }
     Ok(())
 }
 
-fn parse_bench_decl<'a>(line: &'a str, keyword: &str) -> Result<Option<&'a str>, IoError> {
+fn parse_bench_decl<'a>(
+    line: &'a str,
+    keyword: &str,
+    line_number: usize,
+) -> Result<Option<&'a str>, IoError> {
     let Some((prefix, rest)) = line.split_once('(') else {
         return Ok(None);
     };
@@ -3428,26 +7207,38 @@ fn parse_bench_decl<'a>(line: &'a str, keyword: &str) -> Result<Option<&'a str>,
         return Ok(None);
     }
     let Some(name) = rest.strip_suffix(')') else {
-        return Err(IoError::BenchParse(format!("invalid {} declaration: {}", keyword, line)));
+        return Err(bench_parse_error_at_line(line_number, format!(
+            "invalid {} declaration: {}",
+            keyword, line
+        )));
     };
     let name = name.trim();
     validate_bench_signal_name(name)?;
     Ok(Some(name))
 }
 
-fn parse_bench_gate(line: &str) -> Result<BenchGateSpec, IoError> {
+fn parse_bench_gate(line: &str, line_number: usize) -> Result<BenchGateSpec, IoError> {
     let Some((lhs, rhs)) = line.split_once('=') else {
-        return Err(IoError::BenchParse(format!("unsupported line format: {}", line)));
+        return Err(bench_parse_error_at_line(line_number, format!(
+            "unsupported line format: {}",
+            line
+        )));
     };
     let output = lhs.trim();
     validate_bench_signal_name(output)?;
 
     let rhs = rhs.trim();
     let Some(open_idx) = rhs.find('(') else {
-        return Err(IoError::BenchParse(format!("unsupported line format: {}", line)));
+        return Err(bench_parse_error_at_line(line_number, format!(
+            "unsupported line format: {}",
+            line
+        )));
     };
     let Some(arg_text) = rhs.strip_suffix(')') else {
-        return Err(IoError::BenchParse(format!("unsupported line format: {}", line)));
+        return Err(bench_parse_error_at_line(line_number, format!(
+            "unsupported line format: {}",
+            line
+        )));
     };
     let op = arg_text[..open_idx].trim();
     validate_bench_op_name(op)?;
@@ -3466,18 +7257,22 @@ fn parse_bench_gate(line: &str) -> Result<BenchGateSpec, IoError> {
         output: output.to_string(),
         op: op.to_ascii_uppercase(),
         inputs: args,
+        line: line_number,
     })
 }
 
 fn validate_bench_signal_name(identifier: &str) -> Result<(), IoError> {
     if identifier.is_empty() {
-        return Err(IoError::BenchParse("empty identifier".to_string()));
+        return Err(bench_parse_error("empty identifier"));
     }
     if identifier
         .chars()
         .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '(' | ')' | ',' | '=' | '#'))
     {
-        return Err(IoError::BenchParse(format!("invalid identifier '{}'", identifier)));
+        return Err(bench_parse_error(format!(
+            "invalid identifier '{}'",
+            identifier
+        )));
     }
     Ok(())
 }
@@ -3485,13 +7280,19 @@ fn validate_bench_signal_name(identifier: &str) -> Result<(), IoError> {
 fn validate_bench_op_name(identifier: &str) -> Result<(), IoError> {
     let mut chars = identifier.chars();
     let Some(first) = chars.next() else {
-        return Err(IoError::BenchParse("empty identifier".to_string()));
+        return Err(bench_parse_error("empty identifier"));
     };
     if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(IoError::BenchParse(format!("invalid identifier '{}'", identifier)));
+        return Err(bench_parse_error(format!(
+            "invalid identifier '{}'",
+            identifier
+        )));
     }
     if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-        return Err(IoError::BenchParse(format!("invalid identifier '{}'", identifier)));
+        return Err(bench_parse_error(format!(
+            "invalid identifier '{}'",
+            identifier
+        )));
     }
     Ok(())
 }
@@ -3694,7 +7495,23 @@ mod tests {
 
         let error = read_ir_json(&path).expect_err("unsupported schema version should be rejected");
 
-        assert!(error.to_string().contains("unsupported rflux_ir_netlist schema version 99"));
+        assert!(error
+            .to_string()
+            .contains("unsupported rflux_ir_netlist schema version 99"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_ir_json_reports_line_and_column_for_malformed_json() {
+        let path = unique_test_path("ir-malformed-json-location");
+        fs::write(&path, "{\n  \"nodes\": [\n    \n")
+            .expect("malformed ir json should write");
+
+        let error = read_ir_json(&path).expect_err("malformed json should be rejected");
+
+        assert!(error.to_string().contains("json parse error: at line"));
+        assert!(error.to_string().contains("column"));
 
         let _ = fs::remove_file(path);
     }
@@ -3738,7 +7555,9 @@ mod tests {
         };
 
         assert_eq!(error.code(), "RFLOW-SCHEMA-002");
-        assert!(error.suggestion().contains("schema_version, kind, and payload"));
+        assert!(error
+            .suggestion()
+            .contains("schema_version, kind, and payload"));
     }
 
     #[test]
@@ -3777,7 +7596,10 @@ mod tests {
         ));
         fs::write(&path, "INPUT(a)\nOUTPUT(y)\ny = BUF(a)\n").expect("bench should write");
 
-        assert_eq!(detect_netlist_input_format(&path), NetlistInputFormat::Bench);
+        assert_eq!(
+            detect_netlist_input_format(&path),
+            NetlistInputFormat::Bench
+        );
         let netlist = read_netlist(&path).expect("bench netlist should auto-load");
 
         assert_eq!(netlist.node_count(), 3);
@@ -3793,7 +7615,10 @@ mod tests {
         netlist.add_node(NodeKind::Port, "in");
         write_ir_json(&path, &netlist).expect("ir json should write");
 
-        assert_eq!(detect_netlist_input_format(&path), NetlistInputFormat::IrJson);
+        assert_eq!(
+            detect_netlist_input_format(&path),
+            NetlistInputFormat::IrJson
+        );
         let loaded = read_netlist(&path).expect("ir json should auto-load");
 
         assert_eq!(loaded.node_count(), 1);
@@ -3816,6 +7641,26 @@ mod tests {
 
         assert!(error.to_string().contains("unsupported gate op 'XAND'"));
         assert_eq!(error.code(), "RFLOW-INPUT-002");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_bench_netlist_reports_source_line_for_unsupported_gate_ops() {
+        let path = env::temp_dir().join(format!(
+            "rflux-io-bench-bad-line-{}.bench",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::write(&path, "INPUT(a)\nOUTPUT(y)\ny = XAND(a, a)\n")
+            .expect("bench should write");
+
+        let error = read_bench_netlist(&path).expect_err("unsupported op should fail");
+
+        assert!(error.to_string().contains("bench parse error: at line 3:"));
+        assert!(error.to_string().contains("unsupported gate op 'XAND'"));
 
         let _ = fs::remove_file(path);
     }
@@ -3883,11 +7728,8 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(
-            &path,
-            "INPUT(a)\nn0 = BUF(n1)\nn1 = BUF(n0)\nOUTPUT(n0)\n",
-        )
-        .expect("bench should write");
+        fs::write(&path, "INPUT(a)\nn0 = BUF(n1)\nn1 = BUF(n0)\nOUTPUT(n0)\n")
+            .expect("bench should write");
 
         let error = read_bench_netlist(&path).expect_err("cycle should fail");
 
@@ -3916,7 +7758,9 @@ mod tests {
 
         let error = read_bench_netlist(&path).expect_err("duplicate output should fail");
 
-        assert!(error.to_string().contains("signal 'n0' defined more than once"));
+        assert!(error
+            .to_string()
+            .contains("signal 'n0' defined more than once"));
         assert_eq!(error.code(), "RFLOW-INPUT-002");
 
         let _ = fs::remove_file(path);
@@ -3935,7 +7779,9 @@ mod tests {
 
         let error = read_bench_netlist(&path).expect_err("duplicate INPUT should fail");
 
-        assert!(error.to_string().contains("signal 'a' defined more than once"));
+        assert!(error
+            .to_string()
+            .contains("signal 'a' defined more than once"));
         assert_eq!(error.code(), "RFLOW-INPUT-002");
 
         let _ = fs::remove_file(path);
@@ -3955,7 +7801,9 @@ mod tests {
 
         let error = read_bench_netlist(&path).expect_err("duplicate OUTPUT should fail");
 
-        assert!(error.to_string().contains("signal 'y' defined more than once"));
+        assert!(error
+            .to_string()
+            .contains("signal 'y' defined more than once"));
         assert_eq!(error.code(), "RFLOW-INPUT-002");
 
         let _ = fs::remove_file(path);
@@ -3975,7 +7823,9 @@ mod tests {
 
         let error = read_bench_netlist(&path).expect_err("gate output should not redefine INPUT");
 
-        assert!(error.to_string().contains("signal 'a' defined more than once"));
+        assert!(error
+            .to_string()
+            .contains("signal 'a' defined more than once"));
         assert_eq!(error.code(), "RFLOW-INPUT-002");
 
         let _ = fs::remove_file(path);
@@ -4046,7 +7896,10 @@ mod tests {
         assert_eq!(netlist.node_count(), 5);
         assert_eq!(netlist.edge_count(), 4);
         assert!(matches!(netlist.nodes()[3].kind, NodeKind::Dff));
-        assert!(matches!(netlist.nodes()[3].logic_op, Some(LogicOp::DffEnable)));
+        assert!(matches!(
+            netlist.nodes()[3].logic_op,
+            Some(LogicOp::DffEnable)
+        ));
         assert_eq!(netlist.nodes()[3].name, "q");
 
         let _ = fs::remove_file(path);
@@ -4148,8 +8001,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = MAJ(a, b, c)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = MAJ(a, b, c)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("MAJ bench should load");
 
@@ -4173,8 +8029,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = AOI21(a, b, c)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = AOI21(a, b, c)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("AOI21 bench should load");
 
@@ -4196,8 +8055,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = OAI21(a, b, c)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = OAI21(a, b, c)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("OAI21 bench should load");
 
@@ -4219,8 +8081,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = AOI22(a, b, c, d)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = AOI22(a, b, c, d)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("AOI22 bench should load");
 
@@ -4243,8 +8108,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = OAI22(a, b, c, d)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = OAI22(a, b, c, d)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("OAI22 bench should load");
 
@@ -4267,8 +8135,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = AOI31(a, b, c, d)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = AOI31(a, b, c, d)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("AOI31 bench should load");
 
@@ -4291,8 +8162,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = OAI31(a, b, c, d)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = OAI31(a, b, c, d)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("OAI31 bench should load");
 
@@ -4315,8 +8189,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = AOI211(a, b, c, d)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = AOI211(a, b, c, d)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("AOI211 bench should load");
 
@@ -4339,8 +8216,11 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = OAI211(a, b, c, d)\n")
-            .expect("bench should write");
+        fs::write(
+            &path,
+            "INPUT(a)\nINPUT(b)\nINPUT(c)\nINPUT(d)\nOUTPUT(y)\ny = OAI211(a, b, c, d)\n",
+        )
+        .expect("bench should write");
 
         let netlist = read_bench_netlist(&path).expect("OAI211 bench should load");
 

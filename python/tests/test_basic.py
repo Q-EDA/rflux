@@ -79,6 +79,40 @@ def test_public_facades_have_docstrings_and_typed_marker():
     assert "SimulationReport" in rflux.__all__
 
 
+def test_structured_submodules_reexport_top_level_api():
+    assert "flow" in rflux.__all__
+    assert "timing" in rflux.__all__
+    assert "sim" in rflux.__all__
+    assert "verify" in rflux.__all__
+    assert "pdk" in rflux.__all__
+
+    assert rflux.flow.compile is rflux.compile
+    assert rflux.flow.compile_plan_report is rflux.compile_plan_report
+    assert rflux.flow.compile_plan is rflux.compile_plan
+    assert rflux.flow.compile_netlist is rflux.compile_netlist
+    assert rflux.flow.compile_layout is rflux.compile_layout
+    assert rflux.flow.analyze_ac_bias is rflux.analyze_ac_bias
+    assert rflux.flow.optimize_ac_bias is rflux.optimize_ac_bias
+    assert (
+        rflux.flow.optimize_design_with_characterized_library
+        is rflux.optimize_design_with_characterized_library
+    )
+    assert rflux.timing.analyze_advanced_constraints is rflux.analyze_advanced_constraints
+    assert rflux.timing.analyze_timing is rflux.analyze_timing
+    assert rflux.sim.simulate_text is rflux.simulate_text
+    assert rflux.verify.check_equivalence is rflux.check_equivalence
+    assert rflux.verify.verify_layout is rflux.verify_layout
+    assert rflux.pdk.Pdk is rflux.Pdk
+
+    package_dir = Path(rflux.__file__).parent
+    assert (package_dir / "flow.pyi").exists()
+    assert (package_dir / "timing.pyi").exists()
+    assert (package_dir / "sim.pyi").exists()
+    assert (package_dir / "verify.pyi").exists()
+    assert (package_dir / "pdk.pyi").exists()
+    assert (package_dir / "__init__.pyi").exists()
+
+
 def test_compile_facade_returns_circuit():
     circuit = rflux.Circuit("demo")
     compiled = rflux.compile(circuit)
@@ -410,6 +444,195 @@ def test_pdk_cell_library_entries_reflect_characterized_cells():
     assert summary.missing_timing_cells == []
 
 
+def test_pdk_timing_corner_api_exposes_active_overlay():
+    pdk = rflux.Pdk.from_json(
+        json.dumps(
+            {
+                "name": "corner-api",
+                "metal_layers": 2,
+                "ptl_forbidden_ranges": [],
+                "cell_library": {
+                    "name": "minimal-sfq",
+                    "version": "0.1.0",
+                    "source": "rflux-minimal",
+                    "cells": [
+                        {
+                            "name": "sfq_gate",
+                            "kind": "GenericGate",
+                            "area_um2": 12.0,
+                            "pipeline_stages": 1,
+                        }
+                    ],
+                },
+                "cell_timing": [
+                    {
+                        "kind": "GenericGate",
+                        "intrinsic_delay_ps": 8.0,
+                        "setup_ps": 5.0,
+                        "hold_ps": 3.0,
+                    }
+                ],
+                "named_cell_timing": [],
+                "characterized_cell_metadata": [],
+                "interconnect_timing": [],
+                "active_timing_corner": "slow",
+                "timing_corners": [
+                    {
+                        "name": "slow",
+                        "process": "ss",
+                        "voltage_v": 2.4,
+                        "temperature_k": 4.2,
+                        "cell_timing": [
+                            {
+                                "kind": "GenericGate",
+                                "intrinsic_delay_ps": 24.0,
+                                "setup_ps": 7.0,
+                                "hold_ps": 4.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert pdk.active_timing_corner == "slow"
+    assert pdk.timing_corner_names() == ["slow"]
+    gate = pdk.cell_library_entry("sfq_gate")
+    assert gate is not None
+    assert gate.timing_source == "corner_kind"
+    assert gate.intrinsic_delay_ps == 24.0
+    changed = pdk.with_active_timing_corner("fast")
+    assert changed.active_timing_corner == "fast"
+    assert pdk.active_timing_corner == "slow"
+
+
+def test_analyze_timing_corners_reports_multi_corner_signoff():
+    circuit = rflux.Circuit("corner-signoff")
+    circuit.add_node("port", "source")
+    circuit.add_node("cell", "gate")
+    circuit.add_node("dff", "sink")
+    plan = rflux.CompilePlan(
+        connections=[
+            rflux.ConnectionSpec(
+                from_pin=rflux.PinRef(node=0, port=0),
+                to_pin=rflux.PinRef(node=1, port=0),
+            ),
+            rflux.ConnectionSpec(
+                from_pin=rflux.PinRef(node=1, port=0),
+                to_pin=rflux.PinRef(node=2, port=0),
+            ),
+        ]
+    )
+    pdk = rflux.Pdk.from_json(
+        json.dumps(
+            {
+                "name": "corner-api",
+                "metal_layers": 2,
+                "ptl_forbidden_ranges": [],
+                "cell_library": {
+                    "name": "minimal-sfq",
+                    "version": "0.1.0",
+                    "source": "rflux-minimal",
+                    "cells": [
+                        {
+                            "name": "sfq_gate",
+                            "kind": "GenericGate",
+                            "area_um2": 12.0,
+                            "pipeline_stages": 1,
+                        },
+                        {
+                            "name": "sfq_dff",
+                            "kind": "Dff",
+                            "area_um2": 18.0,
+                            "pipeline_stages": 1,
+                        },
+                        {
+                            "name": "sfq_port",
+                            "kind": "Port",
+                            "area_um2": 0.0,
+                            "pipeline_stages": 0,
+                        },
+                    ],
+                },
+                "cell_timing": [
+                    {
+                        "kind": "GenericGate",
+                        "intrinsic_delay_ps": 8.0,
+                        "setup_ps": 5.0,
+                        "hold_ps": 3.0,
+                    },
+                    {
+                        "kind": "Dff",
+                        "intrinsic_delay_ps": 10.0,
+                        "setup_ps": 7.0,
+                        "hold_ps": 4.0,
+                    },
+                    {
+                        "kind": "Port",
+                        "intrinsic_delay_ps": 0.0,
+                        "setup_ps": 0.0,
+                        "hold_ps": 0.0,
+                    },
+                ],
+                "named_cell_timing": [],
+                "characterized_cell_metadata": [],
+                "interconnect_timing": [
+                    {
+                        "kind": "Jtl",
+                        "points": [
+                            {"length_um": 0.0, "delay_ps": 8.0},
+                            {"length_um": 40.0, "delay_ps": 18.0},
+                        ],
+                    },
+                    {
+                        "kind": "Ptl",
+                        "points": [
+                            {"length_um": 0.0, "delay_ps": 4.0},
+                            {"length_um": 80.0, "delay_ps": 12.0},
+                        ],
+                    },
+                ],
+                "active_timing_corner": "slow",
+                "timing_corners": [
+                    {
+                        "name": "slow",
+                        "cell_timing": [
+                            {
+                                "kind": "GenericGate",
+                                "intrinsic_delay_ps": 28.0,
+                                "setup_ps": 8.0,
+                                "hold_ps": 4.0,
+                            }
+                        ],
+                        "interconnect_timing": [
+                            {
+                                "kind": "Jtl",
+                                "points": [
+                                    {"length_um": 0.0, "delay_ps": 8.0},
+                                    {"length_um": 40.0, "delay_ps": 24.0},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    report = rflux.analyze_timing_corners(circuit, pdk, plan=plan)
+
+    assert isinstance(report, rflux.MultiCornerTimingAnalysisReport)
+    assert report.active_timing_corner == "slow"
+    assert report.corner_count == 2
+    assert [corner.corner_name for corner in report.corners] == ["default", "slow"]
+    assert report.corners[0].is_default_corner
+    assert report.corners[1].is_active_corner
+    assert report.worst_setup_corner == "slow"
+    assert report.worst_critical_path_corner == "slow"
+    assert report.corners[1].critical_path_delay_ps > report.corners[0].critical_path_delay_ps
+
+
 def test_compile_plan_report_tracks_level_balancing():
     circuit = rflux.Circuit("demo")
     plan = rflux.CompilePlan(
@@ -547,6 +770,8 @@ def test_compile_layout_returns_physical_summary():
     assert isinstance(report.timing_closure_loop, rflux.TimingClosureLoopReport)
     assert report.timing_closure_loop.status == "closed"
     assert report.timing_closure_loop.hold_fix_applied is report.hold_fix_applied
+    assert isinstance(report.timing_closure_loop.route_delay_optimization_attempted, bool)
+    assert isinstance(report.timing_closure_loop.route_delay_optimization_applied, bool)
     assert report.timing_closure_loop.final_hold_violations == report.final_hold_violations
     assert report.initial_hold_violations >= report.final_hold_violations
     assert isinstance(report.hold_fix_applied, bool)
@@ -555,6 +780,19 @@ def test_compile_layout_returns_physical_summary():
     assert report.total_detour_overhead_um >= 0.0
     assert report.detoured_routes >= 0
     assert isinstance(report.detour_feedback_applied, bool)
+    assert report.effective_prefer_ptl_from_length_um > 0.0
+    assert report.effective_detour_margin_um >= 0.0
+    assert report.flow_config_patch["kind"] == rflux.FLOW_CONFIG_KIND
+    assert report.flow_config_patch["schema_version"] == rflux.FLOW_CONFIG_SCHEMA_VERSION
+    assert report.flow_config_patch["metadata"]["source_command"] == "compile_layout"
+    assert (
+        report.flow_config_patch["payload"]["routing"]["prefer_ptl_from_length_um"]
+        == report.effective_prefer_ptl_from_length_um
+    )
+    assert (
+        report.flow_config_patch["payload"]["routing"]["detour_margin_um"]
+        == report.effective_detour_margin_um
+    )
     assert report.node_count == 3
     assert report.edge_count == 2
 
@@ -593,6 +831,8 @@ def test_compile_layout_can_apply_hold_fix_closure_loop():
     assert report.timing_closure_loop.initial_hold_violations > 0
     assert report.timing_closure_loop.final_hold_violations == 0
     assert report.timing_closure.status == "closed"
+    assert report.flow_config_patch["metadata"]["hold_fix_applied"] is True
+    assert report.flow_config_patch["payload"]["routing"]["min_hold_jtl_length_um"] == 60.0
 
 
 def test_analyze_timing_returns_standalone_summary():
@@ -629,6 +869,15 @@ def test_compile_layout_reports_reduce_route_delay_candidate():
     assert report.timing_closure.status == "open"
     assert report.timing_closure.reduce_route_delay_actions == 1
     assert report.timing_closure_loop.reduce_route_delay_candidate_available is True
+    assert report.timing_closure_loop.route_delay_optimization_attempted is True
+    assert report.timing_closure_loop.route_delay_optimization_applied is False
+    assert report.effective_prefer_ptl_from_length_um == 60.0
+    assert report.effective_detour_margin_um == 12.0
+    assert report.flow_config_patch["metadata"]["timing_closure_status"] == "open"
+    assert (
+        report.flow_config_patch["payload"]["routing"]["prefer_ptl_from_length_um"]
+        == report.effective_prefer_ptl_from_length_um
+    )
     assert report.timing_closure_loop.recommended_route_mode == "jtl"
     assert report.timing_closure_loop.recommended_prefer_ptl_from_length_um == 121.0
     assert report.timing_closure_loop.estimated_route_length_um == 120.0
@@ -680,6 +929,37 @@ def test_analyze_timing_accepts_clock_domain_constraints():
     assert report.closure.adjust_sfq_phase_or_pulse_window_actions == 1
     assert report.closure.actions[0].slack_ps < 0.0
     assert report.closure.actions[0].to_pin.node == sink
+
+
+def test_analyze_timing_reports_top_closure_actions():
+    circuit = rflux.Circuit("demo")
+    sources = [circuit.add_node("port", f"source_{index}") for index in range(4)]
+    sinks = [circuit.add_node("dff", f"sink_{index}") for index in range(4)]
+    for index, (source, sink) in enumerate(zip(sources, sinks)):
+        circuit.connect(source, index, sink, 0)
+
+    report = rflux.analyze_timing(
+        circuit,
+        timing_constraints=[
+            rflux.NodeTimingConstraint(node=sink, required_ps=18.0 + index)
+            for index, sink in enumerate(sinks)
+        ],
+    )
+
+    assert report.setup_violations == 4
+    assert report.closure.status == "open"
+    assert report.closure.failing_checks == ["setup"]
+    assert report.closure.action_count == 3
+    assert len(report.closure.actions) == 3
+    assert all(action.check == "setup" for action in report.closure.actions)
+    assert report.closure.primary_action == report.closure.actions[0]
+    assert [action.to_pin for action in report.closure.actions] == [
+        arc.to_pin
+        for arc in sorted(
+            (arc for arc in report.timing_arcs if arc.setup_slack_ps < 0.0),
+            key=lambda arc: arc.setup_slack_ps,
+        )[:3]
+    ]
 
 
 def test_analyze_timing_pin_constraint_overrides_node_constraint():

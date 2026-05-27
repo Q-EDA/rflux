@@ -1,16 +1,16 @@
-# rflux 公共接口与默认行为盘点 v0
+# rflux Interface Inventory
 
-## 1. 目的
+## 1. Purpose
 
-本文件用于阶段 1 的契约收敛工作，记录当前仓库中已经暴露给用户或容易形成用户依赖的接口、默认行为、placeholder 与 fallback。
+This document records the user-visible interfaces that currently form an external contract in the repository, with emphasis on frontend capability boundaries, default behavior, and compatibility surfaces.
 
-该清单只记录当前代码已存在的事实，不代表这些行为都应该长期保留。
+It is a current-state inventory, not a promise that every interface is fully mature or feature-complete.
 
-## 2. 公共接口面
+## 2. Public Interface Surfaces
 
-### 2.1 CLI 公共命令
+### 2.1 CLI commands
 
-当前 `rflux-cli` 暴露的顶层命令：
+Current top-level `rflux-cli` commands:
 
 - `pdk-minimal`
 - `lint-input`
@@ -22,144 +22,131 @@
 - `solve-dimacs`
 - `check-equivalence`
 
-### 2.2 Python 公共 API
+### 2.2 Python package surface
 
-当前 `python/rflux/__init__.py` 通过 `__all__` 暴露的主要公共 API 包括：
+The top-level package `python/rflux/__init__.py` remains backward-compatible and still re-exports the main public API through `__all__`.
 
-- 建模与配置类型：`Circuit`、`CompilePlan`、`PinRef`、`FixedNodePlacement`、`BlockedRegion`、时序约束类型等。
-- 报告类型：`CompileReport`、`SynthesisReport`、`LayoutReport`、`TimingAnalysisReport`、`VerificationReport`、`SimulationReport` 等。
-- 主工作流函数：`compile`、`compile_plan`、`compile_plan_report`、`compile_netlist`、`compile_layout`、`analyze_timing`、`analyze_timing_statistical`、`verify_layout`、`check_equivalence` 等。
+The runtime surface is now also structured into importable submodules with real implementation ownership:
 
-### 2.3 JSON / 文件接口
+- `rflux.flow`: compile, planning, layout, AC-bias, and library-aware flow APIs
+- `rflux.timing`: timing reports, timing constraints, and timing analysis entry points
+- `rflux.sim`: simulation reports and text/file simulation entry points
+- `rflux.verify`: equivalence and layout verification entry points
+- `rflux.pdk`: `Pdk` and cell-library metadata types
 
-当前实际形成公共契约的文件接口包括：
+Top-level imports such as `rflux.compile_layout` remain supported as compatibility re-exports from `python/rflux/__init__.py`.
 
-- IR JSON 读写
-- PDK JSON 读写
-- CLI JSON 输出
+Stub files are provided alongside the runtime modules:
+
+- `python/rflux/__init__.pyi`
+- `python/rflux/flow.pyi`
+- `python/rflux/timing.pyi`
+- `python/rflux/sim.pyi`
+- `python/rflux/verify.pyi`
+- `python/rflux/pdk.pyi`
+
+### 2.3 File and schema interfaces
+
+Current external file contracts include:
+
+- IR JSON read/write
+- PDK JSON read/write
+- bench subset netlist import
+- LEF/DEF import and export helpers
+- CLI JSON reports
 - Python `Circuit.to_json()` / `from_json()`
 - Python `Pdk.to_json()` / `from_json()`
 
-## 3. 当前默认行为盘点
+## 3. Frontend Capability Snapshot
 
-### 3.1 CLI 默认行为
+### 3.1 IR JSON
 
-- `pdk-minimal --name` 默认值为 `minimal-sfq`。
-- 绝大多数 flow 命令在未指定 `--pdk` 时，会回退到 `Pdk::minimal("minimal-sfq")`。
-- `verify-layout` 与 `simulate-file` 的 `--mode` 默认为 `auto`。
-- `check-equivalence` 的 `--kind` 默认为 `combinational`。
-- `compile-layout`、`analyze-timing`、`verify-layout` 当前直接使用 `FlowConfig::default()`。
+- Reader: `rflux_io::read_ir_json`
+- Writer: `rflux_io::write_ir_json`
+- Schema mode: versioned envelope is the primary contract
+- Compatibility: legacy raw JSON is still accepted on read for repository compatibility
+- Hierarchy preservation: none
+- Source mapping: none
+- Error location: JSON parser failures now surface line and column details when available
 
-风险说明：
+### 3.2 bench subset
 
-- 这些默认行为当前是隐式契约，后续必须决定哪些要稳定保留，哪些要改为显式配置或至少写入 schema / 文档 / 错误提示。
+- Reader: `rflux_io::read_bench_netlist`
+- Writer: none
+- Supported scope: flat combinational bench subset used by current tests and flow integration
+- Hierarchy preservation: none
+- Source mapping: no persistent source map, but parse diagnostics now report source line numbers
+- Error location: malformed declarations, unsupported gate forms, duplicate definitions, and dependency issues are surfaced with line-aware diagnostics when the failing line is known
 
-### 3.2 Python 默认行为
+### 3.3 LEF/DEF
 
-- 多个仿真相关 API 的 `simulation_mode` 默认值为 `"auto"`。
-- 多个仿真相关 API 的 `external_command` 默认值为 `None`。
-- `compile_netlist` 在未给出 plan 时，会使用空 `CompilePlan()`。
-- 多个 facade 在 core extension 缺失时会走 Python fallback 路径或报 `rflux extension is unavailable`。
+- Readers: `read_lef`, `read_def`, `read_lef_to_chip`, `read_lef_def_to_chip`
+- Writers: `write_def_from_chip`, `write_lef_from_chip`
+- Position in product: physical import/export utility surface, not yet a complete signoff-grade roundtrip frontend
+- Current limitation: roundtrip completeness is improving, but not all source fidelity and semantic preservation guarantees are established yet
 
-## 4. 当前 placeholder 与 fallback 行为
+### 3.4 Missing or limited frontend features
 
-### 4.1 明确 placeholder
+The following are not yet mature repository-wide frontend guarantees:
 
-- `compile(circuit)` 当前仍是实验性 placeholder，但已改为显式抛出 `NotImplementedError`，不再静默返回输入 `Circuit`。
+- Verilog subset frontend
+- BLIF subset frontend
+- hierarchy-preserving import
+- persistent source-map export across frontend formats
+- full lint schema introspection for every input family
+- complete LEF/DEF roundtrip fidelity guarantees
 
-结论：
+## 4. Default Behavior and Reporting
 
-- 该接口不应被视为稳定商业接口；当前状态已经避免误导性伪成功，后续仍需决定删除、保留为实验接口，或接入真实实现。
+### 4.1 CLI defaults
 
-### 4.2 Python extension 缺失时的 fallback `Circuit`
+- `pdk-minimal --name` defaults to `minimal-sfq`
+- most flow commands fall back to `Pdk::minimal("minimal-sfq")` when `--pdk` is omitted
+- `verify-layout` and `simulate-file` default `--mode` to `auto`
+- `check-equivalence` defaults `--kind` to `combinational`
+- `compile-layout`, `analyze-timing`, and `verify-layout` currently start from `FlowConfig::default()` when no explicit override is provided
 
-当 `_core` 扩展导入失败时：
+### 4.2 `lint-input` contract
 
-- `core_version()` 会返回 `"unavailable"`。
-- `Circuit` 会退化为纯 Python stub 实现。
-- 多个 `_core_*` 函数引用为 `None`。
+`lint-input` is the canonical frontend inspection entry point for repository-supported input formats.
 
-风险说明：
+Current success reports include:
 
-- 这种行为对开发和测试便利，但对商业产品来说属于高风险隐式退化路径，必须被更明确地区分为“开发 stub”或“不可用于正式结果”的模式。
+- `schema_format`
+- `input_schema_version`
+- `legacy_compatibility_used`
+- `schema_contract`: explicit contract metadata for the accepted schema mode
+- `frontend_summary`: reader identity plus frontend capability snapshot for the input family
+- `netlist_summary` for netlist-bearing inputs, including node/edge counts and structural kind counts
 
-### 4.3 `compile_plan_report` / `compile_netlist` 缺失扩展时的显式失败
+Current failure reports route parse errors through typed CLI diagnostics. For malformed JSON and bench parsing failures, the detail text now includes line-aware location data when available.
 
-当 `_core_compile_plan` 或 `_core_compile_netlist` 不可用时：
+## 5. Python Runtime Availability Rules
 
-- `compile_plan_report(...)` 当前会显式抛出 `RuntimeError`。
-- `compile_plan(...)` 会通过 `compile_plan_report(...)` 传播该失败。
-- `compile_netlist(...)` 当前会显式抛出 `RuntimeError`。
+The repository still supports importing `rflux` without a compiled extension for development ergonomics, but not all high-level APIs are available in that state.
 
-风险说明：
+Current expectations:
 
-- 当前这条切片已经不再提供误导性的近似综合结果，并已成为后续高层 API 收敛的基线模式。
+- `core_status()` is the authoritative probe for extension availability and import diagnostics
+- simple model/container APIs remain importable for lightweight tests and tooling
+- high-level flow, timing, verification, and most compilation-backed entry points fail explicitly when the required core implementation is unavailable
+- the new `rflux.flow`, `rflux.timing`, `rflux.sim`, `rflux.verify`, and `rflux.pdk` modules do not introduce new fallback semantics; the top-level package re-exports their behavior for compatibility
 
-### 4.4 `analyze_timing` / `verify_layout` 缺失扩展时的显式失败
+## 6. Compatibility Policy Snapshot
 
-当 `_core_analyze_timing` 或 `_core_verify_layout` 不可用时：
+- top-level Python imports remain supported for backward compatibility
+- structured submodules are the primary ownership boundary and the preferred import surface
+- versioned envelope JSON remains the primary schema contract for repository-owned JSON formats
+- legacy raw JSON acceptance is compatibility behavior, not the preferred long-term write format
 
-- `analyze_timing(...)` 当前会显式抛出 `RuntimeError`。
-- `verify_layout(...)` 当前会在完成 `simulation_mode` 参数校验后显式抛出 `RuntimeError`。
-- 不再生成基于 `compile_layout(...)` 拼装出来的近似 timing / verification 报告。
+## 7. Current Maturity Labels
 
-风险说明：
+- `stable`: IR JSON envelope, PDK JSON envelope, basic CLI contract reporting, top-level Python compatibility exports
+- `limited`: bench subset import, `lint-input` frontend summaries, LEF/DEF utility import-export, Python structured submodule split
+- `experimental`: broader HDL frontend coverage, hierarchy-preserving import, durable source-map fidelity, signoff-grade LEF/DEF roundtrip completeness
 
-- 这条切片已经从“按模式回退”收敛为“统一不可用”，显著降低了伪成功风险；统计时序接口虽然仍属研究导向，但缺失扩展时也不再由 Python facade 拼装近似报告。
+## 8. Near-Term Follow-up
 
-### 4.5 `compile_layout` 缺失扩展时的显式失败
-
-当 `_core_compile_layout` 不可用时：
-
-- `compile_layout(...)` 当前会显式抛出 `RuntimeError`。
-- 不再生成近似 layout / route / timing 汇总报告。
-
-风险说明：
-
-- 这条切片已经从“误导性伪成功”收敛为“显式不可用”，并与 `analyze_timing(...)`、`verify_layout(...)` 的当前策略保持一致。
-
-## 5. 当前 schema 风险点
-
-### 5.1 CLI JSON 输出已开始顶层版本化，但兼容政策仍未完整建立
-
-当前 CLI 顶层报告已统一加入 `schema_version`，等价性 DIMACS sidecar 也带版本号；但 IR / PDK JSON 以及跨版本兼容策略仍未形成完整制度。
-
-### 5.2 IR / PDK JSON 读写未建立兼容政策
-
-当前 `rflux-io` 已开始把官方 IR / PDK JSON 文件写成带 `schema_version`、`kind`、`payload` 的包装对象，并对不支持的 schema version 显式拒绝；同时为了兼容既有仓库 fixture，读取路径暂时仍接受历史的裸 JSON。
-
-### 5.3 Python 报告模型与 CLI JSON 结果模型并未显式绑定同一版本
-
-这意味着后续必须补统一契约文档与兼容性测试。
-
-## 6. 阶段 1 建议整改顺序
-
-1. 先给公共接口分级：`stable`、`limited`、`experimental`。
-2. 再把 placeholder 与 fallback 标记进支持矩阵和已知限制。
-3. 然后为 CLI JSON / IR JSON / PDK JSON 加 schema version。
-4. 最后再处理默认行为是否要显式化。
-
-### 6.1 当前建议分级结果（第一版）
-
-基于当前仓库状态，建议先按以下口径冻结第一版：
-
-- `stable`：`rflux-ir` JSON、PDK JSON、`solve-dimacs`、最小 CLI / Python 本地运行路径。
-- `limited`：`compile-netlist`、`compile-layout`、`analyze-timing`、`verify-layout`、`check-equivalence`、`simulate-file` / `simulate_text` 当前受限子集、自定义 PDK JSON 导入。
-- `experimental`：通用 HDL frontend、通用 SPICE / JoSIM 兼容、`compile(...)` placeholder、统计时序作为正式签核依据。
-
-这一定义应与 `docs/support-matrix.md` 和 `docs/product-scope.md` 保持同步，后续只有在实现、回归和文档同时到位时才允许升级等级。
-
-## 7. 立即可开的整改项
-
-### 高优先级
-
-- 明确 `compile(...)` 的去留。
-- 明确无 `_core` 扩展时哪些 API 应允许 fallback，哪些应直接失败。
-- 为 CLI 输出引入统一 schema version 字段。
-- 为默认 `minimal-sfq` 与 `FlowConfig::default()` 建立文档和回归。
-
-### 中优先级
-
-- 梳理 Python facade 中哪些 dataclass 字段应视为稳定契约。
-- 为仿真模式 `auto` 建立明确语义说明。
-- 为 `external_command=None` 时的行为建立统一错误或回退规则。
+1. Extend `lint-input` to cover richer capability/schema summaries for additional frontend families.
+2. Add frontend contracts for Verilog or BLIF only when the supported subset and diagnostics policy are explicit.
+3. Tighten LEF/DEF roundtrip coverage with fidelity-focused regression tests before upgrading maturity level.

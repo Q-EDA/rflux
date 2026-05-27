@@ -53,7 +53,17 @@ fn write_fixture_metrics_csv(
         file,
         "fixture,sat_elapsed_ns,recursive_calls,decisions,unit_assignments,pure_literal_assignments,backtracks,restarts"
     )?;
-    for (fixture, sat_elapsed_ns, recursive_calls, decisions, unit_assignments, pure_literal_assignments, backtracks, restarts) in rows {
+    for (
+        fixture,
+        sat_elapsed_ns,
+        recursive_calls,
+        decisions,
+        unit_assignments,
+        pure_literal_assignments,
+        backtracks,
+        restarts,
+    ) in rows
+    {
         writeln!(
             file,
             "{fixture},{sat_elapsed_ns},{recursive_calls},{decisions},{unit_assignments},{pure_literal_assignments},{backtracks},{restarts}"
@@ -483,14 +493,12 @@ fn quaigh_alignment_fixture_cases() {
         let report = compiler.optimize_boolean_network(&mut netlist, &case.config);
 
         assert_eq!(
-            report.gate_count_before,
-            case.expected_before,
+            report.gate_count_before, case.expected_before,
             "unexpected pre-opt gate count for fixture {}",
             case.file_name
         );
         assert_eq!(
-            report.gate_count_after,
-            case.expected_after,
+            report.gate_count_after, case.expected_after,
             "unexpected post-opt gate count for fixture {}",
             case.file_name
         );
@@ -509,7 +517,11 @@ fn quaigh_alignment_fixture_cases() {
         total_restarts += eq.sat_stats.restarts;
         total_recursive_calls += eq.sat_stats.recursive_calls;
         max_elapsed_ns = max_elapsed_ns.max(eq.sat_elapsed_ns);
-        assert!(eq.sat_stats.recursive_calls >= 1, "sat stats missing recursive calls for fixture {}", case.file_name);
+        assert!(
+            eq.sat_stats.recursive_calls >= 1,
+            "sat stats missing recursive calls for fixture {}",
+            case.file_name
+        );
 
         println!(
             "fixture={} sat_elapsed_ns={} recursive_calls={} decisions={} unit_assignments={} pure_literal_assignments={} backtracks={} restarts={}",

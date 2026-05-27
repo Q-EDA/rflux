@@ -109,11 +109,21 @@ impl Compiler {
 
             match node.kind {
                 NodeKind::Port | NodeKind::Splitter | NodeKind::Jtl | NodeKind::Ptl => {
-                    expect_exact_inputs(&mut report, node.id.0, incoming_by_node[node.id.0].len(), 1);
+                    expect_exact_inputs(
+                        &mut report,
+                        node.id.0,
+                        incoming_by_node[node.id.0].len(),
+                        1,
+                    );
                 }
                 NodeKind::Dff => match node.logic_op {
                     Some(LogicOp::DffEnable) => {
-                        expect_exact_inputs(&mut report, node.id.0, incoming_by_node[node.id.0].len(), 3);
+                        expect_exact_inputs(
+                            &mut report,
+                            node.id.0,
+                            incoming_by_node[node.id.0].len(),
+                            3,
+                        );
                     }
                     _ => report.issues.push(BoolOptCompatibilityIssue {
                         node: node.id.0,
@@ -155,9 +165,7 @@ impl Compiler {
         }
 
         for node in netlist.nodes() {
-            if !resolved[node.id.0]
-                && !report.issues.iter().any(|issue| issue.node == node.id.0)
-            {
+            if !resolved[node.id.0] && !report.issues.iter().any(|issue| issue.node == node.id.0) {
                 report.issues.push(BoolOptCompatibilityIssue {
                     node: node.id.0,
                     kind: BoolOptCompatibilityIssueKind::CycleOrUnresolvedDependency,
@@ -208,8 +216,7 @@ impl Compiler {
             let mut operands = Vec::with_capacity(incoming.len());
             for (_, source) in incoming {
                 operands.push(
-                    expr_of_node[source.node.0]
-                        .ok_or(SynthError::CycleOrUnsupportedDependency)?,
+                    expr_of_node[source.node.0].ok_or(SynthError::CycleOrUnsupportedDependency)?,
                 );
             }
 
@@ -218,20 +225,12 @@ impl Compiler {
                     ensure_input_count(node_index, operands.len(), 1)?;
                     operands[0]
                 }
-                NodeKind::CellInstance | NodeKind::MacroCell => build_logic_expr(
-                    &mut exprs,
-                    &mut logic_exprs,
-                    node,
-                    operands,
-                    config,
-                )?,
-                NodeKind::Dff => build_dffe_expr(
-                    &mut exprs,
-                    &mut logic_exprs,
-                    node,
-                    operands,
-                    config,
-                )?,
+                NodeKind::CellInstance | NodeKind::MacroCell => {
+                    build_logic_expr(&mut exprs, &mut logic_exprs, node, operands, config)?
+                }
+                NodeKind::Dff => {
+                    build_dffe_expr(&mut exprs, &mut logic_exprs, node, operands, config)?
+                }
             };
 
             expr_of_node[node_index] = Some(expr_id);
@@ -240,9 +239,8 @@ impl Compiler {
         let mut output_exprs = Vec::new();
         for node in original.nodes() {
             if outdegree[node.id.0] == 0 {
-                output_exprs.push(
-                    expr_of_node[node.id.0].ok_or(SynthError::CycleOrUnsupportedDependency)?,
-                );
+                output_exprs
+                    .push(expr_of_node[node.id.0].ok_or(SynthError::CycleOrUnsupportedDependency)?);
             }
         }
 
@@ -279,7 +277,8 @@ impl Compiler {
                 expr.logic_op.clone(),
             );
             for (port, input_expr) in expr_inputs(&expr.kind).iter().enumerate() {
-                let driver = driver_by_expr[*input_expr].ok_or(SynthError::CycleOrUnsupportedDependency)?;
+                let driver =
+                    driver_by_expr[*input_expr].ok_or(SynthError::CycleOrUnsupportedDependency)?;
                 self.connect_with_splitter(
                     &mut rewritten,
                     driver,
@@ -290,7 +289,10 @@ impl Compiler {
                 )?;
             }
 
-            driver_by_expr[expr_id] = Some(PinRef { node: gate_node, port: 0 });
+            driver_by_expr[expr_id] = Some(PinRef {
+                node: gate_node,
+                port: 0,
+            });
         }
 
         let mut terminal_uses = HashMap::<PinRef, usize>::new();
@@ -299,9 +301,9 @@ impl Compiler {
                 continue;
             }
 
-            let driver = driver_by_expr[expr_of_node[node.id.0]
-                .ok_or(SynthError::CycleOrUnsupportedDependency)?]
-                .ok_or(SynthError::CycleOrUnsupportedDependency)?;
+            let driver = driver_by_expr
+                [expr_of_node[node.id.0].ok_or(SynthError::CycleOrUnsupportedDependency)?]
+            .ok_or(SynthError::CycleOrUnsupportedDependency)?;
             let seen = terminal_uses.get(&driver).copied().unwrap_or(0);
             let requires_explicit_output =
                 matches!(node.kind, NodeKind::Port) && !incoming_by_node[node.id.0].is_empty();
@@ -473,18 +475,22 @@ fn remove_absorbed_operands(
 
 fn operand_absorbed_in_and(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
     if let LogicExprKind::Or(children) = &exprs[candidate].kind {
-        return operands.iter().copied().any(|other| {
-            other != candidate && operand_is_or_subset(exprs, other, children)
-        }) || operand_absorbed_by_and_consensus(exprs, candidate, operands);
+        return operands
+            .iter()
+            .copied()
+            .any(|other| other != candidate && operand_is_or_subset(exprs, other, children))
+            || operand_absorbed_by_and_consensus(exprs, candidate, operands);
     }
     false
 }
 
 fn operand_absorbed_in_or(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
     if let LogicExprKind::And(children) = &exprs[candidate].kind {
-        return operands.iter().copied().any(|other| {
-            other != candidate && operand_is_and_subset(exprs, other, children)
-        }) || operand_absorbed_by_or_consensus(exprs, candidate, operands);
+        return operands
+            .iter()
+            .copied()
+            .any(|other| other != candidate && operand_is_and_subset(exprs, other, children))
+            || operand_absorbed_by_or_consensus(exprs, candidate, operands);
     }
     false
 }
@@ -515,7 +521,11 @@ fn operand_is_and_subset(exprs: &[LogicExpr], operand: usize, superset_children:
     }
 }
 
-fn operand_absorbed_by_or_consensus(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
+fn operand_absorbed_by_or_consensus(
+    exprs: &[LogicExpr],
+    candidate: usize,
+    operands: &[usize],
+) -> bool {
     let LogicExprKind::And(candidate_children) = &exprs[candidate].kind else {
         return false;
     };
@@ -538,7 +548,11 @@ fn operand_absorbed_by_or_consensus(exprs: &[LogicExpr], candidate: usize, opera
     false
 }
 
-fn operand_absorbed_by_and_consensus(exprs: &[LogicExpr], candidate: usize, operands: &[usize]) -> bool {
+fn operand_absorbed_by_and_consensus(
+    exprs: &[LogicExpr],
+    candidate: usize,
+    operands: &[usize],
+) -> bool {
     let LogicExprKind::Or(candidate_children) = &exprs[candidate].kind else {
         return false;
     };
@@ -568,15 +582,16 @@ fn consensus_union_matches(
     candidate_literals: &[(usize, bool)],
     require_and_terms: bool,
 ) -> bool {
-    let (left_children, right_children) = match (&exprs[left].kind, &exprs[right].kind, require_and_terms) {
-        (LogicExprKind::And(left_children), LogicExprKind::And(right_children), true) => {
-            (left_children.as_slice(), right_children.as_slice())
-        }
-        (LogicExprKind::Or(left_children), LogicExprKind::Or(right_children), false) => {
-            (left_children.as_slice(), right_children.as_slice())
-        }
-        _ => return false,
-    };
+    let (left_children, right_children) =
+        match (&exprs[left].kind, &exprs[right].kind, require_and_terms) {
+            (LogicExprKind::And(left_children), LogicExprKind::And(right_children), true) => {
+                (left_children.as_slice(), right_children.as_slice())
+            }
+            (LogicExprKind::Or(left_children), LogicExprKind::Or(right_children), false) => {
+                (left_children.as_slice(), right_children.as_slice())
+            }
+            _ => return false,
+        };
 
     let left_literals = normalized_child_literals(exprs, left_children);
     let right_literals = normalized_child_literals(exprs, right_children);
@@ -613,7 +628,11 @@ fn consensus_union_matches(
 }
 
 fn normalized_child_literals(exprs: &[LogicExpr], children: &[usize]) -> Vec<(usize, bool)> {
-    let mut literals: Vec<(usize, bool)> = children.iter().copied().map(|expr| expr_literal(exprs, expr)).collect();
+    let mut literals: Vec<(usize, bool)> = children
+        .iter()
+        .copied()
+        .map(|expr| expr_literal(exprs, expr))
+        .collect();
     literals.sort_unstable();
     literals.dedup();
     literals
@@ -720,21 +739,13 @@ fn build_and_logic_expr(
     config: &BoolOptConfig,
 ) -> Result<usize, SynthError> {
     let operands = canonicalize_and_operands(exprs, operands, config.share_logic_flattening_limit);
-    if let Some(rewritten) = try_infer_xor_or_mux_from_or_pattern(
-        exprs,
-        logic_exprs,
-        node,
-        &operands,
-        config,
-    )? {
+    if let Some(rewritten) =
+        try_infer_xor_or_mux_from_or_pattern(exprs, logic_exprs, node, &operands, config)?
+    {
         Ok(rewritten)
-    } else if let Some(rewritten) = try_factor_and_of_or_common_term(
-        exprs,
-        logic_exprs,
-        node,
-        &operands,
-        config,
-    )? {
+    } else if let Some(rewritten) =
+        try_factor_and_of_or_common_term(exprs, logic_exprs, node, &operands, config)?
+    {
         Ok(rewritten)
     } else {
         build_commutative_expr(
@@ -758,21 +769,13 @@ fn build_or_logic_expr(
     config: &BoolOptConfig,
 ) -> Result<usize, SynthError> {
     let operands = canonicalize_or_operands(exprs, operands, config.share_logic_flattening_limit);
-    if let Some(rewritten) = try_infer_xor_or_mux_from_and_pattern(
-        exprs,
-        logic_exprs,
-        node,
-        &operands,
-        config,
-    )? {
+    if let Some(rewritten) =
+        try_infer_xor_or_mux_from_and_pattern(exprs, logic_exprs, node, &operands, config)?
+    {
         Ok(rewritten)
-    } else if let Some(rewritten) = try_factor_or_of_and_common_term(
-        exprs,
-        logic_exprs,
-        node,
-        &operands,
-        config,
-    )? {
+    } else if let Some(rewritten) =
+        try_factor_or_of_and_common_term(exprs, logic_exprs, node, &operands, config)?
+    {
         Ok(rewritten)
     } else {
         build_commutative_expr(
@@ -823,7 +826,9 @@ fn try_infer_xor_or_mux_from_and_pattern(
         .map(Some);
     }
 
-    if let Some([sel, when_true, when_false]) = try_match_mux_pattern(exprs, left_terms, right_terms) {
+    if let Some([sel, when_true, when_false]) =
+        try_match_mux_pattern(exprs, left_terms, right_terms)
+    {
         let mut mux_node = node.clone();
         mux_node.logic_op = Some(LogicOp::Mux2);
         return build_keyed_expr(
@@ -875,7 +880,9 @@ fn try_infer_xor_or_mux_from_or_pattern(
         .map(Some);
     }
 
-    if let Some([sel, when_true, when_false]) = try_match_dual_mux_pattern(exprs, left_terms, right_terms) {
+    if let Some([sel, when_true, when_false]) =
+        try_match_dual_mux_pattern(exprs, left_terms, right_terms)
+    {
         let mut mux_node = node.clone();
         mux_node.logic_op = Some(LogicOp::Mux2);
         return build_keyed_expr(
@@ -918,8 +925,14 @@ fn try_match_xor_pattern(
     left_terms: [usize; 2],
     right_terms: [usize; 2],
 ) -> Option<[usize; 2]> {
-    let left = [expr_literal(exprs, left_terms[0]), expr_literal(exprs, left_terms[1])];
-    let right = [expr_literal(exprs, right_terms[0]), expr_literal(exprs, right_terms[1])];
+    let left = [
+        expr_literal(exprs, left_terms[0]),
+        expr_literal(exprs, left_terms[1]),
+    ];
+    let right = [
+        expr_literal(exprs, right_terms[0]),
+        expr_literal(exprs, right_terms[1]),
+    ];
 
     for right_order in [[right[0], right[1]], [right[1], right[0]]] {
         if left[0].0 == right_order[0].0
@@ -971,8 +984,14 @@ fn try_match_dual_xor_pattern(
     left_terms: [usize; 2],
     right_terms: [usize; 2],
 ) -> Option<[usize; 2]> {
-    let left = [expr_literal(exprs, left_terms[0]), expr_literal(exprs, left_terms[1])];
-    let right = [expr_literal(exprs, right_terms[0]), expr_literal(exprs, right_terms[1])];
+    let left = [
+        expr_literal(exprs, left_terms[0]),
+        expr_literal(exprs, left_terms[1]),
+    ];
+    let right = [
+        expr_literal(exprs, right_terms[0]),
+        expr_literal(exprs, right_terms[1]),
+    ];
 
     for right_order in [[right[0], right[1]], [right[1], right[0]]] {
         if left[0].0 == right_order[0].0
@@ -1238,7 +1257,14 @@ where
     }
 
     let key = key_ctor(operands.clone());
-    build_keyed_expr(exprs, logic_exprs, node, key, kind_ctor(operands), enable_sharing)
+    build_keyed_expr(
+        exprs,
+        logic_exprs,
+        node,
+        key,
+        kind_ctor(operands),
+        enable_sharing,
+    )
 }
 
 fn build_keyed_expr(
@@ -1272,9 +1298,9 @@ fn expr_inputs(kind: &LogicExprKind) -> Vec<usize> {
     match kind {
         LogicExprKind::Input => Vec::new(),
         LogicExprKind::Not(input) => vec![*input],
-        LogicExprKind::And(inputs)
-        | LogicExprKind::Or(inputs)
-        | LogicExprKind::Xor(inputs) => inputs.clone(),
+        LogicExprKind::And(inputs) | LogicExprKind::Or(inputs) | LogicExprKind::Xor(inputs) => {
+            inputs.clone()
+        }
         LogicExprKind::Mux2(inputs) | LogicExprKind::DffEnable(inputs) => inputs.to_vec(),
     }
 }
@@ -1332,7 +1358,11 @@ fn normalize_mux_feedback_dffe(netlist: &Netlist) -> Result<Option<Netlist>, Syn
         }
 
         let mux_inputs = &incoming_by_node[mux_node.id.0];
-        if mux_inputs.len() != 3 || mux_inputs[0].0 != 0 || mux_inputs[1].0 != 1 || mux_inputs[2].0 != 2 {
+        if mux_inputs.len() != 3
+            || mux_inputs[0].0 != 0
+            || mux_inputs[1].0 != 1
+            || mux_inputs[2].0 != 2
+        {
             continue;
         }
 
@@ -1343,7 +1373,9 @@ fn normalize_mux_feedback_dffe(netlist: &Netlist) -> Result<Option<Netlist>, Syn
         let (new_data_source, new_enable_source, needs_inverted_enable) =
             if trace_passthrough_source(netlist, arm_a_source, &incoming_by_node).node == node.id {
                 (arm_b_source, select_source, false)
-            } else if trace_passthrough_source(netlist, arm_b_source, &incoming_by_node).node == node.id {
+            } else if trace_passthrough_source(netlist, arm_b_source, &incoming_by_node).node
+                == node.id
+            {
                 (arm_a_source, select_source, true)
             } else {
                 continue;
@@ -1360,7 +1392,13 @@ fn normalize_mux_feedback_dffe(netlist: &Netlist) -> Result<Option<Netlist>, Syn
                 Some(LogicOp::Not),
             );
             rewritten
-                .connect(select_source, PinRef { node: inverted_enable, port: 0 })
+                .connect(
+                    select_source,
+                    PinRef {
+                        node: inverted_enable,
+                        port: 0,
+                    },
+                )
                 .map_err(SynthError::from)?;
             PinRef {
                 node: inverted_enable,
@@ -1371,18 +1409,36 @@ fn normalize_mux_feedback_dffe(netlist: &Netlist) -> Result<Option<Netlist>, Syn
         };
 
         rewritten
-            .connect(new_data_source, PinRef { node: node.id, port: 0 })
+            .connect(
+                new_data_source,
+                PinRef {
+                    node: node.id,
+                    port: 0,
+                },
+            )
             .map_err(SynthError::from)?;
         rewritten
-            .connect(enable_source, PinRef { node: node.id, port: 1 })
+            .connect(
+                enable_source,
+                PinRef {
+                    node: node.id,
+                    port: 1,
+                },
+            )
             .map_err(SynthError::from)?;
         rewritten
-            .connect(clock_source, PinRef { node: node.id, port: 2 })
+            .connect(
+                clock_source,
+                PinRef {
+                    node: node.id,
+                    port: 2,
+                },
+            )
             .map_err(SynthError::from)?;
 
-        let rewritten_node = rewritten
-            .node_mut(node.id)
-            .ok_or_else(|| SynthError::SatEncoding(format!("missing rewritten Dff node {}", node.id.0)))?;
+        let rewritten_node = rewritten.node_mut(node.id).ok_or_else(|| {
+            SynthError::SatEncoding(format!("missing rewritten Dff node {}", node.id.0))
+        })?;
         rewritten_node.logic_op = Some(LogicOp::DffEnable);
         changed = true;
     }
@@ -1394,11 +1450,7 @@ fn normalize_mux_feedback_dffe(netlist: &Netlist) -> Result<Option<Netlist>, Syn
     Ok(Some(prune_to_observable_nodes(&rewritten)?))
 }
 
-fn disconnect_inputs(
-    netlist: &mut Netlist,
-    node: NodeId,
-    incoming_by_node: &[Vec<(u16, PinRef)>],
-) {
+fn disconnect_inputs(netlist: &mut Netlist, node: NodeId, incoming_by_node: &[Vec<(u16, PinRef)>]) {
     for (_, source) in &incoming_by_node[node.0] {
         netlist.disconnect(*source);
     }
@@ -1411,7 +1463,10 @@ fn trace_passthrough_source(
 ) -> PinRef {
     loop {
         let node = &netlist.nodes()[source.node.0];
-        if !matches!(node.kind, NodeKind::Port | NodeKind::Splitter | NodeKind::Jtl | NodeKind::Ptl) {
+        if !matches!(
+            node.kind,
+            NodeKind::Port | NodeKind::Splitter | NodeKind::Jtl | NodeKind::Ptl
+        ) {
             return source;
         }
 
@@ -1455,7 +1510,8 @@ fn prune_to_observable_nodes(netlist: &Netlist) -> Result<Netlist, SynthError> {
             continue;
         }
 
-        let new_id = pruned.add_node_with_logic(node.kind.clone(), node.name.clone(), node.logic_op.clone());
+        let new_id =
+            pruned.add_node_with_logic(node.kind.clone(), node.name.clone(), node.logic_op.clone());
         remap[node.id.0] = Some(new_id);
     }
 

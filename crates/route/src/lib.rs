@@ -97,17 +97,30 @@ impl SimpleRouter {
         let mut ptl_routes = 0usize;
 
         for (from, to) in netlist.edge_pairs() {
-            let source = placement.point_of(from.node).ok_or(RouteError::MissingPlacement)?;
-            let sink = placement.point_of(to.node).ok_or(RouteError::MissingPlacement)?;
+            let source = placement
+                .point_of(from.node)
+                .ok_or(RouteError::MissingPlacement)?;
+            let sink = placement
+                .point_of(to.node)
+                .ok_or(RouteError::MissingPlacement)?;
             let path = choose_route_path(source, sink, config);
             let direct_length_um = manhattan_length(source, sink);
             let length_um = path_length(&path);
-            let touches_boundary_port = is_boundary_port(netlist, from.node) || is_boundary_port(netlist, to.node);
+            let touches_boundary_port =
+                is_boundary_port(netlist, from.node) || is_boundary_port(netlist, to.node);
             let use_ptl = !touches_boundary_port
                 && length_um >= config.prefer_ptl_from_length_um
                 && pdk.is_ptl_length_allowed(length_um);
-            let mode = if use_ptl { RouteMode::Ptl } else { RouteMode::Jtl };
-            let layer = if use_ptl { config.ptl_layer } else { config.jtl_layer };
+            let mode = if use_ptl {
+                RouteMode::Ptl
+            } else {
+                RouteMode::Jtl
+            };
+            let layer = if use_ptl {
+                config.ptl_layer
+            } else {
+                config.jtl_layer
+            };
             let segments = path
                 .into_iter()
                 .map(|(start, end)| RouteSegment { start, end, layer })
@@ -153,7 +166,12 @@ fn choose_route_path(source: Point, sink: Point, config: &RoutingConfig) -> Vec<
         .or_else(|| {
             let mut candidates = base_route_candidates(source, sink);
             for region in &config.blocked_regions {
-                candidates.extend(detour_candidates(source, sink, *region, config.detour_margin_um));
+                candidates.extend(detour_candidates(
+                    source,
+                    sink,
+                    *region,
+                    config.detour_margin_um,
+                ));
             }
 
             let mut best_clear = None::<Vec<(Point, Point)>>;
@@ -169,7 +187,12 @@ fn choose_route_path(source: Point, sink: Point, config: &RoutingConfig) -> Vec<
             }
             best_clear
         })
-        .unwrap_or_else(|| base_route_candidates(source, sink).into_iter().next().unwrap_or_default())
+        .unwrap_or_else(|| {
+            base_route_candidates(source, sink)
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,7 +225,11 @@ impl Ord for QueueEntry {
     }
 }
 
-fn shortest_grid_path(source: Point, sink: Point, config: &RoutingConfig) -> Option<Vec<(Point, Point)>> {
+fn shortest_grid_path(
+    source: Point,
+    sink: Point,
+    config: &RoutingConfig,
+) -> Option<Vec<(Point, Point)>> {
     let points = grid_points(source, sink, config);
     let source_index = points.iter().position(|point| *point == source)?;
     let sink_index = points.iter().position(|point| *point == sink)?;
@@ -292,7 +319,11 @@ fn build_grid_adjacency(
     for axis_is_x in [true, false] {
         let mut groups = HashMap::<i64, Vec<(usize, f64)>>::new();
         for (index, point) in points.iter().enumerate() {
-            let key = if axis_is_x { axis_key(point.x_um) } else { axis_key(point.y_um) };
+            let key = if axis_is_x {
+                axis_key(point.x_um)
+            } else {
+                axis_key(point.y_um)
+            };
             let coord = if axis_is_x { point.y_um } else { point.x_um };
             groups.entry(key).or_default().push((index, coord));
         }
@@ -402,24 +433,108 @@ fn detour_candidates(
 
     vec![
         normalize_path(vec![
-            (source, Point { x_um: source.x_um, y_um: above_y }),
-            (Point { x_um: source.x_um, y_um: above_y }, Point { x_um: sink.x_um, y_um: above_y }),
-            (Point { x_um: sink.x_um, y_um: above_y }, sink),
+            (
+                source,
+                Point {
+                    x_um: source.x_um,
+                    y_um: above_y,
+                },
+            ),
+            (
+                Point {
+                    x_um: source.x_um,
+                    y_um: above_y,
+                },
+                Point {
+                    x_um: sink.x_um,
+                    y_um: above_y,
+                },
+            ),
+            (
+                Point {
+                    x_um: sink.x_um,
+                    y_um: above_y,
+                },
+                sink,
+            ),
         ]),
         normalize_path(vec![
-            (source, Point { x_um: source.x_um, y_um: below_y }),
-            (Point { x_um: source.x_um, y_um: below_y }, Point { x_um: sink.x_um, y_um: below_y }),
-            (Point { x_um: sink.x_um, y_um: below_y }, sink),
+            (
+                source,
+                Point {
+                    x_um: source.x_um,
+                    y_um: below_y,
+                },
+            ),
+            (
+                Point {
+                    x_um: source.x_um,
+                    y_um: below_y,
+                },
+                Point {
+                    x_um: sink.x_um,
+                    y_um: below_y,
+                },
+            ),
+            (
+                Point {
+                    x_um: sink.x_um,
+                    y_um: below_y,
+                },
+                sink,
+            ),
         ]),
         normalize_path(vec![
-            (source, Point { x_um: left_x, y_um: source.y_um }),
-            (Point { x_um: left_x, y_um: source.y_um }, Point { x_um: left_x, y_um: sink.y_um }),
-            (Point { x_um: left_x, y_um: sink.y_um }, sink),
+            (
+                source,
+                Point {
+                    x_um: left_x,
+                    y_um: source.y_um,
+                },
+            ),
+            (
+                Point {
+                    x_um: left_x,
+                    y_um: source.y_um,
+                },
+                Point {
+                    x_um: left_x,
+                    y_um: sink.y_um,
+                },
+            ),
+            (
+                Point {
+                    x_um: left_x,
+                    y_um: sink.y_um,
+                },
+                sink,
+            ),
         ]),
         normalize_path(vec![
-            (source, Point { x_um: right_x, y_um: source.y_um }),
-            (Point { x_um: right_x, y_um: source.y_um }, Point { x_um: right_x, y_um: sink.y_um }),
-            (Point { x_um: right_x, y_um: sink.y_um }, sink),
+            (
+                source,
+                Point {
+                    x_um: right_x,
+                    y_um: source.y_um,
+                },
+            ),
+            (
+                Point {
+                    x_um: right_x,
+                    y_um: source.y_um,
+                },
+                Point {
+                    x_um: right_x,
+                    y_um: sink.y_um,
+                },
+            ),
+            (
+                Point {
+                    x_um: right_x,
+                    y_um: sink.y_um,
+                },
+                sink,
+            ),
         ]),
     ]
 }
@@ -463,7 +578,9 @@ fn ranges_overlap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> bool {
 }
 
 fn path_length(path: &[(Point, Point)]) -> f64 {
-    path.iter().map(|(start, end)| manhattan_length(*start, *end)).sum()
+    path.iter()
+        .map(|(start, end)| manhattan_length(*start, *end))
+        .sum()
 }
 
 fn is_boundary_port(netlist: &Netlist, node: rflux_ir::NodeId) -> bool {
@@ -482,16 +599,28 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::Port, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
 
-        let placement = LevelizedPlacer::new().place(&netlist, &PlacementConfig::default()).expect("placement");
+        let placement = LevelizedPlacer::new()
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement");
         let report = SimpleRouter::new()
-            .route(&netlist, &placement, &Pdk::minimal("test"), &RoutingConfig::default())
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
             .expect("route");
 
         assert_eq!(report.routes.len(), 1);
         assert_eq!(report.routes[0].mode, RouteMode::Jtl);
-        assert_eq!(report.routes[0].direct_length_um, report.routes[0].length_um);
+        assert_eq!(
+            report.routes[0].direct_length_um,
+            report.routes[0].length_um
+        );
         assert_eq!(report.jtl_routes, 1);
     }
 
@@ -500,7 +629,9 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::CellInstance, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
 
         let placement = LevelizedPlacer::new()
             .place(
@@ -517,7 +648,12 @@ mod tests {
             )
             .expect("placement");
         let report = SimpleRouter::new()
-            .route(&netlist, &placement, &Pdk::minimal("test"), &RoutingConfig::default())
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
             .expect("route");
 
         assert_eq!(report.routes[0].mode, RouteMode::Ptl);
@@ -530,7 +666,9 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::CellInstance, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
 
         let placement = LevelizedPlacer::new()
             .place(
@@ -567,7 +705,16 @@ mod tests {
         let input = netlist.add_node(NodeKind::Port, "input");
         let gate = netlist.add_node(NodeKind::CellInstance, "gate");
         netlist
-            .connect(PinRef { node: input, port: 0 }, PinRef { node: gate, port: 0 })
+            .connect(
+                PinRef {
+                    node: input,
+                    port: 0,
+                },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
             .expect("input to gate");
 
         let placement = LevelizedPlacer::new()
@@ -586,7 +733,12 @@ mod tests {
             .expect("placement");
 
         let report = SimpleRouter::new()
-            .route(&netlist, &placement, &Pdk::minimal("test"), &RoutingConfig::default())
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
             .expect("route");
 
         assert_eq!(report.routes[0].mode, RouteMode::Jtl);
@@ -600,7 +752,9 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::CellInstance, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
 
         let placement = LevelizedPlacer::new()
             .place(
@@ -646,7 +800,9 @@ mod tests {
         let mut netlist = Netlist::new();
         let a = netlist.add_node(NodeKind::CellInstance, "a");
         let b = netlist.add_node(NodeKind::CellInstance, "b");
-        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).expect("a to b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
 
         let placement = LevelizedPlacer::new()
             .place(

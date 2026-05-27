@@ -13,7 +13,8 @@ const REQUIRED_CELL_KINDS: [SfCellKind; 7] = [
     SfCellKind::Port,
 ];
 
-const REQUIRED_INTERCONNECT_KINDS: [InterconnectKind; 2] = [InterconnectKind::Jtl, InterconnectKind::Ptl];
+const REQUIRED_INTERCONNECT_KINDS: [InterconnectKind; 2] =
+    [InterconnectKind::Jtl, InterconnectKind::Ptl];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InterconnectKind {
@@ -35,7 +36,7 @@ pub struct CellTimingModel {
     pub hold_ps: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedCellTimingModel {
     pub cell_name: String,
     pub timing: CellTimingModel,
@@ -45,6 +46,23 @@ pub struct NamedCellTimingModel {
 pub struct InterconnectTimingModel {
     pub kind: InterconnectKind,
     pub points: Vec<TimingPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PdkTimingCorner {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage_v: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_k: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_timing: Vec<CellTimingModel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_cell_timing: Vec<NamedCellTimingModel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interconnect_timing: Vec<InterconnectTimingModel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -240,7 +258,11 @@ impl SfCellLibrary {
     }
 
     pub fn upsert(&mut self, cell: SfCell) {
-        if let Some(existing) = self.cells.iter_mut().find(|existing| existing.name == cell.name) {
+        if let Some(existing) = self
+            .cells
+            .iter_mut()
+            .find(|existing| existing.name == cell.name)
+        {
             *existing = cell;
         } else {
             self.cells.push(cell);
@@ -260,6 +282,10 @@ pub struct Pdk {
     pub metal_layers: u8,
     pub ptl_forbidden_ranges: Vec<LengthRange>,
     pub cell_library: SfCellLibrary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_timing_corner: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timing_corners: Vec<PdkTimingCorner>,
     pub cell_timing: Vec<CellTimingModel>,
     pub named_cell_timing: Vec<NamedCellTimingModel>,
     pub characterized_cell_metadata: Vec<NamedCharacterizationMetadata>,
@@ -286,6 +312,8 @@ impl Pdk {
             metal_layers: 4,
             ptl_forbidden_ranges: Vec::new(),
             cell_library: SfCellLibrary::minimal(),
+            active_timing_corner: None,
+            timing_corners: Vec::new(),
             cell_timing: vec![
                 CellTimingModel {
                     kind: SfCellKind::GenericGate,
@@ -379,15 +407,51 @@ impl Pdk {
     }
 
     pub fn cell_timing(&self, kind: SfCellKind) -> Option<&CellTimingModel> {
-        self.cell_timing.iter().find(|model| model.kind == kind)
+        self.active_corner()
+            .and_then(|corner| corner.cell_timing.iter().find(|model| model.kind == kind))
+            .or_else(|| self.cell_timing.iter().find(|model| model.kind == kind))
     }
 
-    pub fn cell_timing_for_cell(&self, cell_name: &str, kind: SfCellKind) -> Option<&CellTimingModel> {
-        self.named_cell_timing
-            .iter()
-            .find(|model| model.cell_name == cell_name)
-            .map(|model| &model.timing)
+    pub fn cell_timing_for_cell(
+        &self,
+        cell_name: &str,
+        kind: SfCellKind,
+    ) -> Option<&CellTimingModel> {
+        self.active_corner()
+            .and_then(|corner| {
+                corner
+                    .named_cell_timing
+                    .iter()
+                    .find(|model| model.cell_name == cell_name)
+                    .map(|model| &model.timing)
+            })
+            .or_else(|| {
+                self.named_cell_timing
+                    .iter()
+                    .find(|model| model.cell_name == cell_name)
+                    .map(|model| &model.timing)
+            })
             .or_else(|| self.cell_timing(kind))
+    }
+
+    pub fn active_corner(&self) -> Option<&PdkTimingCorner> {
+        let active = self.active_timing_corner.as_deref()?;
+        self.timing_corners
+            .iter()
+            .find(|corner| corner.name == active)
+    }
+
+    pub fn timing_corner_names(&self) -> Vec<&str> {
+        self.timing_corners
+            .iter()
+            .map(|corner| corner.name.as_str())
+            .collect()
+    }
+
+    pub fn with_active_timing_corner(&self, name: impl Into<String>) -> Self {
+        let mut updated = self.clone();
+        updated.active_timing_corner = Some(name.into());
+        updated
     }
 
     pub fn cell_for_node(&self, cell_name: &str, kind: SfCellKind) -> Option<&SfCell> {
@@ -442,7 +506,7 @@ impl Pdk {
         }
         let named_timing_cells = entries
             .iter()
-            .filter(|entry| entry.timing_source == "named")
+            .filter(|entry| entry.timing_source == "named" || entry.timing_source == "corner_named")
             .map(|entry| entry.name.clone())
             .collect::<Vec<_>>();
         let missing_timing_cells = entries
@@ -462,7 +526,9 @@ impl Pdk {
             named_timing_count: named_timing_cells.len(),
             kind_timing_count: entries
                 .iter()
-                .filter(|entry| entry.timing_source == "kind")
+                .filter(|entry| {
+                    entry.timing_source == "kind" || entry.timing_source == "corner_kind"
+                })
                 .count(),
             missing_timing_count: missing_timing_cells.len(),
             characterized_cell_count: characterized_cells.len(),
@@ -488,13 +554,36 @@ impl Pdk {
     }
 
     fn cell_library_entry_for_cell(&self, cell: &SfCell) -> CellLibraryEntry {
-        let named_timing = self
+        let corner_named_timing = self.active_corner().and_then(|corner| {
+            corner
+                .named_cell_timing
+                .iter()
+                .find(|model| model.cell_name == cell.name)
+        });
+        let base_named_timing = self
             .named_cell_timing
             .iter()
             .find(|model| model.cell_name == cell.name);
-        let timing = named_timing
+        let timing = corner_named_timing
             .map(|model| &model.timing)
+            .or_else(|| base_named_timing.map(|model| &model.timing))
             .or_else(|| self.cell_timing(cell.kind));
+        let timing_source = if corner_named_timing.is_some() {
+            "corner_named"
+        } else if self.active_corner().is_some_and(|corner| {
+            corner
+                .cell_timing
+                .iter()
+                .any(|model| model.kind == cell.kind)
+        }) {
+            "corner_kind"
+        } else if base_named_timing.is_some() {
+            "named"
+        } else if timing.is_some() {
+            "kind"
+        } else {
+            "missing"
+        };
         CellLibraryEntry {
             name: cell.name.clone(),
             kind: cell.kind,
@@ -505,13 +594,7 @@ impl Pdk {
                 .unwrap_or_default(),
             setup_ps: timing.map(|timing| timing.setup_ps).unwrap_or_default(),
             hold_ps: timing.map(|timing| timing.hold_ps).unwrap_or_default(),
-            timing_source: if named_timing.is_some() {
-                "named".to_string()
-            } else if timing.is_some() {
-                "kind".to_string()
-            } else {
-                "missing".to_string()
-            },
+            timing_source: timing_source.to_string(),
             has_characterization_metadata: self
                 .characterization_metadata_for_cell(&cell.name)
                 .is_some(),
@@ -580,10 +663,12 @@ impl Pdk {
             {
                 existing.metadata = metadata;
             } else {
-                updated.characterized_cell_metadata.push(NamedCharacterizationMetadata {
-                    cell_name,
-                    metadata,
-                });
+                updated
+                    .characterized_cell_metadata
+                    .push(NamedCharacterizationMetadata {
+                        cell_name,
+                        metadata,
+                    });
             }
         }
         updated
@@ -593,9 +678,9 @@ impl Pdk {
         &self,
         entries: impl IntoIterator<Item = CharacterizedCellLibraryEntry>,
     ) -> Self {
-        entries
-            .into_iter()
-            .fold(self.clone(), |pdk, entry| pdk.with_characterized_cell(entry))
+        entries.into_iter().fold(self.clone(), |pdk, entry| {
+            pdk.with_characterized_cell(entry)
+        })
     }
 
     pub fn with_characterized_library_bundle_json(
@@ -621,9 +706,11 @@ impl Pdk {
         &self,
         serialized_entries: &[&str],
     ) -> Result<Self, serde_json::Error> {
-        serialized_entries.iter().try_fold(self.clone(), |pdk, entry| {
-            pdk.with_characterized_library_json(entry)
-        })
+        serialized_entries
+            .iter()
+            .try_fold(self.clone(), |pdk, entry| {
+                pdk.with_characterized_library_json(entry)
+            })
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -662,6 +749,46 @@ impl Pdk {
         {
             warnings.push("pdk.cell_library.source is not set".to_string());
         }
+        if let Some(active_corner) = self.active_timing_corner.as_deref() {
+            if !self
+                .timing_corners
+                .iter()
+                .any(|corner| corner.name == active_corner)
+            {
+                errors.push(format!(
+                    "pdk.active_timing_corner '{}' does not match any timing_corners entry",
+                    active_corner
+                ));
+            }
+        }
+
+        let mut seen_corner_names = std::collections::BTreeSet::new();
+        for corner in &self.timing_corners {
+            if corner.name.trim().is_empty() {
+                errors.push("pdk.timing_corners contains a corner with an empty name".to_string());
+            }
+            if !seen_corner_names.insert(corner.name.clone()) {
+                errors.push(format!(
+                    "pdk.timing_corners contains duplicate corner name '{}'",
+                    corner.name
+                ));
+            }
+            if corner.voltage_v.is_some_and(|voltage| voltage <= 0.0) {
+                errors.push(format!(
+                    "pdk.timing_corners '{}' has non-positive voltage_v",
+                    corner.name
+                ));
+            }
+            if corner
+                .temperature_k
+                .is_some_and(|temperature| temperature < 0.0)
+            {
+                errors.push(format!(
+                    "pdk.timing_corners '{}' has negative temperature_k",
+                    corner.name
+                ));
+            }
+        }
 
         let mut seen_cell_names = std::collections::BTreeSet::new();
         for cell in &self.cell_library.cells {
@@ -683,7 +810,12 @@ impl Pdk {
         }
 
         for required_kind in REQUIRED_CELL_KINDS {
-            if !self.cell_library.cells.iter().any(|cell| cell.kind == required_kind) {
+            if !self
+                .cell_library
+                .cells
+                .iter()
+                .any(|cell| cell.kind == required_kind)
+            {
                 errors.push(format!(
                     "pdk.cell_library is missing required cell kind {:?}",
                     required_kind
@@ -719,8 +851,29 @@ impl Pdk {
             }
         }
 
+        for corner in &self.timing_corners {
+            let mut seen_corner_timing_kinds = std::collections::HashSet::new();
+            for timing in &corner.cell_timing {
+                if !seen_corner_timing_kinds.insert(timing.kind) {
+                    errors.push(format!(
+                        "pdk.timing_corners '{}' cell_timing contains duplicate timing entry for kind {:?}",
+                        corner.name, timing.kind
+                    ));
+                }
+                validate_cell_timing_model(
+                    &mut errors,
+                    &format!("pdk.timing_corners '{}' cell_timing", corner.name),
+                    timing,
+                );
+            }
+        }
+
         for required_kind in REQUIRED_CELL_KINDS {
-            if !self.cell_timing.iter().any(|timing| timing.kind == required_kind) {
+            if !self
+                .cell_timing
+                .iter()
+                .any(|timing| timing.kind == required_kind)
+            {
                 errors.push(format!(
                     "pdk.cell_timing is missing required timing entry for kind {:?}",
                     required_kind
@@ -769,6 +922,24 @@ impl Pdk {
             }
         }
 
+        for corner in &self.timing_corners {
+            let mut seen_corner_named_timing_cells = std::collections::BTreeSet::new();
+            for timing in &corner.named_cell_timing {
+                if !seen_corner_named_timing_cells.insert(timing.cell_name.clone()) {
+                    errors.push(format!(
+                        "pdk.timing_corners '{}' named_cell_timing contains duplicate entry for cell '{}'",
+                        corner.name, timing.cell_name
+                    ));
+                }
+                validate_named_cell_timing_model(
+                    self,
+                    &mut errors,
+                    &format!("pdk.timing_corners '{}' named_cell_timing", corner.name),
+                    timing,
+                );
+            }
+        }
+
         let mut seen_metadata_cells = std::collections::BTreeSet::new();
         for metadata in &self.characterized_cell_metadata {
             if !seen_metadata_cells.insert(metadata.cell_name.clone()) {
@@ -777,7 +948,11 @@ impl Pdk {
                     metadata.cell_name
                 ));
             }
-            if self.cell_library.find_by_name(&metadata.cell_name).is_none() {
+            if self
+                .cell_library
+                .find_by_name(&metadata.cell_name)
+                .is_none()
+            {
                 errors.push(format!(
                     "pdk.characterized_cell_metadata references unknown cell '{}'",
                     metadata.cell_name
@@ -847,14 +1022,21 @@ impl Pdk {
                         metadata.cell_name, arc.name, arc.delay_ps
                     ));
                 }
-                if self.cell_library.find_by_name(&arc.driver_cell_name).is_none() {
+                if self
+                    .cell_library
+                    .find_by_name(&arc.driver_cell_name)
+                    .is_none()
+                {
                     warnings.push(format!(
                         "pdk.characterized_cell_metadata '{}' arc '{}' references unknown driver cell '{}'",
                         metadata.cell_name, arc.name, arc.driver_cell_name
                     ));
                 }
                 if arc.sink_cell_name != CHARACTERIZED_ARC_ANY_SINK
-                    && self.cell_library.find_by_name(&arc.sink_cell_name).is_none()
+                    && self
+                        .cell_library
+                        .find_by_name(&arc.sink_cell_name)
+                        .is_none()
                 {
                     warnings.push(format!(
                         "pdk.characterized_cell_metadata '{}' arc '{}' references unknown sink cell '{}'",
@@ -921,6 +1103,23 @@ impl Pdk {
             }
         }
 
+        for corner in &self.timing_corners {
+            let mut seen_corner_interconnect_kinds = std::collections::HashSet::new();
+            for model in &corner.interconnect_timing {
+                if !seen_corner_interconnect_kinds.insert(model.kind) {
+                    errors.push(format!(
+                        "pdk.timing_corners '{}' interconnect_timing contains duplicate timing model for kind {:?}",
+                        corner.name, model.kind
+                    ));
+                }
+                validate_interconnect_timing_model(
+                    &mut errors,
+                    &format!("pdk.timing_corners '{}' interconnect_timing", corner.name),
+                    model,
+                );
+            }
+        }
+
         for required_kind in REQUIRED_INTERCONNECT_KINDS {
             if !self
                 .interconnect_timing
@@ -942,7 +1141,19 @@ impl Pdk {
     }
 
     pub fn interconnect_delay_ps(&self, kind: InterconnectKind, length_um: f64) -> Option<f64> {
-        let model = self.interconnect_timing.iter().find(|model| model.kind == kind)?;
+        let model = self
+            .active_corner()
+            .and_then(|corner| {
+                corner
+                    .interconnect_timing
+                    .iter()
+                    .find(|model| model.kind == kind)
+            })
+            .or_else(|| {
+                self.interconnect_timing
+                    .iter()
+                    .find(|model| model.kind == kind)
+            })?;
         interpolate_delay(&model.points, length_um)
     }
 }
@@ -967,13 +1178,98 @@ fn interpolate_delay(points: &[TimingPoint], length_um: f64) -> Option<f64> {
     }
 
     let last = points.last()?;
-    let prev = points.get(points.len().saturating_sub(2)).copied().unwrap_or(*last);
+    let prev = points
+        .get(points.len().saturating_sub(2))
+        .copied()
+        .unwrap_or(*last);
     let span = last.length_um - prev.length_um;
     if span.abs() < f64::EPSILON {
         return Some(last.delay_ps);
     }
     let slope = (last.delay_ps - prev.delay_ps) / span;
     Some(last.delay_ps + (length_um - last.length_um) * slope)
+}
+
+fn validate_cell_timing_model(errors: &mut Vec<String>, context: &str, timing: &CellTimingModel) {
+    if timing.intrinsic_delay_ps < 0.0 {
+        errors.push(format!(
+            "{} {:?} has negative intrinsic_delay_ps {}",
+            context, timing.kind, timing.intrinsic_delay_ps
+        ));
+    }
+    if timing.setup_ps < 0.0 {
+        errors.push(format!(
+            "{} {:?} has negative setup_ps {}",
+            context, timing.kind, timing.setup_ps
+        ));
+    }
+    if timing.hold_ps < 0.0 {
+        errors.push(format!(
+            "{} {:?} has negative hold_ps {}",
+            context, timing.kind, timing.hold_ps
+        ));
+    }
+}
+
+fn validate_named_cell_timing_model(
+    pdk: &Pdk,
+    errors: &mut Vec<String>,
+    context: &str,
+    timing: &NamedCellTimingModel,
+) {
+    let Some(cell) = pdk.cell_library.find_by_name(&timing.cell_name) else {
+        errors.push(format!(
+            "{} references unknown cell '{}'",
+            context, timing.cell_name
+        ));
+        return;
+    };
+    if timing.timing.kind != cell.kind {
+        errors.push(format!(
+            "{} for '{}' uses kind {:?}, but the cell library declares {:?}",
+            context, timing.cell_name, timing.timing.kind, cell.kind
+        ));
+    }
+    validate_cell_timing_model(errors, context, &timing.timing);
+}
+
+fn validate_interconnect_timing_model(
+    errors: &mut Vec<String>,
+    context: &str,
+    model: &InterconnectTimingModel,
+) {
+    if model.points.is_empty() {
+        errors.push(format!(
+            "{} {:?} must contain at least one point",
+            context, model.kind
+        ));
+        return;
+    }
+    let mut previous_length = None;
+    for point in &model.points {
+        if point.length_um < 0.0 {
+            errors.push(format!(
+                "{} {:?} has negative length_um {}",
+                context, model.kind, point.length_um
+            ));
+        }
+        if point.delay_ps < 0.0 {
+            errors.push(format!(
+                "{} {:?} has negative delay_ps {}",
+                context, model.kind, point.delay_ps
+            ));
+        }
+        if let Some(previous_length) = previous_length {
+            if point.length_um <= previous_length {
+                errors.push(format!(
+                    "{} {:?} points must be strictly increasing by length_um",
+                    context, model.kind
+                ));
+                break;
+            }
+        }
+        previous_length = Some(point.length_um);
+    }
 }
 
 #[cfg(test)]
@@ -1285,7 +1581,10 @@ mod tests {
         assert_eq!(legacy.cell_library_name(), "minimal-sfq");
         assert_eq!(legacy.cell_library_version(), None);
         assert_eq!(legacy.cell_library_source(), None);
-        assert_eq!(legacy.cell_library_summary().cell_count, REQUIRED_CELL_KINDS.len());
+        assert_eq!(
+            legacy.cell_library_summary().cell_count,
+            REQUIRED_CELL_KINDS.len()
+        );
         let report = legacy.validate();
         assert!(report.is_ok());
         assert_eq!(
@@ -1332,13 +1631,209 @@ mod tests {
         assert!(entry.has_characterization_metadata);
 
         let summary = updated.cell_library_summary();
-        assert_eq!(summary.kind_counts.get(&SfCellKind::Macro).copied(), Some(2));
+        assert_eq!(
+            summary.kind_counts.get(&SfCellKind::Macro).copied(),
+            Some(2)
+        );
         assert_eq!(summary.named_timing_count, 1);
         assert_eq!(summary.characterized_cell_count, 1);
         assert_eq!(summary.missing_timing_count, 0);
         assert_eq!(summary.named_timing_cells, vec!["compound_buf"]);
         assert_eq!(summary.characterized_cells, vec!["compound_buf"]);
         assert!(summary.missing_timing_cells.is_empty());
+    }
+
+    #[test]
+    fn pdk_active_timing_corner_overrides_kind_and_interconnect_timing() {
+        let mut pdk = Pdk::minimal("test");
+        pdk.active_timing_corner = Some("slow".to_string());
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: Some("ss".to_string()),
+            voltage_v: Some(2.4),
+            temperature_k: Some(4.2),
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 20.0,
+                setup_ps: 7.0,
+                hold_ps: 3.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 5.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 17.0,
+                    },
+                ],
+            }],
+        });
+
+        assert_eq!(pdk.active_corner().expect("active corner").name, "slow");
+        assert_eq!(pdk.timing_corner_names(), vec!["slow"]);
+        assert_eq!(
+            pdk.cell_timing(SfCellKind::GenericGate)
+                .expect("corner gate timing")
+                .intrinsic_delay_ps,
+            20.0
+        );
+        assert_eq!(
+            pdk.cell_timing(SfCellKind::Dff)
+                .expect("base dff timing should remain available")
+                .intrinsic_delay_ps,
+            10.0
+        );
+        assert_eq!(
+            pdk.interconnect_delay_ps(InterconnectKind::Jtl, 40.0),
+            Some(17.0)
+        );
+        assert_eq!(
+            pdk.interconnect_delay_ps(InterconnectKind::Ptl, 80.0),
+            Some(12.0)
+        );
+        assert!(pdk.validate().is_ok());
+    }
+
+    #[test]
+    fn pdk_active_timing_corner_overrides_named_cell_timing() {
+        let mut pdk = Pdk::minimal("test");
+        pdk.named_cell_timing.push(NamedCellTimingModel {
+            cell_name: "sfq_macro".to_string(),
+            timing: CellTimingModel {
+                kind: SfCellKind::Macro,
+                intrinsic_delay_ps: 18.0,
+                setup_ps: 6.0,
+                hold_ps: 4.0,
+            },
+        });
+        pdk = pdk.with_active_timing_corner("slow");
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: None,
+            voltage_v: None,
+            temperature_k: None,
+            cell_timing: Vec::new(),
+            named_cell_timing: vec![NamedCellTimingModel {
+                cell_name: "sfq_macro".to_string(),
+                timing: CellTimingModel {
+                    kind: SfCellKind::Macro,
+                    intrinsic_delay_ps: 31.0,
+                    setup_ps: 9.0,
+                    hold_ps: 5.0,
+                },
+            }],
+            interconnect_timing: Vec::new(),
+        });
+
+        assert_eq!(
+            pdk.cell_timing_for_cell("sfq_macro", SfCellKind::Macro)
+                .expect("corner named timing")
+                .intrinsic_delay_ps,
+            31.0
+        );
+        let entry = pdk
+            .cell_library_entry("sfq_macro")
+            .expect("sfq_macro library entry");
+        assert_eq!(entry.timing_source, "corner_named");
+        assert_eq!(entry.intrinsic_delay_ps, 31.0);
+        let summary = pdk.cell_library_summary();
+        assert_eq!(summary.named_timing_count, 1);
+        assert_eq!(summary.named_timing_cells, vec!["sfq_macro"]);
+        assert!(pdk.validate().is_ok());
+    }
+
+    #[test]
+    fn pdk_validation_reports_timing_corner_errors() {
+        let mut pdk = Pdk::minimal("test");
+        pdk.active_timing_corner = Some("missing".to_string());
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "bad".to_string(),
+            process: None,
+            voltage_v: Some(0.0),
+            temperature_k: Some(-1.0),
+            cell_timing: vec![
+                CellTimingModel {
+                    kind: SfCellKind::GenericGate,
+                    intrinsic_delay_ps: -1.0,
+                    setup_ps: 1.0,
+                    hold_ps: 1.0,
+                },
+                CellTimingModel {
+                    kind: SfCellKind::GenericGate,
+                    intrinsic_delay_ps: 2.0,
+                    setup_ps: 1.0,
+                    hold_ps: 1.0,
+                },
+            ],
+            named_cell_timing: vec![NamedCellTimingModel {
+                cell_name: "missing_cell".to_string(),
+                timing: CellTimingModel {
+                    kind: SfCellKind::Macro,
+                    intrinsic_delay_ps: 1.0,
+                    setup_ps: 1.0,
+                    hold_ps: 1.0,
+                },
+            }],
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 10.0,
+                        delay_ps: 1.0,
+                    },
+                    TimingPoint {
+                        length_um: 5.0,
+                        delay_ps: 2.0,
+                    },
+                ],
+            }],
+        });
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "bad".to_string(),
+            process: None,
+            voltage_v: None,
+            temperature_k: None,
+            cell_timing: Vec::new(),
+            named_cell_timing: Vec::new(),
+            interconnect_timing: Vec::new(),
+        });
+
+        let report = pdk.validate();
+
+        assert!(!report.is_ok());
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("active_timing_corner 'missing'")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate corner name 'bad'")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("non-positive voltage_v")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("negative temperature_k")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate timing entry for kind GenericGate")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("references unknown cell 'missing_cell'")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("points must be strictly increasing")));
     }
 
     #[test]
@@ -1438,8 +1933,11 @@ mod tests {
     #[test]
     fn pdk_validation_reports_missing_required_coverage() {
         let mut pdk = Pdk::minimal("test");
-        pdk.cell_library.cells.retain(|cell| cell.kind != SfCellKind::Dff);
-        pdk.cell_timing.retain(|timing| timing.kind != SfCellKind::Splitter);
+        pdk.cell_library
+            .cells
+            .retain(|cell| cell.kind != SfCellKind::Dff);
+        pdk.cell_timing
+            .retain(|timing| timing.kind != SfCellKind::Splitter);
         pdk.interconnect_timing
             .retain(|timing| timing.kind != InterconnectKind::Ptl);
 
@@ -1481,36 +1979,41 @@ mod tests {
                 hold_ps: 1.0,
             },
         });
-        pdk.characterized_cell_metadata.push(NamedCharacterizationMetadata {
-            cell_name: "sfq_macro".to_string(),
-            metadata: CharacterizationArtifactMetadata {
-                delay_calibration_sigma_ps: -0.1,
-                delay_details: vec![CharacterizationDelayDetail {
-                    name: "bad-detail".to_string(),
-                    delay_ps: -3.0,
-                }],
-                arc_delays: vec![CharacterizationArcDelay {
-                    name: "bad-arc".to_string(),
-                    driver_cell_name: "sfq_macro".to_string(),
-                    from_port: 0,
-                    sink_cell_name: "sink".to_string(),
-                    to_port: 0,
-                    delay_ps: -4.0,
-                }, CharacterizationArcDelay {
-                    name: "bad-arc-duplicate".to_string(),
-                    driver_cell_name: "sfq_macro".to_string(),
-                    from_port: 0,
-                    sink_cell_name: "sink".to_string(),
-                    to_port: 0,
-                    delay_ps: 2.0,
-                }],
-                ..CharacterizationArtifactMetadata::default()
-            },
-        });
-        pdk.characterized_cell_metadata.push(NamedCharacterizationMetadata {
-            cell_name: "sfq_macro".to_string(),
-            metadata: CharacterizationArtifactMetadata::default(),
-        });
+        pdk.characterized_cell_metadata
+            .push(NamedCharacterizationMetadata {
+                cell_name: "sfq_macro".to_string(),
+                metadata: CharacterizationArtifactMetadata {
+                    delay_calibration_sigma_ps: -0.1,
+                    delay_details: vec![CharacterizationDelayDetail {
+                        name: "bad-detail".to_string(),
+                        delay_ps: -3.0,
+                    }],
+                    arc_delays: vec![
+                        CharacterizationArcDelay {
+                            name: "bad-arc".to_string(),
+                            driver_cell_name: "sfq_macro".to_string(),
+                            from_port: 0,
+                            sink_cell_name: "sink".to_string(),
+                            to_port: 0,
+                            delay_ps: -4.0,
+                        },
+                        CharacterizationArcDelay {
+                            name: "bad-arc-duplicate".to_string(),
+                            driver_cell_name: "sfq_macro".to_string(),
+                            from_port: 0,
+                            sink_cell_name: "sink".to_string(),
+                            to_port: 0,
+                            delay_ps: 2.0,
+                        },
+                    ],
+                    ..CharacterizationArtifactMetadata::default()
+                },
+            });
+        pdk.characterized_cell_metadata
+            .push(NamedCharacterizationMetadata {
+                cell_name: "sfq_macro".to_string(),
+                metadata: CharacterizationArtifactMetadata::default(),
+            });
 
         let report = pdk.validate();
 
@@ -1548,20 +2051,21 @@ mod tests {
     #[test]
     fn pdk_validation_reports_characterization_advisory_warnings() {
         let mut pdk = Pdk::minimal("test");
-        pdk.characterized_cell_metadata.push(NamedCharacterizationMetadata {
-            cell_name: "sfq_macro".to_string(),
-            metadata: CharacterizationArtifactMetadata {
-                arc_delays: vec![CharacterizationArcDelay {
-                    name: "unknown-sink".to_string(),
-                    driver_cell_name: "sfq_macro".to_string(),
-                    from_port: 0,
-                    sink_cell_name: "missing_sink".to_string(),
-                    to_port: 0,
-                    delay_ps: 2.0,
-                }],
-                ..CharacterizationArtifactMetadata::default()
-            },
-        });
+        pdk.characterized_cell_metadata
+            .push(NamedCharacterizationMetadata {
+                cell_name: "sfq_macro".to_string(),
+                metadata: CharacterizationArtifactMetadata {
+                    arc_delays: vec![CharacterizationArcDelay {
+                        name: "unknown-sink".to_string(),
+                        driver_cell_name: "sfq_macro".to_string(),
+                        from_port: 0,
+                        sink_cell_name: "missing_sink".to_string(),
+                        to_port: 0,
+                        delay_ps: 2.0,
+                    }],
+                    ..CharacterizationArtifactMetadata::default()
+                },
+            });
 
         let report = pdk.validate();
 

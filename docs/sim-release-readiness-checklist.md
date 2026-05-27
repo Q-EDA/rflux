@@ -146,5 +146,6 @@ Follow-up due date:
 
 - The tracked repo baseline today is Windows-local: `python/tests/benchmarks/phase6/waveform_compare_summary.windows-approved-baseline.json`.
 - The intended Linux promotion target is `python/tests/benchmarks/phase6/waveform_compare_summary.linux-approved-baseline.json`.
-- Do not use the Windows baseline as the default strict no-regression source for Ubuntu CI.
-- Before enabling default CI no-regression, capture and promote a Linux approved baseline on the runner class that will enforce it.
+- The default CI quality gate now uses the Windows baseline on the same-platform `windows-latest` waveform-compare job.
+- Do not reuse the Windows baseline as the strict no-regression source for a future Ubuntu/Linux gate.
+- Before enabling a Linux default gate, capture and promote a Linux approved baseline on the runner class that will enforce it.

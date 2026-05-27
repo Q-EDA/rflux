@@ -2,7 +2,7 @@
 
 当前仓库已提供最小 CLI 诊断包导出能力，用于把单次问题复现所需的核心上下文收集到一个可归档目录中。
 
-当前还提供统一执行入口 `run-with-diagnostics`，可在执行真实业务命令的同时直接产出诊断包；现阶段已接通 `simulate-file`、`verify-layout`、`compile-layout`、`analyze-timing`、`compile-netlist`、`solve-dimacs`、`check-equivalence`、`lint-input` 和 `pdk-validate`。
+当前还提供统一执行入口 `run-with-diagnostics`，可在执行真实业务命令的同时直接产出诊断包；现阶段已接通 `simulate-file`、`verify-layout`、`compile-layout`、`analyze-timing`、`compile-netlist`、`solve-dimacs`、`check-equivalence`、`lint-input`、`lint-timing-constraints` 和 `pdk-validate`。
 
 这些命令家族当前已有显式 CI smoke 锚点，而不只是隐含地落在 `cargo test --workspace` 里：
 
@@ -60,11 +60,25 @@ cargo run -p rflux-cli -- run-with-diagnostics \
 
 `closure.action_count`、`closure.primary_action` 与 `closure.action_summary` 给上层调度器提供稳定入口：先处理 `primary_action`，再按 `reduce_route_delay`、`relax_constraint_or_improve_library_timing`、`add_hold_padding`、`adjust_sfq_phase_or_pulse_window` 的计数决定是重跑布线、放宽约束/补库时序、进入 hold padding 路径，还是调整 SFQ 相位分配或脉冲捕获窗口。
 
-`compile-layout` 报告还会在 `timing.closure_loop` 中记录物理闭环步骤：detour feedback 和 hold-fix reroute 是否尝试、是否应用、detour overhead 与 hold violation 的前后变化、闭环 `status` 与 `next_step`。如果 `closure.action_summary.add_hold_padding > 0`，可以用 `compile-layout --min-hold-jtl-length-um <um>` 或 `run-with-diagnostics --kind compile-layout --min-hold-jtl-length-um <um>` 触发保守的 hold padding reroute。
+`compile-layout` 报告还会在 `timing.closure_loop` 中记录物理闭环步骤：detour feedback、route-delay optimization 和 hold-fix reroute 是否尝试、是否应用、detour overhead 与 hold violation 的前后变化、闭环 `status` 与 `next_step`。如果 `closure.action_summary.add_hold_padding > 0`，可以用 `compile-layout --min-hold-jtl-length-um <um>` 或 `run-with-diagnostics --kind compile-layout --min-hold-jtl-length-um <um>` 触发保守的 hold padding reroute。
 
-如果 `closure.action_summary.reduce_route_delay > 0`，`timing.closure_loop` 会给出 `recommended_prefer_ptl_from_length_um`、`recommended_detour_margin_um`、`recommended_route_mode`、`estimated_route_length_um` 和 `estimated_slack_deficit_ps`。`compile-layout` 还会用推荐 routing 参数做一次非破坏性的 candidate rerun，并输出 `candidate_worst_setup_slack_ps`、`candidate_setup_violations`、`candidate_hold_violations`、`candidate_route_mode`、`candidate_route_length_um` 和 `reduce_route_delay_candidate_improved`。上层可据此决定是否用 `compile-layout --prefer-ptl-from-length-um <um> --detour-margin-um <um>` 固化该候选。
+如果 `closure.action_summary.reduce_route_delay > 0`，`compile-layout` 会基于 top-ranked reduce-route actions 生成推荐 routing 参数并尝试一次保守 reroute。只有 candidate 改善 setup，且不增加 hold 或 capture-window 违规时，flow 才会采纳该 routing；报告中的 `route_delay_optimization_attempted` 和 `route_delay_optimization_applied` 记录尝试/采纳结果。`timing.closure_loop` 仍会输出 `recommended_prefer_ptl_from_length_um`、`recommended_detour_margin_um`、`recommended_route_mode`、`estimated_route_length_um`、`estimated_slack_deficit_ps`、`candidate_worst_setup_slack_ps`、`candidate_setup_violations`、`candidate_hold_violations`、`candidate_route_mode`、`candidate_route_length_um` 和 `reduce_route_delay_candidate_improved`，便于把有效策略固化到 `--flow-config` 或显式 CLI 参数。
 
-`closure.actions` 会列出当前最该处理的 violation arc。每个 action 包含 `check`、`priority`、`remediation_kind`、`from`、`to`、`slack_ps`、`route_mode`、`route_length_um` 和 action-level `next_step`；setup action 优先提示缩短 arrival / route delay 或调整 required time，hold action 优先提示增加最小路径延迟或检查 hold-fix reroute，capture-window action 优先提示检查 domain phase offset 并调整 SFQ 相位或 pulse window。
+`routing.effective_prefer_ptl_from_length_um` 和
+`routing.effective_detour_margin_um` 记录本次 layout 最终实际采用的 routing
+参数；如果 route-delay optimization 或 hold-fix reroute 被采纳，这些字段会反映采纳后的值，可直接用于复现实验或生成后续 `flow_config`。
+`compile-layout` 报告同时提供 `flow_config_patch`，这是一个
+`kind: "rflux_flow_config"` 的版本化 envelope，包含本次 timing 设置和最终
+effective routing 参数，可直接保存后作为下一轮 `--flow-config` 输入。
+普通 `compile-layout` 可用 `--flow-config-patch-output path/to/flow.json`
+单独写出该 replay config；`run-with-diagnostics --kind compile-layout` 会自动在
+诊断包的 `reports/flow-config-patch.json` 中保存同一份 artifact，并纳入
+manifest 的 `captured_reports`。
+manifest 的 `summary.recommended_next_flow_config` 会指向这份 artifact，便于调度器直接把它作为下一轮 `--flow-config`。
+Python API 的 `LayoutReport.flow_config_patch` 也暴露同结构 envelope，便于
+Notebook 或批处理脚本直接串接下一轮物理优化。
+
+`closure.actions` 会按 setup、hold、capture-window 的优先级列出每类检查中 slack 最差的 top-ranked violation arcs（每类最多 3 个）。`primary_action` 仍然是第一条 action，上层可以先处理它，再批量处理同类更多负 slack arc。每个 action 包含 `check`、`priority`、`remediation_kind`、`from`、`to`、`slack_ps`、`route_mode`、`route_length_um` 和 action-level `next_step`；setup action 优先提示缩短 arrival / route delay 或调整 required time，hold action 优先提示增加最小路径延迟或检查 hold-fix reroute，capture-window action 优先提示检查 domain phase offset 并调整 SFQ 相位或 pulse window。
 
 ```bash
 cargo run -p rflux-cli -- run-with-diagnostics \
@@ -98,6 +112,70 @@ SFQ timing reports now include pulse-phase context on each timing arc: `launch_p
 `capture_window_slack_ps`, and `capture_window_violation`. Summary reports also
 include `capture_window_violations`, giving schedulers a direct count of SFQ
 pulse-window misses alongside setup and hold violations.
+
+## Timing CLI Knobs
+
+`compile-layout`, `analyze-timing`, and their `run-with-diagnostics` variants accept
+`--clock-period-ps`, `--input-arrival-ps`, `--sfq-phase-count`, and
+`--sfq-pulse-window-ps`.
+
+They can also load a reusable flow configuration with
+`--flow-config path/to/flow.json`. Flow config files may provide timing fields
+under `timing` (`clock_period_ps`, `input_arrival_ps`, `sfq_phase_count`,
+`sfq_pulse_window_ps`) and routing fields under `routing`
+(`prefer_ptl_from_length_um`, `detour_margin_um`,
+`min_hold_jtl_length_um`). Top-level aliases for the same fields are accepted for
+small hand-written files. The file is applied before explicit CLI flags, so a
+command-line value overrides the reusable config for that run.
+
+Flow config may be raw JSON or a versioned envelope:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "rflux_flow_config",
+  "payload": {
+    "timing": {
+      "clock_period_ps": 80.0,
+      "input_arrival_ps": 5.0,
+      "sfq_phase_count": 4,
+      "sfq_pulse_window_ps": 3.0
+    },
+    "routing": {
+      "prefer_ptl_from_length_um": 65.0,
+      "detour_margin_um": 6.0,
+      "min_hold_jtl_length_um": 60.0
+    }
+  }
+}
+```
+
+Diagnostics bundles capture this file with role `flow_config`, classify the
+envelope as `rflux_flow_config`, and record the replay path under
+`configuration.flow.flow_config`.
+
+They also accept `--timing-constraints path/to/timing.json`. The JSON file can
+provide `node_constraints`, `pin_constraints`, `clock_domains`, and
+`crossing_constraints` entries; node references may be numeric IDs or unique node
+names. Cross-domain constraint kinds are `false_path`, `max_delay`, and
+`multicycle`. Diagnostics bundles capture the timing-constraints file and record
+the replay path under `configuration.flow.timing_constraints`.
+
+Timing constraints may be provided as raw JSON or as a versioned envelope with
+`schema_version: 1`, `kind: "rflux_timing_constraints"`, and `payload` containing
+the same constraint fields. Diagnostics input snapshots classify the envelope as
+`rflux_timing_constraints` and include the constraint summary.
+
+Use `lint-timing-constraints` to validate the file before running STA or layout:
+
+```bash
+cargo run -p rflux-cli -- lint-timing-constraints \
+  --input path/to/timing.json \
+  --netlist path/to/example.ir.json
+```
+
+The lint report includes `constraint_summary` counts and, when `--netlist` is
+provided, verifies node references against the selected netlist input format.
 
 Sequential equivalence can also be run as a bounded small-system check:
 

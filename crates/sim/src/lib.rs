@@ -93,6 +93,30 @@ pub struct SimulationReport {
     pub external_result: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulationQualityGateReport {
+    pub passed: bool,
+    pub status: String,
+    pub required_backend: String,
+    pub actual_backend: SimulationBackend,
+    pub alignment_level: String,
+    pub external_alignment_required: bool,
+    pub external_alignment_available: bool,
+    pub violation_count: usize,
+    pub warning_count: usize,
+    pub next_step: String,
+}
+
+impl SimulationReport {
+    pub fn quality_gate(&self) -> SimulationQualityGateReport {
+        simulation_quality_gate(self, false)
+    }
+
+    pub fn josim_quality_gate(&self) -> SimulationQualityGateReport {
+        simulation_quality_gate(self, true)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransientAnalysis {
     pub tstep_ps: f64,
@@ -325,35 +349,33 @@ fn run_generated_deck_with_base(
         external_result: Some(reason),
     };
 
-    let internal_transient_completed_report = |
-        result: InternalTransientResult,
-        waveform_path: Option<String>,
-    | {
-        let external_result = result
-            .option_seed
-            .map(|seed| format!("internal_transient_linear_rc;seed={seed}"))
-            .unwrap_or_else(|| "internal_transient_linear_rc".to_string());
-        SimulationReport {
-        backend: SimulationBackend::InternalTransientCompleted,
-        simulated_events: result.simulated_steps,
-        generated_deck_lines,
-        generated_deck_path: None,
-        waveform_path,
-        reported_violations: 0,
-        reported_worst_delay_ps: result
-            .delay_details
-            .iter()
-            .map(|detail| detail.delay_ps)
-            .reduce(f64::max)
-            .or(Some(result.max_abs_voltage_v)),
-        delay_details: result.delay_details,
-        measurement_details: result.measurement_details,
-        measurement_warnings: result.measurement_warnings,
-        violation_details: Vec::new(),
-        external_status_code: None,
-        external_result: Some(external_result),
-    }
-    };
+    let internal_transient_completed_report =
+        |result: InternalTransientResult, waveform_path: Option<String>| {
+            let external_result = result
+                .option_seed
+                .map(|seed| format!("internal_transient_linear_rc;seed={seed}"))
+                .unwrap_or_else(|| "internal_transient_linear_rc".to_string());
+            SimulationReport {
+                backend: SimulationBackend::InternalTransientCompleted,
+                simulated_events: result.simulated_steps,
+                generated_deck_lines,
+                generated_deck_path: None,
+                waveform_path,
+                reported_violations: 0,
+                reported_worst_delay_ps: result
+                    .delay_details
+                    .iter()
+                    .map(|detail| detail.delay_ps)
+                    .reduce(f64::max)
+                    .or(Some(result.max_abs_voltage_v)),
+                delay_details: result.delay_details,
+                measurement_details: result.measurement_details,
+                measurement_warnings: result.measurement_warnings,
+                violation_details: Vec::new(),
+                external_status_code: None,
+                external_result: Some(external_result),
+            }
+        };
 
     let external_command = match simulation_config.mode {
         SimulationMode::Auto => simulation_config.external_command.as_deref(),
@@ -466,7 +488,9 @@ fn run_generated_deck_with_base(
             }
 
             let expected_waveform_path = run_dir.join("external_output.csv");
-            match build_external_simulator_command(command, &deck_path, &expected_waveform_path).output() {
+            match build_external_simulator_command(command, &deck_path, &expected_waveform_path)
+                .output()
+            {
                 Ok(output) => {
                     let status = output.status.code();
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -493,15 +517,14 @@ fn run_generated_deck_with_base(
                     } else {
                         SimulationBackend::ExternalFailed
                     };
-                    let external_runtime_warnings = parse_external_simulator_stderr_warnings(&stderr);
+                    let external_runtime_warnings =
+                        parse_external_simulator_stderr_warnings(&stderr);
                     let mut external_notes = external_translation_notes;
                     external_notes.extend(external_runtime_warnings);
                     external_notes.sort();
                     external_notes.dedup();
-                    let external_result = combine_external_result_with_notes(
-                        reported_result,
-                        &external_notes,
-                    );
+                    let external_result =
+                        combine_external_result_with_notes(reported_result, &external_notes);
                     return SimulationReport {
                         backend,
                         simulated_events: reported_events.unwrap_or(simulated_events),
@@ -543,6 +566,79 @@ fn run_generated_deck_with_base(
     event_only_report()
 }
 
+fn simulation_quality_gate(
+    report: &SimulationReport,
+    require_external_alignment: bool,
+) -> SimulationQualityGateReport {
+    let external_alignment_available =
+        matches!(report.backend, SimulationBackend::ExternalCompleted);
+    let violation_count = report.reported_violations + report.violation_details.len();
+    let warning_count = report.measurement_warnings.len();
+    let backend_failed = matches!(
+        report.backend,
+        SimulationBackend::ExternalFailed
+            | SimulationBackend::ExternalUnavailable
+            | SimulationBackend::InternalTransientUnavailable
+    );
+    let clean_measurements = violation_count == 0 && warning_count == 0;
+    let passed = if require_external_alignment {
+        external_alignment_available && clean_measurements
+    } else {
+        !backend_failed && clean_measurements
+    };
+    let alignment_level = if external_alignment_available {
+        "josim_aligned"
+    } else if matches!(
+        report.backend,
+        SimulationBackend::InternalTransientCompleted
+    ) {
+        "internal_transient"
+    } else if matches!(report.backend, SimulationBackend::EventOnly) {
+        "event_only"
+    } else {
+        "unavailable"
+    };
+    let status = if passed {
+        "passed"
+    } else if require_external_alignment && !external_alignment_available {
+        "failed_external_alignment_missing"
+    } else if backend_failed {
+        "failed_backend"
+    } else if violation_count > 0 {
+        "failed_violations"
+    } else {
+        "failed_measurement_warnings"
+    };
+    let next_step = if passed {
+        "Simulation quality gate passed."
+    } else if require_external_alignment && !external_alignment_available {
+        "Run with simulation_mode=external_josim and a working JoSIM command, then compare the reported measurements."
+    } else if backend_failed {
+        "Inspect simulation backend status and external_result, then rerun with a supported deck and simulator mode."
+    } else if violation_count > 0 {
+        "Inspect violation_details and fix the generated deck, routing, or timing constraints before signoff."
+    } else {
+        "Inspect measurement_warnings and add or correct required waveform measurements before signoff."
+    };
+
+    SimulationQualityGateReport {
+        passed,
+        status: status.to_string(),
+        required_backend: if require_external_alignment {
+            "external_josim".to_string()
+        } else {
+            "any_completed".to_string()
+        },
+        actual_backend: report.backend.clone(),
+        alignment_level: alignment_level.to_string(),
+        external_alignment_required: require_external_alignment,
+        external_alignment_available,
+        violation_count,
+        warning_count,
+        next_step: next_step.to_string(),
+    }
+}
+
 fn is_allowed_external_command(command: &str) -> bool {
     let candidate = command.trim();
     if candidate.is_empty() {
@@ -577,10 +673,9 @@ fn prepare_external_simulator_deck(deck: &str, include_base_dir: Option<&Path>) 
         if strip_control_card_prefix(trimmed, ".title").is_some() {
             continue;
         }
-        for josephson_line in rewrite_external_josephson_cards(
-            &strip_params_marker(raw_line),
-            &junction_models,
-        ) {
+        for josephson_line in
+            rewrite_external_josephson_cards(&strip_params_marker(raw_line), &junction_models)
+        {
             let rewritten = strip_external_tran_uic(&rewrite_external_mutual_coupling_arguments(
                 &josephson_line,
             ));
@@ -599,7 +694,11 @@ fn collect_external_translation_notes(deck: &str) -> Vec<String> {
     let junction_models = collect_external_josephson_model_cards(&flattened);
     let mut notes = Vec::<String>::new();
     for raw_line in flattened.lines() {
-        collect_external_josephson_translation_notes_from_line(raw_line, &junction_models, &mut notes);
+        collect_external_josephson_translation_notes_from_line(
+            raw_line,
+            &junction_models,
+            &mut notes,
+        );
     }
     notes.sort();
     notes.dedup();
@@ -739,9 +838,7 @@ fn scale_external_harmonic_from_cpr(coefficient: &str, basis: &str) -> Option<St
     Some(format!("({trimmed})*({basis})"))
 }
 
-fn parse_external_josephson_model_card(
-    line: &str,
-) -> Option<(String, ExternalJunctionModelCard)> {
+fn parse_external_josephson_model_card(line: &str) -> Option<(String, ExternalJunctionModelCard)> {
     let tokens = line.split_whitespace().collect::<Vec<_>>();
     if tokens.len() < 3 || !tokens[0].eq_ignore_ascii_case(".model") {
         return None;
@@ -760,9 +857,8 @@ fn parse_external_josephson_model_card(
     };
 
     let raw_tokens = split_junction_model_argument_tokens(&argument_text);
-    let collapsed = collapse_spaced_assignments(
-        &raw_tokens.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let collapsed =
+        collapse_spaced_assignments(&raw_tokens.iter().map(String::as_str).collect::<Vec<_>>());
     let mut card = ExternalJunctionModelCard {
         critical_current: None,
         second_harmonic_current: None,
@@ -841,24 +937,24 @@ fn parse_external_josephson_model_card(
             card.critical_current = None;
         }
         if card.second_harmonic_current.is_none() {
-            card.second_harmonic_current = coefficients
-                .get(1)
-                .and_then(|coefficient| scale_external_harmonic_from_cpr(coefficient, &basis_current));
+            card.second_harmonic_current = coefficients.get(1).and_then(|coefficient| {
+                scale_external_harmonic_from_cpr(coefficient, &basis_current)
+            });
         }
         if card.third_harmonic_current.is_none() {
-            card.third_harmonic_current = coefficients
-                .get(2)
-                .and_then(|coefficient| scale_external_harmonic_from_cpr(coefficient, &basis_current));
+            card.third_harmonic_current = coefficients.get(2).and_then(|coefficient| {
+                scale_external_harmonic_from_cpr(coefficient, &basis_current)
+            });
         }
         if card.fourth_harmonic_current.is_none() {
-            card.fourth_harmonic_current = coefficients
-                .get(3)
-                .and_then(|coefficient| scale_external_harmonic_from_cpr(coefficient, &basis_current));
+            card.fourth_harmonic_current = coefficients.get(3).and_then(|coefficient| {
+                scale_external_harmonic_from_cpr(coefficient, &basis_current)
+            });
         }
         if card.fifth_harmonic_current.is_none() {
-            card.fifth_harmonic_current = coefficients
-                .get(4)
-                .and_then(|coefficient| scale_external_harmonic_from_cpr(coefficient, &basis_current));
+            card.fifth_harmonic_current = coefficients.get(4).and_then(|coefficient| {
+                scale_external_harmonic_from_cpr(coefficient, &basis_current)
+            });
         }
     }
     Some((model_name, card))
@@ -1048,18 +1144,23 @@ fn collect_external_josephson_translation_notes_from_line(
         if tokens.len() < 3 {
             return;
         }
-        if !tokens[2].eq_ignore_ascii_case("jj") && !tokens[2].to_ascii_lowercase().starts_with("jj(") {
+        if !tokens[2].eq_ignore_ascii_case("jj")
+            && !tokens[2].to_ascii_lowercase().starts_with("jj(")
+        {
             return;
         }
         let normalized = trimmed.replace(',', " ");
-        for token in collapse_spaced_assignments(&normalized.split_whitespace().collect::<Vec<_>>()) {
+        for token in collapse_spaced_assignments(&normalized.split_whitespace().collect::<Vec<_>>())
+        {
             let Some((name, _)) = token.split_once('=') else {
                 continue;
             };
             if name.eq_ignore_ascii_case("pi") {
                 let value = token.split_once('=').map(|(_, value)| value).unwrap_or("");
                 if parse_external_junction_pi_flag(value).is_none() {
-                    notes.push("external_josim_translation_warning:jj_pi_model_unsupported".to_string());
+                    notes.push(
+                        "external_josim_translation_warning:jj_pi_model_unsupported".to_string(),
+                    );
                 }
             }
         }
@@ -1091,13 +1192,20 @@ fn collect_external_josephson_translation_notes_from_line(
             continue;
         };
         if name.eq_ignore_ascii_case("model") || name.eq_ignore_ascii_case("modelname") {
-            referenced_model = Some(token.split_once('=').map(|(_, value)| value.to_ascii_lowercase()).unwrap_or_default());
+            referenced_model = Some(
+                token
+                    .split_once('=')
+                    .map(|(_, value)| value.to_ascii_lowercase())
+                    .unwrap_or_default(),
+            );
             continue;
         }
         if name.eq_ignore_ascii_case("pi") {
             let value = token.split_once('=').map(|(_, value)| value).unwrap_or("");
             if parse_external_junction_pi_flag(value).is_none() {
-                notes.push("external_josim_translation_warning:jj_pi_instance_unsupported".to_string());
+                notes.push(
+                    "external_josim_translation_warning:jj_pi_instance_unsupported".to_string(),
+                );
             }
             continue;
         }
@@ -1122,8 +1230,12 @@ fn collect_external_josephson_translation_notes_from_line(
     }
     if referenced_model.is_some() && saw_override {
         let rewritten = rewrite_external_josephson_inline_parameters(trimmed, junction_models);
-        if rewritten.len() == 1 && rewritten[0] == rewrite_external_josephson_element_prefix(trimmed) {
-            notes.push("external_josim_translation_warning:jj_model_override_unsupported".to_string());
+        if rewritten.len() == 1
+            && rewritten[0] == rewrite_external_josephson_element_prefix(trimmed)
+        {
+            notes.push(
+                "external_josim_translation_warning:jj_model_override_unsupported".to_string(),
+            );
         }
     }
 }
@@ -1315,7 +1427,10 @@ fn rewrite_external_josephson_inline_parameters(
         {
             let mut instance_name = (*first).to_string();
             instance_name.replace_range(..1, "B");
-            return vec![format!("{instance_name} {} {} {model_name}", tokens[1], tokens[2])];
+            return vec![format!(
+                "{instance_name} {} {} {model_name}",
+                tokens[1], tokens[2]
+            )];
         }
         let normalized_model_name = model_name.to_ascii_lowercase();
         if let Some(model_defaults) = junction_models.get(&normalized_model_name) {
@@ -1336,7 +1451,10 @@ fn rewrite_external_josephson_inline_parameters(
                 instance_name.replace_range(..1, "B");
                 return vec![
                     merged_model_line,
-                    format!("{instance_name} {} {} {merged_model_name}", tokens[1], tokens[2]),
+                    format!(
+                        "{instance_name} {} {} {merged_model_name}",
+                        tokens[1], tokens[2]
+                    ),
                 ];
             }
         }
@@ -1631,10 +1749,16 @@ fn inline_external_waveform_file_source(line: &str, include_base_dir: Option<&Pa
         return line.to_string();
     };
     let inline_pwl = format_inline_pwl_points(&points);
-    format!("{} {} {} PWL({})", tokens[0], tokens[1], tokens[2], inline_pwl)
+    format!(
+        "{} {} {} PWL({})",
+        tokens[0], tokens[1], tokens[2], inline_pwl
+    )
 }
 
-fn resolve_external_waveform_source_path(include_base_dir: Option<&Path>, raw_path: &str) -> String {
+fn resolve_external_waveform_source_path(
+    include_base_dir: Option<&Path>,
+    raw_path: &str,
+) -> String {
     let candidate = Path::new(raw_path);
     if candidate.is_absolute() {
         return raw_path.to_string();
@@ -1724,7 +1848,10 @@ fn parse_include_path(value: &str) -> Result<String, SimulationError> {
     if raw.is_empty() {
         return Err(SimulationError::IncludeWithoutBase(String::new()));
     }
-    if let Some(inner) = raw.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')) {
+    if let Some(inner) = raw
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+    {
         return Ok(inner.trim().to_string());
     }
     Ok(raw.to_string())
@@ -1855,7 +1982,11 @@ fn flatten_subckts(deck: &str) -> Result<String, SimulationError> {
                     line: line.to_string(),
                 });
             }
-            current_def.as_mut().unwrap().body.push(raw_line.to_string());
+            current_def
+                .as_mut()
+                .unwrap()
+                .body
+                .push(raw_line.to_string());
             continue;
         }
 
@@ -1944,7 +2075,11 @@ fn expand_subckt_lines(
                     &instance.param_map,
                 ));
             }
-            expanded.push_str(&expand_subckt_lines(&body_lines, defs, Some(&nested_prefix))?);
+            expanded.push_str(&expand_subckt_lines(
+                &body_lines,
+                defs,
+                Some(&nested_prefix),
+            )?);
             continue;
         }
 
@@ -2001,7 +2136,9 @@ fn parse_subckt_instance(
         if subckt_index < 2 {
             return Err(SimulationError::InvalidSubcktInstance(line.to_string()));
         }
-        return Err(SimulationError::UnknownSubckt(tokens[subckt_index].to_string()));
+        return Err(SimulationError::UnknownSubckt(
+            tokens[subckt_index].to_string(),
+        ));
     };
     if subckt_index < 2 {
         return Err(SimulationError::InvalidSubcktInstance(line.to_string()));
@@ -2266,15 +2403,27 @@ struct InternalJunctionModelCard {
 
 #[derive(Debug, Clone, PartialEq)]
 enum InternalElement {
-    Resistor { pos: Option<usize>, neg: Option<usize>, resistance_ohm: f64 },
-    Capacitor { pos: Option<usize>, neg: Option<usize>, capacitance_f: f64 },
+    Resistor {
+        pos: Option<usize>,
+        neg: Option<usize>,
+        resistance_ohm: f64,
+    },
+    Capacitor {
+        pos: Option<usize>,
+        neg: Option<usize>,
+        capacitance_f: f64,
+    },
     Inductor {
         pos: Option<usize>,
         neg: Option<usize>,
         inductance_h: f64,
         branch_index: usize,
     },
-    CurrentSource { pos: Option<usize>, neg: Option<usize>, source: InternalSourceSpec },
+    CurrentSource {
+        pos: Option<usize>,
+        neg: Option<usize>,
+        source: InternalSourceSpec,
+    },
     VoltageSource {
         pos: Option<usize>,
         neg: Option<usize>,
@@ -2345,8 +2494,10 @@ fn run_internal_transient_with_base(
     include_base_dir: Option<&Path>,
 ) -> Result<InternalTransientResult, String> {
     let flattened = flatten_subckts(deck).map_err(|err| err.to_string())?;
-    let parsed = parse_deck_expanded(&flattened, include_base_dir).map_err(|err| err.to_string())?;
-    let netlist = parse_internal_transient_netlist_with_base(&flattened, &parsed, include_base_dir)?;
+    let parsed =
+        parse_deck_expanded(&flattened, include_base_dir).map_err(|err| err.to_string())?;
+    let netlist =
+        parse_internal_transient_netlist_with_base(&flattened, &parsed, include_base_dir)?;
 
     if netlist.node_names.is_empty() {
         return Ok(InternalTransientResult {
@@ -2366,8 +2517,9 @@ fn run_internal_transient_with_base(
 
     let node_count = netlist.node_names.len();
     let time_step_s = (netlist.transient.tstep_ps * 1.0e-12).max(f64::EPSILON);
-    let total_steps = ((netlist.transient.tstop_ps.max(0.0) / netlist.transient.tstep_ps.max(f64::EPSILON))
-        .floor() as usize)
+    let total_steps = ((netlist.transient.tstop_ps.max(0.0)
+        / netlist.transient.tstep_ps.max(f64::EPSILON))
+    .floor() as usize)
         .max(1);
     let capture_start_ps = netlist.transient.prstart_ps.unwrap_or(0.0);
     let capture_step_ps = netlist
@@ -2397,11 +2549,8 @@ fn run_internal_transient_with_base(
     for step in 1..=total_steps {
         let current_time_ps = (step as f64) * netlist.transient.tstep_ps;
         let step_start_time_s = ((step - 1) as f64) * time_step_s;
-        let segment_boundaries = collect_netlist_breakpoints_within_step(
-            &netlist,
-            step_start_time_s,
-            time_step_s,
-        );
+        let segment_boundaries =
+            collect_netlist_breakpoints_within_step(&netlist, step_start_time_s, time_step_s);
         for boundary_window in segment_boundaries.windows(2) {
             let segment_start_s = boundary_window[0];
             let segment_end_s = boundary_window[1];
@@ -2425,7 +2574,9 @@ fn run_internal_transient_with_base(
             let capture_index = ((current_time_ps - capture_start_ps) / capture_step_ps).round();
             if capture_index >= 0.0 {
                 let expected_time_ps = capture_start_ps + capture_index * capture_step_ps;
-                if (current_time_ps - expected_time_ps).abs() <= netlist.transient.tstep_ps * 0.5 + 1.0e-9 {
+                if (current_time_ps - expected_time_ps).abs()
+                    <= netlist.transient.tstep_ps * 0.5 + 1.0e-9
+                {
                     captured_steps += 1;
                     captured_samples.push(InternalTransientSample {
                         time_ps: current_time_ps,
@@ -2524,7 +2675,9 @@ fn parse_internal_transient_netlist_with_base(
             continue;
         }
         if let Some(rest) = strip_control_card_prefix(line, ".model") {
-            if let Some((name, model_card)) = parse_internal_junction_model_card(rest, &parsed.params)? {
+            if let Some((name, model_card)) =
+                parse_internal_junction_model_card(rest, &parsed.params)?
+            {
                 junction_models.insert(name, model_card);
             }
             continue;
@@ -2564,7 +2717,7 @@ fn parse_internal_transient_netlist_with_base(
                     &["r", "res", "resistance"],
                     "resistor",
                 )?
-                    .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
                 if resistance_ohm <= 0.0 {
                     return Err(format!("internal_transient_invalid_resistance:{line}"));
                 }
@@ -2581,7 +2734,7 @@ fn parse_internal_transient_netlist_with_base(
                     &["c", "cap", "capacitance"],
                     "capacitor",
                 )?
-                    .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
                 if capacitance_f < 0.0 {
                     return Err(format!("internal_transient_invalid_capacitance:{line}"));
                 }
@@ -2599,7 +2752,7 @@ fn parse_internal_transient_netlist_with_base(
                     &["l", "ind", "inductance"],
                     "inductor",
                 )?
-                    .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
                 if inductance_h <= 0.0 {
                     return Err(format!("internal_transient_invalid_inductance:{line}"));
                 }
@@ -2614,7 +2767,9 @@ fn parse_internal_transient_netlist_with_base(
             }
             'K' => {
                 if tokens.len() < 4 {
-                    return Err(format!("internal_transient_unsupported_mutual_syntax:{line}"));
+                    return Err(format!(
+                        "internal_transient_unsupported_mutual_syntax:{line}"
+                    ));
                 }
                 deferred_mutual_couplings.push((
                     tokens[1].to_ascii_lowercase(),
@@ -2654,8 +2809,11 @@ fn parse_internal_transient_netlist_with_base(
                     fifth_harmonic_current_a,
                     normal_resistance_ohm,
                     junction_cap_f,
-                ) =
-                    parse_internal_junction_parameters(&tokens[3..], &parsed.params, junction_model)?;
+                ) = parse_internal_junction_parameters(
+                    &tokens[3..],
+                    &parsed.params,
+                    junction_model,
+                )?;
                 elements.push(InternalElement::JosephsonJunction {
                     pos: intern_node(tokens[1], &mut node_indices, &mut node_names),
                     neg: intern_node(tokens[2], &mut node_indices, &mut node_names),
@@ -2705,16 +2863,26 @@ fn parse_internal_transient_netlist_with_base(
         let coupling = evaluate_expression(&coupling_expr, &parsed.params)
             .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         if !coupling.is_finite() || coupling.abs() > 1.0 {
-            return Err(format!("internal_transient_invalid_mutual_coupling:{coupling_expr}"));
+            return Err(format!(
+                "internal_transient_invalid_mutual_coupling:{coupling_expr}"
+            ));
         }
-        let Some((branch_a, inductance_a_h)) = inductor_branches.get(&inductor_a_name).copied() else {
-            return Err(format!("internal_transient_unknown_mutual_inductor:{inductor_a_name}"));
+        let Some((branch_a, inductance_a_h)) = inductor_branches.get(&inductor_a_name).copied()
+        else {
+            return Err(format!(
+                "internal_transient_unknown_mutual_inductor:{inductor_a_name}"
+            ));
         };
-        let Some((branch_b, inductance_b_h)) = inductor_branches.get(&inductor_b_name).copied() else {
-            return Err(format!("internal_transient_unknown_mutual_inductor:{inductor_b_name}"));
+        let Some((branch_b, inductance_b_h)) = inductor_branches.get(&inductor_b_name).copied()
+        else {
+            return Err(format!(
+                "internal_transient_unknown_mutual_inductor:{inductor_b_name}"
+            ));
         };
         if branch_a == branch_b {
-            return Err(format!("internal_transient_invalid_mutual_inductor_pair:{inductor_a_name}"));
+            return Err(format!(
+                "internal_transient_invalid_mutual_inductor_pair:{inductor_a_name}"
+            ));
         }
         let mutual_h = coupling * (inductance_a_h * inductance_b_h).sqrt();
         mutual_couplings.push(InternalMutualCoupling {
@@ -2784,7 +2952,10 @@ fn parse_internal_transient_netlist_with_base(
     })
 }
 
-fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<InternalOptionCard, String> {
+fn parse_internal_option_card(
+    line: &str,
+    parsed: &ParsedDeck,
+) -> Result<InternalOptionCard, String> {
     if line.is_empty() {
         return Ok(InternalOptionCard {
             seed: None,
@@ -2935,9 +3106,7 @@ fn parse_internal_option_card(line: &str, parsed: &ParsedDeck) -> Result<Interna
             continue;
         }
 
-        if name.eq_ignore_ascii_case("temp_k")
-            || name.eq_ignore_ascii_case("temperature_k")
-        {
+        if name.eq_ignore_ascii_case("temp_k") || name.eq_ignore_ascii_case("temperature_k") {
             let value_k = evaluate_expression(value_expr.trim(), &parsed.params)
                 .map_err(|_| "internal_transient_invalid_option_temp".to_string())?;
             if !value_k.is_finite() || value_k <= 0.0 {
@@ -3019,21 +3188,29 @@ fn parse_node_voltage_assignments(
     let assignments = collapse_spaced_assignments(&raw_tokens);
     for assignment in assignments {
         let Some((target, value_expr)) = assignment.split_once('=') else {
-            return Err(format!("internal_transient_invalid_{card_name}:{}", assignment));
+            return Err(format!(
+                "internal_transient_invalid_{card_name}:{}",
+                assignment
+            ));
         };
         let Some(node_name) = target
             .strip_prefix("v(")
             .or_else(|| target.strip_prefix("V("))
             .and_then(|inner| inner.strip_suffix(')'))
         else {
-            return Err(format!("internal_transient_invalid_{card_name}:{}", assignment));
+            return Err(format!(
+                "internal_transient_invalid_{card_name}:{}",
+                assignment
+            ));
         };
         if is_ground_node(node_name) {
             continue;
         }
         let key = node_name.trim().to_ascii_lowercase();
         let Some(index) = node_indices.get(&key) else {
-            return Err(format!("internal_transient_unknown_{card_name}_node:{node_name}"));
+            return Err(format!(
+                "internal_transient_unknown_{card_name}_node:{node_name}"
+            ));
         };
         let value = evaluate_expression(value_expr.trim(), &parsed.params)
             .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -3286,7 +3463,8 @@ fn parse_transmission_line_parameters(
         return Err("internal_transient_unsupported_transmission_syntax".to_string());
     }
 
-    let z0_expr = z0_expr.ok_or_else(|| "internal_transient_invalid_transmission_impedance".to_string())?;
+    let z0_expr =
+        z0_expr.ok_or_else(|| "internal_transient_invalid_transmission_impedance".to_string())?;
     let impedance_ohm = evaluate_expression(&z0_expr, params)
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
     if !impedance_ohm.is_finite() || impedance_ohm <= 0.0 {
@@ -3420,7 +3598,7 @@ fn parse_internal_junction_parameters(
                     || third_harmonic_current_expr.is_some()
                     || fourth_harmonic_current_expr.is_some()
                     || fifth_harmonic_current_expr.is_some())
-                    .then_some(0.0)
+                .then_some(0.0)
             })
             .ok_or_else(|| "internal_transient_invalid_junction_icrit".to_string())?
     };
@@ -3623,9 +3801,8 @@ fn parse_internal_junction_model_card(
     }
 
     let raw_tokens = split_junction_model_argument_tokens(&argument_text);
-    let collapsed = normalized_name_value_tokens(
-        &raw_tokens.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let collapsed =
+        normalized_name_value_tokens(&raw_tokens.iter().map(String::as_str).collect::<Vec<_>>());
 
     let mut critical_current_basis_a = None::<f64>;
     let mut second_harmonic_current_a = None::<f64>;
@@ -3711,7 +3888,9 @@ fn parse_internal_junction_model_card(
         }
     }
 
-    let critical_current_a = if let (Some(basis_current_a), Some(coefficients)) = (critical_current_basis_a, cpr_coefficients) {
+    let critical_current_a = if let (Some(basis_current_a), Some(coefficients)) =
+        (critical_current_basis_a, cpr_coefficients)
+    {
         let first_coefficient = coefficients.first().map(String::as_str).unwrap_or("1");
         let first_value = evaluate_expression(first_coefficient, params)
             .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -3853,7 +4032,10 @@ fn normalized_name_value_tokens(tokens: &[&str]) -> Vec<String> {
 fn normalized_junction_assignment_tokens(tokens: &[&str]) -> Vec<String> {
     let joined = tokens.join(" ");
     let raw_token_strings = split_junction_model_argument_tokens(&joined);
-    let raw_tokens = raw_token_strings.iter().map(String::as_str).collect::<Vec<_>>();
+    let raw_tokens = raw_token_strings
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let collapsed = collapse_spaced_assignments(&raw_tokens);
     let mut normalized_tokens = Vec::with_capacity(collapsed.len());
     let mut index = 0usize;
@@ -3888,13 +4070,13 @@ fn is_junction_assignment_name(token: &str) -> bool {
         || token.eq_ignore_ascii_case("icrit2")
         || token.eq_ignore_ascii_case("ic2")
         || token.eq_ignore_ascii_case("cp2")
-    || token.eq_ignore_ascii_case("icrit3")
-    || token.eq_ignore_ascii_case("ic3")
-    || token.eq_ignore_ascii_case("cp3")
-    || token.eq_ignore_ascii_case("icrit4")
-    || token.eq_ignore_ascii_case("ic4")
-    || token.eq_ignore_ascii_case("cp4")
-    || token.eq_ignore_ascii_case("cpr")
+        || token.eq_ignore_ascii_case("icrit3")
+        || token.eq_ignore_ascii_case("ic3")
+        || token.eq_ignore_ascii_case("cp3")
+        || token.eq_ignore_ascii_case("icrit4")
+        || token.eq_ignore_ascii_case("ic4")
+        || token.eq_ignore_ascii_case("cp4")
+        || token.eq_ignore_ascii_case("cpr")
         || token.eq_ignore_ascii_case("rn")
         || token.eq_ignore_ascii_case("cj")
         || token.eq_ignore_ascii_case("cap")
@@ -3955,7 +4137,10 @@ fn parse_internal_source_spec(
             return Ok(InternalSourceSpec::Pwl(points));
         }
         if values.len() < 4 || values.len() % 2 != 0 {
-            return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+            return Err(format!(
+                "internal_transient_unsupported_{kind}_source:{}",
+                tokens.join(" ")
+            ));
         }
         let mut points = Vec::with_capacity(values.len() / 2);
         for (index, pair) in values.chunks(2).enumerate() {
@@ -3972,7 +4157,10 @@ fn parse_internal_source_spec(
                 .then(left.1.cmp(&right.1))
         });
         return Ok(InternalSourceSpec::Pwl(
-            points.into_iter().map(|(time_s, _, value)| (time_s, value)).collect(),
+            points
+                .into_iter()
+                .map(|(time_s, _, value)| (time_s, value))
+                .collect(),
         ));
     }
     if let Some(args) = parse_source_call_arguments(&descriptor, "exp") {
@@ -4014,7 +4202,10 @@ fn parse_internal_source_spec(
         return Ok(InternalSourceSpec::Dc(value));
     }
 
-    Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))
+    Err(format!(
+        "internal_transient_unsupported_{kind}_source:{}",
+        tokens.join(" ")
+    ))
 }
 
 fn split_source_arguments(args: &str) -> Vec<&str> {
@@ -4053,7 +4244,9 @@ fn resolve_waveform_source_path(include_base_dir: Option<&Path>, raw_path: &str)
         if candidate.starts_with(base_dir) {
             return raw_path.to_string();
         }
-        return resolve_include_path(base_dir, raw_path).display().to_string();
+        return resolve_include_path(base_dir, raw_path)
+            .display()
+            .to_string();
     }
     raw_path.to_string()
 }
@@ -4173,7 +4366,10 @@ fn parse_pulse_source_arguments(
         let mut cycle_count = None::<usize>;
         for value in collapsed {
             let Some((name, expr)) = value.split_once('=') else {
-                return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                ));
             };
             if name.eq_ignore_ascii_case("v1") || name.eq_ignore_ascii_case("low") {
                 low_expr = Some(expr.to_string());
@@ -4207,36 +4403,69 @@ fn parse_pulse_source_arguments(
                 cycle_count = Some(parse_pulse_cycle_count(&value, params)?);
                 continue;
             }
-            return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+            return Err(format!(
+                "internal_transient_unsupported_{kind}_source:{}",
+                tokens.join(" ")
+            ));
         }
 
         let low = evaluate_expression(
-            &low_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &low_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let high = evaluate_expression(
-            &high_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &high_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let delay_s = evaluate_expression(
-            &delay_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &delay_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let rise_s = evaluate_expression(
-            &rise_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &rise_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let fall_s = evaluate_expression(
-            &fall_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &fall_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let width_s = evaluate_expression(
-            &width_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &width_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -4250,11 +4479,23 @@ fn parse_pulse_source_arguments(
         } else {
             None
         };
-        return Ok((low, high, delay_s, rise_s, fall_s, width_s, period_s, cycle_count));
+        return Ok((
+            low,
+            high,
+            delay_s,
+            rise_s,
+            fall_s,
+            width_s,
+            period_s,
+            cycle_count,
+        ));
     }
 
     if collapsed.len() < 6 {
-        return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+        return Err(format!(
+            "internal_transient_unsupported_{kind}_source:{}",
+            tokens.join(" ")
+        ));
     }
     let low = evaluate_expression(collapsed[0].as_str(), params)
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -4283,7 +4524,16 @@ fn parse_pulse_source_arguments(
     } else {
         None
     };
-    Ok((low, high, delay_s, rise_s, fall_s, width_s, period_s, cycle_count))
+    Ok((
+        low,
+        high,
+        delay_s,
+        rise_s,
+        fall_s,
+        width_s,
+        period_s,
+        cycle_count,
+    ))
 }
 
 fn parse_exp_source_arguments(
@@ -4302,7 +4552,10 @@ fn parse_exp_source_arguments(
         let mut fall_tau_expr = None::<String>;
         for value in collapsed {
             let Some((name, expr)) = value.split_once('=') else {
-                return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                ));
             };
             if name.eq_ignore_ascii_case("v1")
                 || name.eq_ignore_ascii_case("initial")
@@ -4346,44 +4599,87 @@ fn parse_exp_source_arguments(
                 fall_tau_expr = Some(expr.to_string());
                 continue;
             }
-            return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+            return Err(format!(
+                "internal_transient_unsupported_{kind}_source:{}",
+                tokens.join(" ")
+            ));
         }
 
         let initial = evaluate_expression(
-            &initial_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &initial_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let pulsed = evaluate_expression(
-            &pulsed_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &pulsed_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let rise_delay_s = evaluate_expression(
-            &rise_delay_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &rise_delay_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let rise_tau_s = evaluate_expression(
-            &rise_tau_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &rise_tau_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let fall_delay_s = evaluate_expression(
-            &fall_delay_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &fall_delay_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let fall_tau_s = evaluate_expression(
-            &fall_tau_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &fall_tau_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
-        return Ok((initial, pulsed, rise_delay_s, rise_tau_s, fall_delay_s, fall_tau_s));
+        return Ok((
+            initial,
+            pulsed,
+            rise_delay_s,
+            rise_tau_s,
+            fall_delay_s,
+            fall_tau_s,
+        ));
     }
 
     if collapsed.len() != 6 {
-        return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+        return Err(format!(
+            "internal_transient_unsupported_{kind}_source:{}",
+            tokens.join(" ")
+        ));
     }
     let initial = evaluate_expression(collapsed[0].as_str(), params)
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -4397,7 +4693,14 @@ fn parse_exp_source_arguments(
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
     let fall_tau_s = evaluate_expression(collapsed[5].as_str(), params)
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
-    Ok((initial, pulsed, rise_delay_s, rise_tau_s, fall_delay_s, fall_tau_s))
+    Ok((
+        initial,
+        pulsed,
+        rise_delay_s,
+        rise_tau_s,
+        fall_delay_s,
+        fall_tau_s,
+    ))
 }
 
 fn parse_sin_source_arguments(
@@ -4416,7 +4719,10 @@ fn parse_sin_source_arguments(
         let mut phase_expr = None::<String>;
         for value in collapsed {
             let Some((name, expr)) = value.split_once('=') else {
-                return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+                return Err(format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                ));
             };
             if name.eq_ignore_ascii_case("vo") || name.eq_ignore_ascii_case("offset") {
                 offset_expr = Some(expr.to_string());
@@ -4437,7 +4743,10 @@ fn parse_sin_source_arguments(
                 delay_expr = Some(expr.to_string());
                 continue;
             }
-            if name.eq_ignore_ascii_case("theta") || name.eq_ignore_ascii_case("damp") || name.eq_ignore_ascii_case("damping") {
+            if name.eq_ignore_ascii_case("theta")
+                || name.eq_ignore_ascii_case("damp")
+                || name.eq_ignore_ascii_case("damping")
+            {
                 damping_expr = Some(expr.to_string());
                 continue;
             }
@@ -4448,21 +4757,39 @@ fn parse_sin_source_arguments(
                 phase_expr = Some(expr.to_string());
                 continue;
             }
-            return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+            return Err(format!(
+                "internal_transient_unsupported_{kind}_source:{}",
+                tokens.join(" ")
+            ));
         }
 
         let offset = evaluate_expression(
-            &offset_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &offset_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let amplitude = evaluate_expression(
-            &amplitude_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &amplitude_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
         let frequency_hz = evaluate_expression(
-            &frequency_expr.ok_or_else(|| format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")))? ,
+            &frequency_expr.ok_or_else(|| {
+                format!(
+                    "internal_transient_unsupported_{kind}_source:{}",
+                    tokens.join(" ")
+                )
+            })?,
             params,
         )
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -4485,11 +4812,21 @@ fn parse_sin_source_arguments(
         } else {
             0.0
         };
-        return Ok((offset, amplitude, frequency_hz, delay_s, damping_hz, phase_rad));
+        return Ok((
+            offset,
+            amplitude,
+            frequency_hz,
+            delay_s,
+            damping_hz,
+            phase_rad,
+        ));
     }
 
     if !(3..=6).contains(&collapsed.len()) {
-        return Err(format!("internal_transient_unsupported_{kind}_source:{}", tokens.join(" ")));
+        return Err(format!(
+            "internal_transient_unsupported_{kind}_source:{}",
+            tokens.join(" ")
+        ));
     }
     let offset = evaluate_expression(collapsed[0].as_str(), params)
         .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
@@ -4520,13 +4857,17 @@ fn parse_sin_source_arguments(
     } else {
         0.0
     };
-    Ok((offset, amplitude, frequency_hz, delay_s, damping_hz, phase_rad))
+    Ok((
+        offset,
+        amplitude,
+        frequency_hz,
+        delay_s,
+        damping_hz,
+        phase_rad,
+    ))
 }
 
-fn parse_pulse_cycle_count(
-    token: &str,
-    params: &BTreeMap<String, f64>,
-) -> Result<usize, String> {
+fn parse_pulse_cycle_count(token: &str, params: &BTreeMap<String, f64>) -> Result<usize, String> {
     let value_token = if let Some((name, value)) = token.split_once('=') {
         if !name.trim().eq_ignore_ascii_case("ncycles")
             && !name.trim().eq_ignore_ascii_case("cycles")
@@ -4565,8 +4906,7 @@ fn parse_internal_measurement_card(
     let name = tokens[index].to_string();
     let kind_token = tokens[index + 1].to_ascii_lowercase();
     if kind_token == "trig" {
-        return parse_internal_delay_measurement_card(name, &tokens[index + 1..], params)
-            .map(Some);
+        return parse_internal_delay_measurement_card(name, &tokens[index + 1..], params).map(Some);
     }
     let kind = match kind_token.as_str() {
         "max" => InternalMeasurementKind::Max,
@@ -4669,10 +5009,9 @@ fn parse_internal_delay_measurement_card(
     tokens: &[String],
     params: &BTreeMap<String, f64>,
 ) -> Result<InternalMeasurementCard, String> {
-    let Some(target_index) = tokens
-        .iter()
-        .position(|token| token.eq_ignore_ascii_case("targ") || token.eq_ignore_ascii_case("target"))
-    else {
+    let Some(target_index) = tokens.iter().position(|token| {
+        token.eq_ignore_ascii_case("targ") || token.eq_ignore_ascii_case("target")
+    }) else {
         return Err("internal_transient_invalid_measurement_delay".to_string());
     };
     if target_index == 0 {
@@ -4694,14 +5033,15 @@ fn parse_internal_delay_endpoint(
     if tokens.is_empty() {
         return Err("internal_transient_invalid_measurement_delay".to_string());
     }
-    let (probe_token, inline_threshold) = if let Some((probe_token, value)) = tokens[0].split_once('=') {
-        (
-            probe_token,
-            Some(evaluate_expression(value, params).map_err(|err| err.to_string())?),
-        )
-    } else {
-        (tokens[0].as_str(), None)
-    };
+    let (probe_token, inline_threshold) =
+        if let Some((probe_token, value)) = tokens[0].split_once('=') {
+            (
+                probe_token,
+                Some(evaluate_expression(value, params).map_err(|err| err.to_string())?),
+            )
+        } else {
+            (tokens[0].as_str(), None)
+        };
     let Some(probe) = parse_measurement_voltage_probe(probe_token) else {
         return Err("internal_transient_invalid_measurement_delay".to_string());
     };
@@ -4740,7 +5080,8 @@ fn parse_internal_delay_endpoint(
     }
     Ok(InternalDelayEndpoint {
         probe,
-        threshold_v: threshold_v.ok_or_else(|| "internal_transient_invalid_measurement_delay".to_string())?,
+        threshold_v: threshold_v
+            .ok_or_else(|| "internal_transient_invalid_measurement_delay".to_string())?,
         direction: direction.unwrap_or(InternalDelayCrossingDirection::Cross),
         ordinal: ordinal.unwrap_or(InternalDelayCrossingOrdinal::Index(1)),
         td_ps,
@@ -4830,7 +5171,8 @@ fn evaluate_internal_delay_measurements(
     let mut details = Vec::new();
     let mut warnings = Vec::new();
     for measurement in &netlist.delay_measurements {
-        let Some(trigger_time_ps) = find_internal_delay_crossing(samples, &measurement.trigger) else {
+        let Some(trigger_time_ps) = find_internal_delay_crossing(samples, &measurement.trigger)
+        else {
             warnings.push(internal_measurement_warning(
                 &measurement.name,
                 "delay",
@@ -4839,7 +5181,8 @@ fn evaluate_internal_delay_measurements(
             ));
             continue;
         };
-        let Some(target_time_ps) = find_internal_delay_crossing(samples, &measurement.target) else {
+        let Some(target_time_ps) = find_internal_delay_crossing(samples, &measurement.target)
+        else {
             warnings.push(internal_measurement_warning(
                 &measurement.name,
                 "delay",
@@ -4882,7 +5225,12 @@ fn find_internal_delay_crossing(
         }
         let previous_value = sample_internal_voltage_probe(previous, &endpoint.probe)?;
         let current_value = sample_internal_voltage_probe(current, &endpoint.probe)?;
-        if !delay_crossing_matches(endpoint.direction, previous_value, current_value, endpoint.threshold_v) {
+        if !delay_crossing_matches(
+            endpoint.direction,
+            previous_value,
+            current_value,
+            endpoint.threshold_v,
+        ) {
             continue;
         }
         let delta = current_value - previous_value;
@@ -4910,8 +5258,12 @@ fn delay_crossing_matches(
     threshold_v: f64,
 ) -> bool {
     match direction {
-        InternalDelayCrossingDirection::Rise => previous_value < threshold_v && current_value >= threshold_v,
-        InternalDelayCrossingDirection::Fall => previous_value > threshold_v && current_value <= threshold_v,
+        InternalDelayCrossingDirection::Rise => {
+            previous_value < threshold_v && current_value >= threshold_v
+        }
+        InternalDelayCrossingDirection::Fall => {
+            previous_value > threshold_v && current_value <= threshold_v
+        }
         InternalDelayCrossingDirection::Cross => {
             (previous_value < threshold_v && current_value >= threshold_v)
                 || (previous_value > threshold_v && current_value <= threshold_v)
@@ -5027,7 +5379,9 @@ fn evaluate_internal_measurements(
             continue;
         }
         let value = match measurement.kind {
-            InternalMeasurementKind::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            InternalMeasurementKind::Max => {
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            }
             InternalMeasurementKind::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
             InternalMeasurementKind::PeakToPeak => {
                 let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -5036,8 +5390,7 @@ fn evaluate_internal_measurements(
             }
             InternalMeasurementKind::Average => values.iter().sum::<f64>() / values.len() as f64,
             InternalMeasurementKind::Rms => {
-                (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64)
-                    .sqrt()
+                (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64).sqrt()
             }
             InternalMeasurementKind::Final => values.last().copied().unwrap_or(0.0),
             InternalMeasurementKind::Find => continue,
@@ -5129,13 +5482,13 @@ fn internal_source_value_at_time(source: &InternalSourceSpec, time_s: f64) -> f6
             if time_s < *rise_delay_s {
                 return *initial;
             }
-            let rise_component = (pulsed - initial)
-                * (1.0 - (-(time_s - rise_delay_s) / rise_tau_s).exp());
+            let rise_component =
+                (pulsed - initial) * (1.0 - (-(time_s - rise_delay_s) / rise_tau_s).exp());
             if time_s < *fall_delay_s {
                 return initial + rise_component;
             }
-            let fall_component = (initial - pulsed)
-                * (1.0 - (-(time_s - fall_delay_s) / fall_tau_s).exp());
+            let fall_component =
+                (initial - pulsed) * (1.0 - (-(time_s - fall_delay_s) / fall_tau_s).exp());
             initial + rise_component + fall_component
         }
         InternalSourceSpec::Pwl(points) => {
@@ -5298,7 +5651,8 @@ fn solve_internal_transient_step_sequence(
 ) -> Result<Vec<f64>, String> {
     let substep_count = substep_count.max(1);
     let mut state = previous_solution.to_vec();
-    let boundaries = substep_boundaries_with_breakpoints(netlist, step_start_time_s, time_step_s, substep_count);
+    let boundaries =
+        substep_boundaries_with_breakpoints(netlist, step_start_time_s, time_step_s, substep_count);
     for window in boundaries.windows(2) {
         let substep_start_s = window[0];
         let current_time_s = window[1];
@@ -5417,7 +5771,8 @@ fn collect_transmission_breakpoints_within_step(
             neg_b,
             delay_s,
             ..
-        } = element else {
+        } = element
+        else {
             continue;
         };
         if *delay_s > step_start_time_s
@@ -5473,7 +5828,8 @@ fn collect_propagated_source_breakpoints_within_step(
                 neg_b,
                 delay_s,
                 ..
-            } = element else {
+            } = element
+            else {
                 continue;
             };
 
@@ -5530,7 +5886,12 @@ fn collect_propagated_source_breakpoints_within_step(
 }
 
 fn node_pairs_share_signal_node(left: [Option<usize>; 2], right: [Option<usize>; 2]) -> bool {
-    left.iter().flatten().any(|left_node| right.iter().flatten().any(|right_node| left_node == right_node))
+    left.iter().flatten().any(|left_node| {
+        right
+            .iter()
+            .flatten()
+            .any(|right_node| left_node == right_node)
+    })
 }
 
 fn node_pairs_are_adjacent(left: [Option<usize>; 2], right: [Option<usize>; 2]) -> bool {
@@ -5600,8 +5961,7 @@ fn solution_error_norm_with_tolerances(
         .iter()
         .zip(refined.iter())
         .map(|(left, right)| {
-            let scale = absolute_tolerance
-                + relative_tolerance * left.abs().max(right.abs());
+            let scale = absolute_tolerance + relative_tolerance * left.abs().max(right.abs());
             (left - right).abs() / scale.max(f64::EPSILON)
         })
         .fold(0.0_f64, f64::max)
@@ -5688,7 +6048,9 @@ fn internal_substep_count(
         let source_substeps = (time_step_s / characteristic_s).ceil() as usize;
         suggested = suggested.max(source_substeps.clamp(1, 16));
 
-        if let Some(event_segment_s) = source_event_segment_within_step(source, step_start_time_s, time_step_s) {
+        if let Some(event_segment_s) =
+            source_event_segment_within_step(source, step_start_time_s, time_step_s)
+        {
             let event_substeps = ((time_step_s / event_segment_s).ceil() as usize).clamp(1, 16);
             suggested = suggested.max(event_substeps);
         }
@@ -5757,7 +6119,11 @@ fn collect_source_breakpoints_within_step(
                 let period_s = (*period_s).max(f64::EPSILON);
                 let start_cycle = ((step_start_time_s - local_edges[3]) / period_s).floor() as i64;
                 let end_cycle = ((step_end_time_s - local_edges[0]) / period_s).ceil() as i64;
-                let min_cycle = if cycle_count.is_some() { 0 } else { start_cycle };
+                let min_cycle = if cycle_count.is_some() {
+                    0
+                } else {
+                    start_cycle
+                };
                 let max_cycle = if let Some(cycle_count) = cycle_count {
                     (*cycle_count as i64).saturating_sub(1)
                 } else {
@@ -5878,7 +6244,9 @@ fn solve_internal_transient_step(
     Err("internal_transient_newton_not_converged:iters=0".to_string())
 }
 
-fn internal_nonlinear_solve_config(netlist: &InternalTransientNetlist) -> InternalNonlinearSolveConfig {
+fn internal_nonlinear_solve_config(
+    netlist: &InternalTransientNetlist,
+) -> InternalNonlinearSolveConfig {
     InternalNonlinearSolveConfig {
         max_iterations: netlist.option_max_iterations.unwrap_or(8),
         residual_tolerance: 1.0e-3,
@@ -5936,7 +6304,8 @@ fn assemble_internal_transient_system(
             } => {
                 let conductance = capacitance_f / time_step_s;
                 stamp_conductance(&mut matrix, pos, neg, conductance);
-                let previous_delta = node_voltage(previous_solution, pos) - node_voltage(previous_solution, neg);
+                let previous_delta =
+                    node_voltage(previous_solution, pos) - node_voltage(previous_solution, neg);
                 stamp_current_injection(&mut rhs, pos, neg, conductance * previous_delta);
             }
             InternalElement::Inductor {
@@ -5965,7 +6334,13 @@ fn assemble_internal_transient_system(
             } => {
                 let source_index = element_index as u64;
                 let current_a = internal_source_step_value_at_time(source, current_time_s)
-                    + internal_source_noise_value(netlist, current_time_s, time_step_s, source_index, false);
+                    + internal_source_noise_value(
+                        netlist,
+                        current_time_s,
+                        time_step_s,
+                        source_index,
+                        false,
+                    );
                 stamp_current_injection(&mut rhs, pos, neg, -current_a);
             }
             InternalElement::VoltageSource {
@@ -5985,7 +6360,13 @@ fn assemble_internal_transient_system(
                 }
                 let source_index = element_index as u64;
                 rhs[current_row] += internal_source_step_value_at_time(source, current_time_s)
-                    + internal_source_noise_value(netlist, current_time_s, time_step_s, source_index, true);
+                    + internal_source_noise_value(
+                        netlist,
+                        current_time_s,
+                        time_step_s,
+                        source_index,
+                        true,
+                    );
             }
             InternalElement::TransmissionLineResistive {
                 pos_a,
@@ -6010,32 +6391,42 @@ fn assemble_internal_transient_system(
                                 - node_voltage(iterate_solution, neg_b));
                         stamp_conductance(&mut matrix, pos_a, neg_a, conductance);
                         stamp_conductance(&mut matrix, pos_b, neg_b, conductance);
-                        stamp_current_injection(&mut rhs, pos_a, neg_a, conductance * delayed_port_b);
-                        stamp_current_injection(&mut rhs, pos_b, neg_b, conductance * delayed_port_a);
+                        stamp_current_injection(
+                            &mut rhs,
+                            pos_a,
+                            neg_a,
+                            conductance * delayed_port_b,
+                        );
+                        stamp_current_injection(
+                            &mut rhs,
+                            pos_b,
+                            neg_b,
+                            conductance * delayed_port_a,
+                        );
                     }
                 } else {
                     let delayed_port_a = attenuation
                         * delayed_port_voltage_delta(
-                        solution_history,
-                        pos_a,
-                        neg_a,
-                        previous_solution,
-                        iterate_solution,
-                        current_time_s,
-                        delay_s,
-                        time_step_s,
-                    );
+                            solution_history,
+                            pos_a,
+                            neg_a,
+                            previous_solution,
+                            iterate_solution,
+                            current_time_s,
+                            delay_s,
+                            time_step_s,
+                        );
                     let delayed_port_b = attenuation
                         * delayed_port_voltage_delta(
-                        solution_history,
-                        pos_b,
-                        neg_b,
-                        previous_solution,
-                        iterate_solution,
-                        current_time_s,
-                        delay_s,
-                        time_step_s,
-                    );
+                            solution_history,
+                            pos_b,
+                            neg_b,
+                            previous_solution,
+                            iterate_solution,
+                            current_time_s,
+                            delay_s,
+                            time_step_s,
+                        );
                     stamp_conductance(&mut matrix, pos_a, neg_a, conductance);
                     stamp_conductance(&mut matrix, pos_b, neg_b, conductance);
                     stamp_current_injection(&mut rhs, pos_a, neg_a, conductance * delayed_port_b);
@@ -6094,7 +6485,11 @@ fn internal_source_noise_value(
     } else {
         0
     };
-    let source_tag = if is_voltage_source { 0xA5A5_5A5A_u64 } else { 0x5A5A_A5A5_u64 };
+    let source_tag = if is_voltage_source {
+        0xA5A5_5A5A_u64
+    } else {
+        0x5A5A_A5A5_u64
+    };
     let temperature_scale = internal_noise_temperature_scale(netlist);
     sigma
         * temperature_scale
@@ -6138,9 +6533,8 @@ fn internal_noise_temperature_scale(netlist: &InternalTransientNetlist) -> f64 {
 }
 
 fn internal_unit_noise_sample(seed: u64, step_index: i64, salt: u64) -> f64 {
-    let mut state = seed
-        ^ salt.rotate_left(13)
-        ^ (step_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut state =
+        seed ^ salt.rotate_left(13) ^ (step_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -6190,13 +6584,12 @@ fn stamp_internal_nonlinear_terms(
         let phase_iter = phase_prev + josephson_gain * time_step_s * v_iter;
         let shunt_g = 1.0 / normal_resistance_ohm;
         let cap_g = junction_cap_f / time_step_s;
-        let nonlinear_g = (
-            critical_current_a * phase_iter.cos()
-                + 2.0 * second_harmonic_current_a * (2.0 * phase_iter).cos()
-                + 3.0 * third_harmonic_current_a * (3.0 * phase_iter).cos()
-                + 4.0 * fourth_harmonic_current_a * (4.0 * phase_iter).cos()
-                + 5.0 * fifth_harmonic_current_a * (5.0 * phase_iter).cos()
-        ) * josephson_gain
+        let nonlinear_g = (critical_current_a * phase_iter.cos()
+            + 2.0 * second_harmonic_current_a * (2.0 * phase_iter).cos()
+            + 3.0 * third_harmonic_current_a * (3.0 * phase_iter).cos()
+            + 4.0 * fourth_harmonic_current_a * (4.0 * phase_iter).cos()
+            + 5.0 * fifth_harmonic_current_a * (5.0 * phase_iter).cos())
+            * josephson_gain
             * time_step_s;
         let total_g = shunt_g + cap_g + nonlinear_g;
         let current = shunt_g * v_iter
@@ -6233,7 +6626,11 @@ fn josephson_phase_from_history(
             )
         })
         .collect::<Vec<_>>();
-    samples.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    samples.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut phase = 0.0;
     let mut last_time_s = samples[0].0;
@@ -6278,7 +6675,11 @@ fn delayed_port_voltage_delta(
         })
         .collect::<Vec<_>>();
     samples.push((current_time_s, current_delta));
-    samples.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    samples.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if target_time_s <= samples[0].0 {
         return samples[0].1;
@@ -6330,7 +6731,8 @@ fn stamp_current_injection(
 }
 
 fn node_voltage(voltages: &[f64], node: Option<usize>) -> f64 {
-    node.and_then(|index| voltages.get(index).copied()).unwrap_or(0.0)
+    node.and_then(|index| voltages.get(index).copied())
+        .unwrap_or(0.0)
 }
 
 fn solve_dense_linear_system(
@@ -6469,7 +6871,9 @@ fn parse_param_line(line: &str, params: &mut BTreeMap<String, f64>) -> Result<()
             .ok_or_else(|| SimulationError::InvalidParamAssignment(assignment.to_string()))?;
         let key = name.trim().to_ascii_lowercase();
         if key.is_empty() {
-            return Err(SimulationError::InvalidParamAssignment(assignment.to_string()));
+            return Err(SimulationError::InvalidParamAssignment(
+                assignment.to_string(),
+            ));
         }
         let value = evaluate_expression(expr.trim(), params)?;
         params.insert(key, value);
@@ -6477,7 +6881,10 @@ fn parse_param_line(line: &str, params: &mut BTreeMap<String, f64>) -> Result<()
     Ok(())
 }
 
-fn parse_tran_line(line: &str, params: &BTreeMap<String, f64>) -> Result<TransientAnalysis, SimulationError> {
+fn parse_tran_line(
+    line: &str,
+    params: &BTreeMap<String, f64>,
+) -> Result<TransientAnalysis, SimulationError> {
     let normalized = line.replace(',', " ");
     let raw_tokens = normalized.split_whitespace().collect::<Vec<_>>();
     let tokens = collapse_spaced_assignments(&raw_tokens);
@@ -6485,9 +6892,7 @@ fn parse_tran_line(line: &str, params: &BTreeMap<String, f64>) -> Result<Transie
         return Err(SimulationError::InvalidTran(line.to_string()));
     }
 
-    let use_initial_conditions = tokens
-        .iter()
-        .any(|token| token.eq_ignore_ascii_case("uic"));
+    let use_initial_conditions = tokens.iter().any(|token| token.eq_ignore_ascii_case("uic"));
     let time_tokens = tokens
         .iter()
         .filter(|token| !token.eq_ignore_ascii_case("uic"))
@@ -6616,7 +7021,10 @@ fn resolve_atom(token: &str, params: &BTreeMap<String, f64>) -> Result<f64, Simu
     if token.starts_with('(') && token.ends_with(')') && token.len() >= 2 {
         return evaluate_expression(&token[1..token.len() - 1], params);
     }
-    if let Some(param_name) = token.strip_prefix('{').and_then(|inner| inner.strip_suffix('}')) {
+    if let Some(param_name) = token
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+    {
         return params
             .get(&param_name.trim().to_ascii_lowercase())
             .copied()
@@ -6663,15 +7071,15 @@ fn parse_engineering_number(token: &str) -> Result<f64, SimulationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_external_env_sanitization, is_allowed_external_command, parse_deck,
-        create_external_run_dir, parse_deck_file, run_generated_deck,
-        should_strip_external_env_var, simulate_file, simulate_text, ParsedDeck,
-        SimulationBackend, SimulationConfig, SimulationMode,
+        apply_external_env_sanitization, create_external_run_dir, is_allowed_external_command,
+        parse_deck, parse_deck_file, run_generated_deck, should_strip_external_env_var,
+        simulate_file, simulate_text, ParsedDeck, SimulationBackend, SimulationConfig,
+        SimulationMode, SimulationReport,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::process::Command;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -6687,6 +7095,16 @@ mod tests {
 
         assert_eq!(report.backend, SimulationBackend::EventOnly);
         assert_eq!(report.external_result, None);
+        let gate = report.quality_gate();
+        assert!(gate.passed);
+        assert_eq!(gate.status, "passed");
+        assert_eq!(gate.alignment_level, "event_only");
+        assert!(!gate.external_alignment_required);
+        assert!(!gate.external_alignment_available);
+        let josim_gate = report.josim_quality_gate();
+        assert!(!josim_gate.passed);
+        assert_eq!(josim_gate.status, "failed_external_alignment_missing");
+        assert!(josim_gate.external_alignment_required);
     }
 
     #[test]
@@ -6705,6 +7123,10 @@ mod tests {
             report.external_result.as_deref(),
             Some("external_command_not_allowed")
         );
+        let gate = report.quality_gate();
+        assert!(!gate.passed);
+        assert_eq!(gate.status, "failed_backend");
+        assert_eq!(gate.alignment_level, "unavailable");
     }
 
     #[test]
@@ -6723,6 +7145,57 @@ mod tests {
             report.external_result.as_deref(),
             Some("external_command_not_allowed")
         );
+    }
+
+    #[test]
+    fn external_completed_report_passes_josim_quality_gate() {
+        let report = SimulationReport {
+            backend: SimulationBackend::ExternalCompleted,
+            simulated_events: 3,
+            generated_deck_lines: 2,
+            generated_deck_path: Some("input.sp".to_string()),
+            waveform_path: Some("wave.csv".to_string()),
+            reported_violations: 0,
+            reported_worst_delay_ps: Some(8.0),
+            delay_details: Vec::new(),
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
+            violation_details: Vec::new(),
+            external_status_code: Some(0),
+            external_result: Some("ok".to_string()),
+        };
+
+        let gate = report.quality_gate();
+        assert!(gate.passed);
+        assert_eq!(gate.alignment_level, "josim_aligned");
+        assert!(gate.external_alignment_available);
+        let josim_gate = report.josim_quality_gate();
+        assert!(josim_gate.passed);
+        assert_eq!(josim_gate.required_backend, "external_josim");
+    }
+
+    #[test]
+    fn external_completed_report_fails_gate_on_reported_violations() {
+        let report = SimulationReport {
+            backend: SimulationBackend::ExternalCompleted,
+            simulated_events: 3,
+            generated_deck_lines: 2,
+            generated_deck_path: Some("input.sp".to_string()),
+            waveform_path: Some("wave.csv".to_string()),
+            reported_violations: 1,
+            reported_worst_delay_ps: Some(8.0),
+            delay_details: Vec::new(),
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
+            violation_details: Vec::new(),
+            external_status_code: Some(0),
+            external_result: Some("ok".to_string()),
+        };
+
+        let gate = report.josim_quality_gate();
+        assert!(!gate.passed);
+        assert_eq!(gate.status, "failed_violations");
+        assert_eq!(gate.violation_count, 1);
     }
 
     #[test]
@@ -6758,7 +7231,9 @@ mod tests {
         assert!(is_allowed_external_command("josim.sh"));
         assert!(is_allowed_external_command(r"C:\tools\josim.exe"));
         assert!(is_allowed_external_command(r"C:\tools\josim.cmd"));
-        assert!(is_allowed_external_command(r"C:\tools\JoSIM-v2.7-windows-x64\bin\josim-cli.exe"));
+        assert!(is_allowed_external_command(
+            r"C:\tools\JoSIM-v2.7-windows-x64\bin\josim-cli.exe"
+        ));
         assert!(is_allowed_external_command("subdir/josim"));
         assert!(!is_allowed_external_command("python"));
         assert!(!is_allowed_external_command(r"C:\tools\python.exe"));
@@ -6768,8 +7243,12 @@ mod tests {
 
     #[test]
     fn external_env_sanitization_targets_rflow_and_josim_prefixes() {
-        assert!(should_strip_external_env_var(OsStr::new("RFLOW_JOSIM_COMMAND")));
-        assert!(should_strip_external_env_var(OsStr::new("JOSIM_LICENSE_FILE")));
+        assert!(should_strip_external_env_var(OsStr::new(
+            "RFLOW_JOSIM_COMMAND"
+        )));
+        assert!(should_strip_external_env_var(OsStr::new(
+            "JOSIM_LICENSE_FILE"
+        )));
         assert!(!should_strip_external_env_var(OsStr::new("PATH")));
         assert!(!should_strip_external_env_var(OsStr::new("HOME")));
     }
@@ -6845,10 +7324,8 @@ mod tests {
 
     #[test]
     fn prepare_external_simulator_deck_rewrites_josephson_prefix_for_josim() {
-        let prepared = super::prepare_external_simulator_deck(
-            "J1 n1 0 jjmod\n.tran 1p 5p\n.end\n",
-            None,
-        );
+        let prepared =
+            super::prepare_external_simulator_deck("J1 n1 0 jjmod\n.tran 1p 5p\n.end\n", None);
 
         assert!(prepared.contains("B1 n1 0 jjmod"));
         assert!(!prepared.contains("J1 n1 0 jjmod"));
@@ -6930,7 +7407,9 @@ mod tests {
             None,
         );
 
-        assert!(prepared.contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0.05m/0.5m})"));
+        assert!(
+            prepared.contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0.05m/0.5m})")
+        );
         assert!(!prepared.to_ascii_lowercase().contains("icrit3=0.05m"));
     }
 
@@ -6941,7 +7420,9 @@ mod tests {
             None,
         );
 
-        assert!(prepared.contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0.01m/0.5m})"));
+        assert!(
+            prepared.contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0.01m/0.5m})")
+        );
         assert!(!prepared.to_ascii_lowercase().contains("icrit4=0.01m"));
     }
 
@@ -6952,7 +7433,8 @@ mod tests {
             None,
         );
 
-        assert!(prepared.contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0,0.005m/0.5m})"));
+        assert!(prepared
+            .contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0,0.005m/0.5m})"));
         assert!(!prepared.to_ascii_lowercase().contains("icrit5=0.005m"));
     }
 
@@ -7018,12 +7500,14 @@ mod tests {
             None,
         );
 
-        assert!(prepared.contains(".model rflux_auto_j1 jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0.2,0.05,0.01})"));
+        assert!(prepared
+            .contains(".model rflux_auto_j1 jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0.2,0.05,0.01})"));
         assert!(prepared.contains("B1 n1 0 rflux_auto_j1"));
     }
 
     #[test]
-    fn prepare_external_simulator_deck_rewrites_pure_second_harmonic_instance_override_into_synthetic_model() {
+    fn prepare_external_simulator_deck_rewrites_pure_second_harmonic_instance_override_into_synthetic_model(
+    ) {
         let prepared = super::prepare_external_simulator_deck(
             ".model jjmod jj(rn=20 cj=0.5p)\nJ1 n1 0 model=jjmod ic2=0.1m\n.tran 1p 5p\n.end\n",
             None,
@@ -7056,7 +7540,8 @@ mod tests {
     }
 
     #[test]
-    fn prepare_external_simulator_deck_merges_supported_junction_model_override_into_synthetic_model() {
+    fn prepare_external_simulator_deck_merges_supported_junction_model_override_into_synthetic_model(
+    ) {
         let prepared = super::prepare_external_simulator_deck(
             ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\nJ1 n1 0 model=jjmod rn=25\n.tran 1p 5p\n.end\n",
             None,
@@ -7073,11 +7558,21 @@ mod tests {
             ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p pi=1 icrit2=0.2m)\nJ1 n1 0 model=jjmod rn=25 pi=1\n.tran 1p 5p\n.end\n",
         );
 
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_second_harmonic_model_unsupported".to_string()));
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_second_harmonic_instance_unsupported".to_string()));
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_pi_model_unsupported".to_string()));
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_pi_instance_unsupported".to_string()));
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_model_override_unsupported".to_string()));
+        assert!(!notes.contains(
+            &"external_josim_translation_warning:jj_second_harmonic_model_unsupported".to_string()
+        ));
+        assert!(!notes.contains(
+            &"external_josim_translation_warning:jj_second_harmonic_instance_unsupported"
+                .to_string()
+        ));
+        assert!(!notes
+            .contains(&"external_josim_translation_warning:jj_pi_model_unsupported".to_string()));
+        assert!(!notes.contains(
+            &"external_josim_translation_warning:jj_pi_instance_unsupported".to_string()
+        ));
+        assert!(!notes.contains(
+            &"external_josim_translation_warning:jj_model_override_unsupported".to_string()
+        ));
     }
 
     #[test]
@@ -7086,8 +7581,13 @@ mod tests {
             ".model jjmod jj(icrit2=0.2m rn=20)\nJ1 n1 0 ic2=0.1m rn=25\n.tran 1p 5p\n.end\n",
         );
 
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_second_harmonic_model_unsupported".to_string()));
-        assert!(!notes.contains(&"external_josim_translation_warning:jj_second_harmonic_instance_unsupported".to_string()));
+        assert!(!notes.contains(
+            &"external_josim_translation_warning:jj_second_harmonic_model_unsupported".to_string()
+        ));
+        assert!(!notes.contains(
+            &"external_josim_translation_warning:jj_second_harmonic_instance_unsupported"
+                .to_string()
+        ));
     }
 
     #[test]
@@ -7139,10 +7639,7 @@ mod tests {
 
     #[test]
     fn prepare_external_simulator_deck_strips_tran_uic_for_josim() {
-        let prepared = super::prepare_external_simulator_deck(
-            ".tran 0.5p 10p uic\n.end\n",
-            None,
-        );
+        let prepared = super::prepare_external_simulator_deck(".tran 0.5p 10p uic\n.end\n", None);
 
         assert!(prepared.contains(".tran 0.5p 10p"));
         assert!(!prepared.to_ascii_lowercase().contains("uic"));
@@ -7186,7 +7683,10 @@ mod tests {
 
         assert!(run_dir.exists());
         assert!(run_dir.is_dir());
-        assert_eq!(run_dir.file_name().and_then(|name| name.to_str()), Some("rflux-ext-1234-5678"));
+        assert_eq!(
+            run_dir.file_name().and_then(|name| name.to_str()),
+            Some("rflux-ext-1234-5678")
+        );
 
         fs::remove_dir_all(&base_dir).unwrap();
     }
@@ -7202,7 +7702,10 @@ mod tests {
             },
         );
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc")
@@ -7266,10 +7769,8 @@ mod tests {
 
     #[test]
     fn parse_deck_rejects_invalid_spaced_param_assignment() {
-        let err = parse_deck(
-            ".title demo\n.param tstep =\nR1 n1 0 50\n.tran 1p 5p\n.end\n",
-        )
-        .unwrap_err();
+        let err =
+            parse_deck(".title demo\n.param tstep =\nR1 n1 0 50\n.tran 1p 5p\n.end\n").unwrap_err();
 
         assert_eq!(
             err,
@@ -7279,10 +7780,7 @@ mod tests {
 
     #[test]
     fn parse_deck_supports_tran_uic_flag() {
-        let parsed = parse_deck(
-            ".title demo\nR1 n1 0 50\n.tran 1p 10p 2p 2p uic\n.end\n",
-        )
-        .unwrap();
+        let parsed = parse_deck(".title demo\nR1 n1 0 50\n.tran 1p 10p 2p 2p uic\n.end\n").unwrap();
 
         assert_eq!(parsed.transient.tstep_ps, 1.0);
         assert_eq!(parsed.transient.tstop_ps, 10.0);
@@ -7333,10 +7831,7 @@ mod tests {
 
     #[test]
     fn parse_deck_rejects_mixed_keyword_and_positional_tran_fields() {
-        let err = parse_deck(
-            ".title demo\nR1 n1 0 50\n.tran tstep=1p 10p\n.end\n",
-        )
-        .unwrap_err();
+        let err = parse_deck(".title demo\nR1 n1 0 50\n.tran tstep=1p 10p\n.end\n").unwrap_err();
 
         assert_eq!(
             err,
@@ -7476,8 +7971,7 @@ mod tests {
             + "X1 n1 n2 stage params: stage_r=90\n"
             + ".tran 1p 10p\n"
             + ".end\n";
-        let parsed = parse_deck(&deck)
-        .unwrap();
+        let parsed = parse_deck(&deck).unwrap();
 
         assert_eq!(parsed.element_count, 1);
         assert_eq!(parsed.transient.tstep_ps, 1.0);
@@ -7519,7 +8013,11 @@ mod tests {
         let inc_path = dir.join("defs.inc");
         let top_path = dir.join("top.cir");
         fs::write(&inc_path, ".param tstep=0.5p tstop=20p\nR1 n1 0 50\n").unwrap();
-        fs::write(&top_path, ".title demo\n.include \"defs.inc\"\n.tran tstep tstop\n.end\n").unwrap();
+        fs::write(
+            &top_path,
+            ".title demo\n.include \"defs.inc\"\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -7645,8 +8143,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7659,7 +8163,11 @@ mod tests {
         let inc_path = dir.join("defs.inc");
         let top_path = dir.join("top.cir");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("wave.txt"), "0 0\n1p 0.8m\n3p 1.8m\n4p 1.8m\n6p 0\n8p 0\n").unwrap();
+        fs::write(
+            dir.join("wave.txt"),
+            "0 0\n1p 0.8m\n3p 1.8m\n4p 1.8m\n6p 0\n8p 0\n",
+        )
+        .unwrap();
         fs::write(
             &inc_path,
             ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\n\n.subckt source_pwl_jj_stage out params: rdrive=10\nV1 in 0 PWL(file=\"wave.txt\")\nR1 in n1 rdrive\nJ1 n1 out jjmod\n.ends\n",
@@ -7680,8 +8188,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7714,8 +8228,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7751,8 +8271,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -7783,8 +8309,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7798,8 +8330,11 @@ mod tests {
         let top_path = dir.join("top.cir");
         let wave_path = dir.join("wave.txt");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(&wave_path, "0 0\n1p 0.2m\n2p 0.5m\n3p 0.8m\n5p 0.8m\n6p 0.4m\n8p 0\n")
-            .unwrap();
+        fs::write(
+            &wave_path,
+            "0 0\n1p 0.2m\n2p 0.5m\n3p 0.8m\n5p 0.8m\n6p 0.4m\n8p 0\n",
+        )
+        .unwrap();
         fs::write(
             &inc_path,
             ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\n\n.subckt source_pwl_coupled_jj_stage tap params: coupling=0.9 lval=1p rval=10\nV1 in 0 PWL(file=\"wave.txt\")\nK1 L1 L2 coupling=coupling\nL1 in out lval\nR1 out n1 rval\nJ1 n1 0 jjmod\nL2 tap 0 lval\nR2 tap 0 rval\n.ends\n",
@@ -7820,8 +8355,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7829,14 +8370,18 @@ mod tests {
     }
 
     #[test]
-    fn simulate_file_supports_included_delayed_file_driven_source_mutual_inductance_junction_subckt() {
+    fn simulate_file_supports_included_delayed_file_driven_source_mutual_inductance_junction_subckt(
+    ) {
         let dir = unique_test_dir("include-delay-source-pwl-mutual-inductance-junction-subckt");
         let inc_path = dir.join("defs.inc");
         let top_path = dir.join("top.cir");
         let wave_path = dir.join("wave.txt");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(&wave_path, "0 0\n1p 0.2m\n2p 0.5m\n3p 0.8m\n5p 0.8m\n6p 0.4m\n8p 0\n")
-            .unwrap();
+        fs::write(
+            &wave_path,
+            "0 0\n1p 0.2m\n2p 0.5m\n3p 0.8m\n5p 0.8m\n6p 0.4m\n8p 0\n",
+        )
+        .unwrap();
         fs::write(
             &inc_path,
             ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p)\n\n.subckt delay_source_pwl_coupled_jj_stage tap params: z0=50 td=3p coupling=0.9 lval=1p rval=10\nV1 src 0 PWL(file=\"wave.txt\")\nT1 src 0 mid 0 z0=z0 td=td\nK1 L1 L2 coupling=coupling\nL1 mid out lval\nR1 out n1 rval\nJ1 n1 0 jjmod\nL2 tap 0 lval\nR2 tap 0 rval\n.ends\n",
@@ -7857,8 +8402,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7866,7 +8417,8 @@ mod tests {
     }
 
     #[test]
-    fn simulate_file_supports_chained_include_file_driven_source_mutual_inductance_junction_subckt() {
+    fn simulate_file_supports_chained_include_file_driven_source_mutual_inductance_junction_subckt()
+    {
         let dir = unique_test_dir("chained-include-source-pwl-mutual-inductance-junction-subckt");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -7899,8 +8451,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7908,8 +8466,10 @@ mod tests {
     }
 
     #[test]
-    fn simulate_file_supports_chained_include_delayed_file_driven_source_mutual_inductance_junction_subckt() {
-        let dir = unique_test_dir("chained-include-delay-source-pwl-mutual-inductance-junction-subckt");
+    fn simulate_file_supports_chained_include_delayed_file_driven_source_mutual_inductance_junction_subckt(
+    ) {
+        let dir =
+            unique_test_dir("chained-include-delay-source-pwl-mutual-inductance-junction-subckt");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("wave.txt"),
@@ -7941,8 +8501,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
 
@@ -7978,8 +8544,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -8013,8 +8585,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -8048,8 +8626,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -8088,8 +8672,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -8128,8 +8718,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -8160,7 +8756,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc")
@@ -8196,7 +8795,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc")
@@ -8217,8 +8819,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert_eq!(report.simulated_events, 5);
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
         assert!(report.waveform_path.is_some());
@@ -8235,7 +8843,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
     }
 
@@ -8250,7 +8861,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
     }
 
@@ -8265,7 +8879,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
     }
 
@@ -8280,7 +8897,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
     }
 
@@ -8295,7 +8915,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert!(report.reported_worst_delay_ps.is_some());
     }
 
@@ -8310,7 +8933,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
     }
 
@@ -8325,7 +8951,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.reported_worst_delay_ps, Some(0.001));
     }
 
@@ -8340,7 +8969,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert!(report.reported_worst_delay_ps.is_some());
     }
 
@@ -8355,7 +8987,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=123")
@@ -8373,7 +9008,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=456")
@@ -8391,7 +9029,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=321")
@@ -8409,8 +9050,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
     }
 
     #[test]
@@ -8424,8 +9071,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
     }
 
     #[test]
@@ -8439,7 +9092,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=123")
@@ -8457,7 +9113,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_reltol")
@@ -8475,7 +9134,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_abstol")
@@ -8493,7 +9155,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_abstol")
@@ -8511,7 +9176,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_reltol")
@@ -8529,7 +9197,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=123")
@@ -8547,7 +9218,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_noise")
@@ -8579,7 +9253,8 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(
-            (result_a.final_node_voltages[out_index] - result_b.final_node_voltages[out_index]).abs()
+            (result_a.final_node_voltages[out_index] - result_b.final_node_voltages[out_index])
+                .abs()
                 > 1.0e-12
         );
     }
@@ -8595,7 +9270,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=77")
@@ -8613,7 +9291,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=77")
@@ -8631,7 +9312,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=77")
@@ -8649,7 +9333,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=77")
@@ -8673,7 +9360,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.waveform_path.as_deref(),
             Some(target_path.display().to_string().as_str())
@@ -8695,7 +9385,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_waveform_path")
@@ -8713,7 +9406,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_temp")
@@ -8743,8 +9439,12 @@ mod tests {
             .iter()
             .position(|name| name == "out")
             .unwrap();
-        let baseline_delta = (baseline.final_node_voltages[out_index] - noiseless.final_node_voltages[out_index]).abs();
-        let hotter_delta = (hotter.final_node_voltages[out_index] - noiseless.final_node_voltages[out_index]).abs();
+        let baseline_delta = (baseline.final_node_voltages[out_index]
+            - noiseless.final_node_voltages[out_index])
+            .abs();
+        let hotter_delta = (hotter.final_node_voltages[out_index]
+            - noiseless.final_node_voltages[out_index])
+            .abs();
         assert!(hotter_delta > baseline_delta);
     }
 
@@ -8791,8 +9491,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
     }
 
     #[test]
@@ -8806,8 +9512,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
     }
 
     #[test]
@@ -8821,8 +9533,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
     }
 
     #[test]
@@ -8836,7 +9554,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert!(report.delay_details.is_empty());
         assert_eq!(report.measurement_details.len(), 4);
         assert_eq!(report.measurement_details[0].name, "out_peak");
@@ -8874,13 +9595,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.measurement_details.len(), 2);
         assert_eq!(report.measurement_details[0].name, "early_final");
         assert_eq!(report.measurement_details[0].kind, "final");
         assert_eq!(report.measurement_details[1].name, "full_final");
         assert_eq!(report.measurement_details[1].kind, "final");
-        assert!(report.measurement_details[0].measured_value > report.measurement_details[1].measured_value);
+        assert!(
+            report.measurement_details[0].measured_value
+                > report.measurement_details[1].measured_value
+        );
     }
 
     #[test]
@@ -8894,7 +9621,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.measurement_details.len(), 1);
         assert_eq!(report.measurement_details[0].name, "diff_final");
         assert_eq!(
@@ -8918,7 +9648,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.measurement_details.len(), 2);
         assert_eq!(report.measurement_details[0].name, "out_at");
         assert_eq!(report.measurement_details[0].kind, "find");
@@ -8945,7 +9678,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.measurement_details.len(), 2);
         assert_eq!(report.measurement_details[0].name, "out_when");
         assert_eq!(report.measurement_details[0].kind, "find");
@@ -8972,7 +9708,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert!(report.measurement_details.is_empty());
         assert_eq!(report.measurement_warnings.len(), 1);
         assert_eq!(report.measurement_warnings[0].name, "missing");
@@ -9001,13 +9740,31 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.delay_details.len(), 1);
         assert_eq!(report.delay_details[0].name, "rc_delay");
-        assert_eq!(report.delay_details[0].from_ref.as_ref().map(|r| r.node.as_str()), Some("in"));
-        assert_eq!(report.delay_details[0].to_ref.as_ref().map(|r| r.node.as_str()), Some("out"));
+        assert_eq!(
+            report.delay_details[0]
+                .from_ref
+                .as_ref()
+                .map(|r| r.node.as_str()),
+            Some("in")
+        );
+        assert_eq!(
+            report.delay_details[0]
+                .to_ref
+                .as_ref()
+                .map(|r| r.node.as_str()),
+            Some("out")
+        );
         assert!(report.delay_details[0].delay_ps > 0.0);
-        assert_eq!(report.reported_worst_delay_ps, Some(report.delay_details[0].delay_ps));
+        assert_eq!(
+            report.reported_worst_delay_ps,
+            Some(report.delay_details[0].delay_ps)
+        );
     }
 
     #[test]
@@ -9021,7 +9778,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.delay_details.len(), 1);
         assert_eq!(report.delay_details[0].name, "diff_delay");
         assert_eq!(
@@ -9031,7 +9791,13 @@ mod tests {
                 .map(|r| r.node.as_str()),
             Some("in,out")
         );
-        assert_eq!(report.delay_details[0].to_ref.as_ref().map(|r| r.node.as_str()), Some("out"));
+        assert_eq!(
+            report.delay_details[0]
+                .to_ref
+                .as_ref()
+                .map(|r| r.node.as_str()),
+            Some("out")
+        );
         assert!(report.delay_details[0].delay_ps > 0.0);
     }
 
@@ -9046,7 +9812,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.delay_details.len(), 2);
         assert_eq!(report.delay_details[0].name, "fall_delay");
         assert!(report.delay_details[0].delay_ps > 0.0);
@@ -9065,7 +9834,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(report.delay_details.len(), 1);
         assert_eq!(report.delay_details[0].name, "last_rise_delay");
         assert!(report.delay_details[0].delay_ps > 0.0);
@@ -9082,7 +9854,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_linear_rc;seed=42")
@@ -9100,7 +9875,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_max_iterations")
@@ -9118,8 +9896,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientCompleted);
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
     }
 
     #[test]
@@ -9133,7 +9917,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_invalid_option_seed")
@@ -9151,7 +9938,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.backend, SimulationBackend::InternalTransientUnavailable);
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientUnavailable
+        );
         assert_eq!(
             report.external_result.as_deref(),
             Some("internal_transient_unsupported_element:J")
@@ -9193,7 +9983,11 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(result.captured_samples.len() >= 2);
-        let peak_out_voltage = result.captured_samples.iter().map(|sample| sample.node_voltages[out_index]).fold(0.0_f64, f64::max);
+        let peak_out_voltage = result
+            .captured_samples
+            .iter()
+            .map(|sample| sample.node_voltages[out_index])
+            .fold(0.0_f64, f64::max);
         assert!(peak_out_voltage > 0.4);
         assert!(result.final_node_voltages[out_index] < peak_out_voltage);
     }
@@ -9335,7 +10129,10 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(result.captured_samples[1].node_voltages[out_index] > 0.0);
-        assert!(result.captured_samples[3].node_voltages[out_index] > result.captured_samples[4].node_voltages[out_index]);
+        assert!(
+            result.captured_samples[3].node_voltages[out_index]
+                > result.captured_samples[4].node_voltages[out_index]
+        );
     }
 
     #[test]
@@ -9352,7 +10149,10 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(result.captured_samples[1].node_voltages[out_index] > 0.0);
-        assert!(result.captured_samples[3].node_voltages[out_index] > result.captured_samples[4].node_voltages[out_index]);
+        assert!(
+            result.captured_samples[3].node_voltages[out_index]
+                > result.captured_samples[4].node_voltages[out_index]
+        );
     }
 
     #[test]
@@ -9375,7 +10175,10 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(result.captured_samples[1].node_voltages[out_index] > 0.0);
-        assert!(result.captured_samples[3].node_voltages[out_index] > result.captured_samples[4].node_voltages[out_index]);
+        assert!(
+            result.captured_samples[3].node_voltages[out_index]
+                > result.captured_samples[4].node_voltages[out_index]
+        );
     }
 
     #[test]
@@ -9398,7 +10201,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9429,7 +10235,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9464,7 +10273,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9498,7 +10310,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9507,11 +10322,7 @@ mod tests {
     fn simulate_file_supports_chained_include_delayed_t_with_file_driven_source() {
         let dir = unique_test_dir("chained-include-delay-source-pwl-subckt");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("leaf_wave.txt"),
-            "0 0\n1p 1\n3p 1\n4p 0\n8p 0\n",
-        )
-        .unwrap();
+        fs::write(dir.join("leaf_wave.txt"), "0 0\n1p 1\n3p 1\n4p 0\n8p 0\n").unwrap();
         fs::write(
             dir.join("leaf.inc"),
             ".subckt delay_source_leaf out params: z0=50 td=3p rval=50\nV1 src 0 PWL(file=\"leaf_wave.txt\")\nT1 src 0 out 0 z0=z0 td=td\nR1 out 0 rval\n.ends\n",
@@ -9537,7 +10348,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9571,7 +10385,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9605,7 +10422,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.external_result.as_deref(), Some("internal_transient_linear_rc"));
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("internal_transient_linear_rc")
+        );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
     }
@@ -9737,7 +10557,10 @@ mod tests {
             .position(|name| name == "out")
             .unwrap();
         assert!(result.captured_samples[2].node_voltages[out_index] > 0.1);
-        assert!(result.captured_samples[4].node_voltages[out_index] > result.captured_samples[5].node_voltages[out_index]);
+        assert!(
+            result.captured_samples[4].node_voltages[out_index]
+                > result.captured_samples[5].node_voltages[out_index]
+        );
     }
 
     #[test]
@@ -10267,8 +11090,7 @@ mod tests {
             .iter()
             .find_map(|element| {
                 if let super::InternalElement::JosephsonJunction {
-                    critical_current_a,
-                    ..
+                    critical_current_a, ..
                 } = element
                 {
                     Some(*critical_current_a)
@@ -10292,8 +11114,7 @@ mod tests {
             .iter()
             .find_map(|element| {
                 if let super::InternalElement::JosephsonJunction {
-                    critical_current_a,
-                    ..
+                    critical_current_a, ..
                 } = element
                 {
                     Some(*critical_current_a)
@@ -10308,7 +11129,8 @@ mod tests {
 
     #[test]
     fn internal_transient_parses_nonzero_numeric_pi_junction_flag() {
-        let deck = ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m rn=20 pi=-2\n.tran 1p 4p\n.end\n";
+        let deck =
+            ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m rn=20 pi=-2\n.tran 1p 4p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
@@ -10317,8 +11139,7 @@ mod tests {
             .iter()
             .find_map(|element| {
                 if let super::InternalElement::JosephsonJunction {
-                    critical_current_a,
-                    ..
+                    critical_current_a, ..
                 } = element
                 {
                     Some(*critical_current_a)
@@ -10343,7 +11164,8 @@ mod tests {
 
     #[test]
     fn internal_transient_parses_second_harmonic_junction_instance_param() {
-        let deck = ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic2=0.2m rn=20\n.tran 1p 4p\n.end\n";
+        let deck =
+            ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic2=0.2m rn=20\n.tran 1p 4p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
@@ -10393,7 +11215,8 @@ mod tests {
 
     #[test]
     fn internal_transient_parses_third_harmonic_junction_instance_param() {
-        let deck = ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic3=0.05m rn=20\n.tran 1p 4p\n.end\n";
+        let deck =
+            ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic3=0.05m rn=20\n.tran 1p 4p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
@@ -10418,7 +11241,8 @@ mod tests {
 
     #[test]
     fn internal_transient_parses_fourth_harmonic_junction_instance_param() {
-        let deck = ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic4=0.01m rn=20\n.tran 1p 4p\n.end\n";
+        let deck =
+            ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic4=0.01m rn=20\n.tran 1p 4p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
@@ -10468,7 +11292,8 @@ mod tests {
 
     #[test]
     fn internal_transient_parses_fifth_harmonic_junction_instance_param() {
-        let deck = ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic5=0.005m rn=20\n.tran 1p 4p\n.end\n";
+        let deck =
+            ".title demo\nV1 in 0 DC 1m\nJ1 in 0 icrit=0.5m ic5=0.005m rn=20\n.tran 1p 4p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
@@ -10668,7 +11493,8 @@ mod tests {
 
     #[test]
     fn internal_transient_reports_non_convergence_when_max_substeps_are_exhausted() {
-        let deck = ".title demo\nV1 in 0 PWL(0,0,2p,1)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 2p\n.end\n";
+        let deck =
+            ".title demo\nV1 in 0 PWL(0,0,2p,1)\nR1 in out 1\nC1 out 0 1p\n.tran 1p 2p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
         let previous_solution = vec![0.0; netlist.node_names.len() + netlist.auxiliary_count];
@@ -10703,12 +11529,14 @@ mod tests {
 
     #[test]
     fn internal_transient_substep_count_increases_for_finite_delay_transmission_line() {
-        let plain_deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0\nR1 out 0 50\n.tran 1p 4p\n.end\n";
+        let plain_deck =
+            ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0\nR1 out 0 50\n.tran 1p 4p\n.end\n";
         let delayed_deck = ".title demo\nV1 in 0 DC 1\nT1 in 0 out 0 z0=50 td=0.2p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
 
         let plain_parsed = parse_deck(plain_deck).unwrap();
         let delayed_parsed = parse_deck(delayed_deck).unwrap();
-        let plain_netlist = super::parse_internal_transient_netlist(plain_deck, &plain_parsed).unwrap();
+        let plain_netlist =
+            super::parse_internal_transient_netlist(plain_deck, &plain_parsed).unwrap();
         let delayed_netlist =
             super::parse_internal_transient_netlist(delayed_deck, &delayed_parsed).unwrap();
 
@@ -10726,7 +11554,9 @@ mod tests {
 
         let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 1.5e-12, 1.0e-12, 4);
 
-        assert!(boundaries.iter().any(|time_s| (*time_s - 2.0e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 2.0e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10737,7 +11567,9 @@ mod tests {
 
         let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
 
-        assert!(boundaries.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10746,10 +11578,15 @@ mod tests {
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
-        let breakpoints = super::collect_transmission_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+        let breakpoints =
+            super::collect_transmission_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
-        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
+        assert!(!breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+        assert!(!breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10758,9 +11595,12 @@ mod tests {
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
-        let breakpoints = super::collect_transmission_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
+        let breakpoints =
+            super::collect_transmission_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+        assert!(!breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10778,7 +11618,9 @@ mod tests {
             1.0e-12,
         );
 
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10787,9 +11629,12 @@ mod tests {
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
-        let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 1.5e-12, 1.0e-12);
+        let breakpoints =
+            super::collect_netlist_breakpoints_within_step(&netlist, 1.5e-12, 1.0e-12);
 
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 2.0e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 2.0e-12).abs() < 1.0e-18));
         assert!((breakpoints.first().copied().unwrap_or_default() - 1.5e-12).abs() < 1.0e-18);
         assert!((breakpoints.last().copied().unwrap_or_default() - 2.5e-12).abs() < 1.0e-18);
     }
@@ -10802,10 +11647,18 @@ mod tests {
 
         let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.7e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.2e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.7e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10816,8 +11669,12 @@ mod tests {
 
         let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
 
-        assert!(boundaries.iter().any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
-        assert!(boundaries.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 0.3e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10828,8 +11685,12 @@ mod tests {
 
         let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10840,8 +11701,12 @@ mod tests {
 
         let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
 
-        assert!(boundaries.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
-        assert!(boundaries.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10852,9 +11717,15 @@ mod tests {
 
         let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.7e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
+        assert!(!breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.7e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.5e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.6e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10865,9 +11736,15 @@ mod tests {
 
         let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.54e-12).abs() < 1.0e-18));
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.65e-12).abs() < 1.0e-18));
-        assert!(!breakpoints.iter().any(|time_s| (*time_s - 0.34e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.54e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.65e-12).abs() < 1.0e-18));
+        assert!(!breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.34e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10878,18 +11755,23 @@ mod tests {
 
         let breakpoints = super::collect_netlist_breakpoints_within_step(&netlist, 0.0, 1.0e-12);
 
-        assert!(breakpoints.iter().any(|time_s| (*time_s - 0.4e-12).abs() < 1.0e-18));
+        assert!(breakpoints
+            .iter()
+            .any(|time_s| (*time_s - 0.4e-12).abs() < 1.0e-18));
     }
 
     #[test]
-    fn internal_transient_substep_boundaries_align_to_parallel_path_transmission_source_breakpoint() {
+    fn internal_transient_substep_boundaries_align_to_parallel_path_transmission_source_breakpoint()
+    {
         let deck = ".title demo\nV1 in 0 PULSE(0,1,0,0.1p,0.1p,0.3p,2p)\nT1 in 0 out 0 z0=50 td=0.2p\nT2 in 0 out 0 z0=50 td=0.3p\nR1 out 0 50\n.tran 1p 4p\n.end\n";
         let parsed = parse_deck(deck).unwrap();
         let netlist = super::parse_internal_transient_netlist(deck, &parsed).unwrap();
 
         let boundaries = super::substep_boundaries_with_breakpoints(&netlist, 0.0, 1.0e-12, 4);
 
-        assert!(boundaries.iter().any(|time_s| (*time_s - 0.4e-12).abs() < 1.0e-18));
+        assert!(boundaries
+            .iter()
+            .any(|time_s| (*time_s - 0.4e-12).abs() < 1.0e-18));
     }
 
     #[test]
@@ -10914,16 +11796,31 @@ mod tests {
         assert_eq!(worst_delay, Some(18.5));
         assert_eq!(delay_details.len(), 1);
         assert_eq!(delay_details[0].name, "n1");
-        assert_eq!(delay_details[0].from_ref.as_ref().map(|r| r.node.as_str()), Some("a"));
-        assert_eq!(delay_details[0].to_ref.as_ref().and_then(|r| r.port), Some(2));
+        assert_eq!(
+            delay_details[0].from_ref.as_ref().map(|r| r.node.as_str()),
+            Some("a")
+        );
+        assert_eq!(
+            delay_details[0].to_ref.as_ref().and_then(|r| r.port),
+            Some(2)
+        );
         assert_eq!(measurement_details.len(), 1);
         assert_eq!(measurement_details[0].name, "out_rms");
         assert_eq!(measurement_details[0].kind, "rms");
         assert_eq!(measurement_details[0].measured_value, 0.001);
-        assert_eq!(measurement_details[0].at_ref.as_ref().map(|r| r.node.as_str()), Some("out"));
+        assert_eq!(
+            measurement_details[0]
+                .at_ref
+                .as_ref()
+                .map(|r| r.node.as_str()),
+            Some("out")
+        );
         assert_eq!(violation_details.len(), 1);
         assert_eq!(violation_details[0].kind, "hold");
-        assert_eq!(violation_details[0].at_ref.as_ref().map(|r| r.raw.as_str()), Some("n1:3"));
+        assert_eq!(
+            violation_details[0].at_ref.as_ref().map(|r| r.raw.as_str()),
+            Some("n1:3")
+        );
     }
 
     #[test]
@@ -11124,7 +12021,10 @@ pub fn parse_simulator_output(stdout: &str) -> ParsedSimulatorOutput {
             "RFLOW_VIOLATIONS" | "VIOLATIONS" | "VIOLATION_COUNT" | "SIM_VIOLATIONS" => {
                 reported_violations = value.parse::<usize>().ok();
             }
-            "RFLOW_WORST_DELAY_PS" | "WORST_DELAY_PS" | "MEASURED_DELAY_PS" | "SIM_WORST_DELAY_PS" => {
+            "RFLOW_WORST_DELAY_PS"
+            | "WORST_DELAY_PS"
+            | "MEASURED_DELAY_PS"
+            | "SIM_WORST_DELAY_PS" => {
                 reported_worst_delay_ps = value.parse::<f64>().ok();
             }
             "RFLOW_DELAY_DETAIL" | "DELAY_DETAIL" | "SIM_DELAY_DETAIL" => {

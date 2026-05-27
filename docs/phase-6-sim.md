@@ -330,7 +330,7 @@ Validation:
 - `uv run cargo test --workspace`
 - `uv run pytest`
 - dedicated benchmark command or script stored under `python/scripts/` or a Rust test harness
-- manual CI correlation run via `.github/workflows/ci.yml` `workflow_dispatch` input `run_external_waveform_compare=true` (optional `josim_command`), which triggers `waveform-compare-optional` without affecting default push/PR CI; that optional job now runs `python/scripts/run_waveform_compare_manifest.py --validate-pass` plus `python/scripts/run_external_warning_manifest.py --validate-pass`, stages those outputs through `python/scripts/prepare_waveform_compare_artifacts.py` and `python/scripts/prepare_external_warning_artifacts.py`, then uploads both the numeric waveform-compare bundle and the warning-contract review bundle from `target/`
+- default Windows CI parity gate via `.github/workflows/ci.yml` job `waveform-compare-gate`, which downloads JoSIM `v2.7`, runs `python/scripts/run_waveform_compare_manifest.py --validate-pass --validate-no-regression` against the repo-tracked Windows baseline on push/PR, runs `python/scripts/run_external_warning_manifest.py --validate-pass`, stages those outputs through `python/scripts/prepare_waveform_compare_artifacts.py` and `python/scripts/prepare_external_warning_artifacts.py`, then uploads both the numeric waveform-compare bundle and the warning-contract review bundle from `target/`; `workflow_dispatch` keeps the same job but allows overriding `josim_command`, baseline source, and no-regression settings for ad hoc review runs
 - release-candidate evidence for simulator-affecting changes must include one current waveform-compare summary, one candidate approved-baseline artifact, and either a `History Diff` review against the prior approved baseline or an explicit statement that no prior same-platform baseline exists yet
 - when a same-platform approved baseline exists, release-candidate validation should also run `python/scripts/run_waveform_compare_manifest.py` or `python/scripts/summarize_waveform_compare_results.py` with `--validate-no-regression` and a declared `--regression-tolerance-v`
 
@@ -338,7 +338,7 @@ Release-readiness contract:
 
 - treat `waveform_compare_summary.current.json` as the candidate run record under review
 - treat `waveform_compare_summary.candidate-baseline.json` as the artifact to preserve only after the run is approved as the new baseline
-- do not enable strict no-regression by default across platforms; the Windows-local approved baseline now lives at `python/tests/benchmarks/phase6/waveform_compare_summary.windows-approved-baseline.json`, but a same-platform Linux baseline still needs to be promoted before the default Ubuntu runner can enforce strict no-regression
+- enforce strict no-regression by default only on the same-platform Windows gate; the Windows-local approved baseline now lives at `python/tests/benchmarks/phase6/waveform_compare_summary.windows-approved-baseline.json`, while a future Linux baseline can enable the same policy on Linux runners without cross-platform drift
 - milestone-6.6 closure requires both measured parity evidence in [josim-parity.md](./josim-parity.md) and a named owner sign-off path matching [ownership-matrix.md](./ownership-matrix.md)
 - use [sim-release-readiness-checklist.md](./sim-release-readiness-checklist.md) as the executable candidate-review checklist for simulator-affecting changes
 
@@ -360,7 +360,7 @@ Use this section as the live progress tracker.
 | 6.3 JJ and SFQ device models | not started | TBD | Correlate against JoSIM |
 | 6.4 Flow integration | not started | TBD | Replace current hook layering |
 | 6.5 CLI/Python usability | not started | TBD | Direct simulator entrypoint |
-| 6.6 Correlation and release gate | in progress | QA / benchmark + sim DRI | Compare script, approved-baseline workflow, repo-tracked Windows baseline, and optional no-regression gate are landed; default CI enforcement still awaits a same-platform Linux baseline |
+| 6.6 Correlation and release gate | in progress | QA / benchmark + sim DRI | Compare script, approved-baseline workflow, repo-tracked Windows baseline, and default Windows CI no-regression gate are landed; same-platform Linux baseline promotion remains follow-on work rather than a blocker for the default gate |
 
 ## Risk register
 

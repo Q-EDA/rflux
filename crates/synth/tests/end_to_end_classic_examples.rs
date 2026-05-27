@@ -72,8 +72,7 @@ fn classic_examples_end_to_end_sat_equivalence() {
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
         assert_eq!(
-            report.gate_count_before,
-            case.expected_before,
+            report.gate_count_before, case.expected_before,
             "unexpected pre-opt gate count for fixture {}",
             case.file_name
         );

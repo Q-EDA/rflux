@@ -73,21 +73,20 @@ fn quaigh_alignment_sequential_fixture_cases() {
 
     for case in cases {
         let path = fixture_path(case.file_name);
-        let mut netlist = read_ir_json(&path).expect("sequential fixture should load as valid rflux ir json");
+        let mut netlist =
+            read_ir_json(&path).expect("sequential fixture should load as valid rflux ir json");
         let baseline = netlist.clone();
         let mut compiler = Compiler::new();
 
         let report = compiler.optimize_boolean_network(&mut netlist, &BoolOptConfig::default());
 
         assert_eq!(
-            report.gate_count_before,
-            case.expected_before,
+            report.gate_count_before, case.expected_before,
             "unexpected pre-opt gate count for sequential fixture {}",
             case.file_name
         );
         assert_eq!(
-            report.gate_count_after,
-            case.expected_after,
+            report.gate_count_after, case.expected_after,
             "unexpected post-opt gate count for sequential fixture {}",
             case.file_name
         );
@@ -95,7 +94,9 @@ fn quaigh_alignment_sequential_fixture_cases() {
         let dffe_count = netlist
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Dff) && node.logic_op == Some(LogicOp::DffEnable))
+            .filter(|node| {
+                matches!(node.kind, NodeKind::Dff) && node.logic_op == Some(LogicOp::DffEnable)
+            })
             .count();
         let not_count = netlist
             .nodes()
@@ -119,32 +120,27 @@ fn quaigh_alignment_sequential_fixture_cases() {
             .count();
 
         assert_eq!(
-            dffe_count,
-            case.expected_dffe,
+            dffe_count, case.expected_dffe,
             "unexpected DffEnable count for sequential fixture {}",
             case.file_name
         );
         assert_eq!(
-            not_count,
-            case.expected_not,
+            not_count, case.expected_not,
             "unexpected Not count for sequential fixture {}",
             case.file_name
         );
         assert_eq!(
-            jtl_count,
-            case.expected_jtl,
+            jtl_count, case.expected_jtl,
             "unexpected Jtl count for sequential fixture {}",
             case.file_name
         );
         assert_eq!(
-            ptl_count,
-            case.expected_ptl,
+            ptl_count, case.expected_ptl,
             "unexpected Ptl count for sequential fixture {}",
             case.file_name
         );
         assert_eq!(
-            mux_count,
-            case.expected_mux,
+            mux_count, case.expected_mux,
             "unexpected Mux2 count for sequential fixture {}",
             case.file_name
         );

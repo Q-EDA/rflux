@@ -48,7 +48,18 @@ fn write_metrics_csv(
         file,
         "fixture,sat,vars,clauses,elapsed_ns,recursive_calls,decisions,backtracks,restarts"
     )?;
-    for (fixture, sat, vars, clauses, elapsed_ns, recursive_calls, decisions, backtracks, restarts) in rows {
+    for (
+        fixture,
+        sat,
+        vars,
+        clauses,
+        elapsed_ns,
+        recursive_calls,
+        decisions,
+        backtracks,
+        restarts,
+    ) in rows
+    {
         writeln!(
             file,
             "{fixture},{sat},{vars},{clauses},{elapsed_ns},{recursive_calls},{decisions},{backtracks},{restarts}"

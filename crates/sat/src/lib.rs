@@ -8,7 +8,11 @@ fn analyze_conflict(
     decision_levels: &Vec<usize>,
 ) -> LearnedClause {
     let learned_clause = vec![Lit::neg(trail.last().copied().unwrap_or(1))];
-    let backtrack_level = decision_levels.last().copied().unwrap_or(0).saturating_sub(1);
+    let backtrack_level = decision_levels
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(1);
     LearnedClause::new(learned_clause, backtrack_level)
 }
 
@@ -75,7 +79,11 @@ impl CnfFormula {
 
     pub fn to_dimacs(&self) -> String {
         let mut rendered = String::new();
-        rendered.push_str(&format!("p cnf {} {}\n", self.var_count, self.clauses.len()));
+        rendered.push_str(&format!(
+            "p cnf {} {}\n",
+            self.var_count,
+            self.clauses.len()
+        ));
         for clause in &self.clauses {
             for lit in clause {
                 let value = if lit.negated {
@@ -157,7 +165,11 @@ impl CnfFormula {
                         var_count: cnf.var_count,
                     });
                 }
-                pending_clause.push(if lit > 0 { Lit::pos(var) } else { Lit::neg(var) });
+                pending_clause.push(if lit > 0 {
+                    Lit::pos(var)
+                } else {
+                    Lit::neg(var)
+                });
             }
         }
 
@@ -233,7 +245,10 @@ pub struct LearnedClause {
 
 impl LearnedClause {
     pub fn new(clause: Vec<Lit>, backtrack_level: usize) -> Self {
-        Self { clause, backtrack_level }
+        Self {
+            clause,
+            backtrack_level,
+        }
     }
 }
 
@@ -319,7 +334,10 @@ impl IncrementalSolver {
                 })
                 .collect::<Vec<_>>();
 
-            if matches!(self.solve_with_assumptions(&candidate), SolveResult::Unsatisfiable) {
+            if matches!(
+                self.solve_with_assumptions(&candidate),
+                SolveResult::Unsatisfiable
+            ) {
                 core = candidate;
             } else {
                 index += 1;
@@ -347,7 +365,7 @@ pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
     let mut decision_budget = initial_decision_budget(&working_formula);
     let mut result = None::<SolveResult>;
 
-        for _ in 0..MAX_RESTARTS {
+    for _ in 0..MAX_RESTARTS {
         let mut values = vec![None; working_formula.var_count() + 1];
         let mut budget = Some(decision_budget);
         match dpll(
@@ -365,7 +383,7 @@ pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
                 result = Some(SolveResult::Unsatisfiable);
                 break;
             }
-                SearchOutcome::BudgetExhausted => {
+            SearchOutcome::BudgetExhausted => {
                 stats.restarts += 1;
                 decision_budget = decision_budget.saturating_mul(2);
             }
@@ -656,7 +674,10 @@ fn choose_unassigned_var(formula: &mut CnfFormula, values: &[Option<bool>]) -> O
 #[cfg(test)]
 fn unit_propagate(formula: &CnfFormula, values: &mut Vec<Option<bool>>) -> bool {
     for clause in &formula.clauses {
-        if clause.iter().all(|lit| lit.eval(values[lit.var]) == Some(false)) {
+        if clause
+            .iter()
+            .all(|lit| lit.eval(values[lit.var]) == Some(false))
+        {
             return false;
         }
     }
@@ -887,7 +908,10 @@ mod tests {
         assert!(metrics.stats.recursive_calls >= 1);
         assert!(metrics.stats.backtracks >= 1);
         assert!(
-            metrics.stats.decisions + metrics.stats.unit_assignments + metrics.stats.pure_literal_assignments >= 1
+            metrics.stats.decisions
+                + metrics.stats.unit_assignments
+                + metrics.stats.pure_literal_assignments
+                >= 1
         );
     }
 
@@ -947,7 +971,12 @@ mod tests {
         assert!(matches!(result, SolveResult::Satisfiable(_)));
         assert!(metrics.elapsed_ns > 0);
         assert!(metrics.stats.recursive_calls >= 1);
-        assert!(metrics.stats.decisions + metrics.stats.unit_assignments + metrics.stats.pure_literal_assignments >= 1);
+        assert!(
+            metrics.stats.decisions
+                + metrics.stats.unit_assignments
+                + metrics.stats.pure_literal_assignments
+                >= 1
+        );
     }
 
     proptest! {
@@ -1015,7 +1044,10 @@ mod tests {
 
         let (result, metrics) = solver.solve_with_assumptions_and_metrics(&[Lit::neg(2)]);
 
-        assert!(matches!(result, SolveResult::Satisfiable(_) | SolveResult::Unsatisfiable));
+        assert!(matches!(
+            result,
+            SolveResult::Satisfiable(_) | SolveResult::Unsatisfiable
+        ));
         assert!(metrics.elapsed_ns > 0);
         assert!(metrics.stats.recursive_calls >= 1);
     }

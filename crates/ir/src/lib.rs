@@ -89,10 +89,14 @@ impl<'de> Deserialize<'de> for Netlist {
         let mut driven_inputs = HashSet::new();
         for (from, to) in repr.edges {
             if edges.insert(from, to).is_some() {
-                return Err(D::Error::custom("duplicate source pin in serialized netlist"));
+                return Err(D::Error::custom(
+                    "duplicate source pin in serialized netlist",
+                ));
             }
             if !driven_inputs.insert(to) {
-                return Err(D::Error::custom("duplicate driven input pin in serialized netlist"));
+                return Err(D::Error::custom(
+                    "duplicate driven input pin in serialized netlist",
+                ));
             }
         }
 

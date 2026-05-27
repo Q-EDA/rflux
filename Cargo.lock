@@ -797,7 +797,9 @@ dependencies = [
  "rflux-sim",
  "rflux-synth",
  "rflux-tech",
+ "rflux-timing",
  "rflux-verify",
+ "serde",
  "serde_json",
 ]
 

@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+from . import (
+    DEFAULT_CLOCK_PERIOD_PS,
+    DEFAULT_INPUT_ARRIVAL_PS,
+    DEFAULT_MIN_HOLD_JTL_LENGTH_UM,
+    DEFAULT_SFQ_PHASE_COUNT,
+    DEFAULT_SFQ_PULSE_WINDOW_PS,
+)
+from ._types import (
+    AcBiasOptimizationReport,
+    AcBiasReport,
+    BalanceStrategy,
+    BlockedRegion,
+    CellLibraryEntry,
+    CellLibraryMetadata,
+    CellLibrarySummary,
+    from __future__ import annotations
+
+    from . import (
+        DEFAULT_CLOCK_PERIOD_PS,
+        DEFAULT_INPUT_ARRIVAL_PS,
+        DEFAULT_MIN_HOLD_JTL_LENGTH_UM,
+        DEFAULT_SFQ_PHASE_COUNT,
+        DEFAULT_SFQ_PULSE_WINDOW_PS,
+    )
+    from ._types import (
+        AcBiasOptimizationReport,
+        AcBiasReport,
+        BalanceStrategy,
+        BlockedRegion,
+        CellLibraryEntry,
+        CellLibraryMetadata,
+        CellLibrarySummary,
+        CompilePlan,
+        CompileReport,
+        CompoundCellCharacterizationReport,
+        ConnectionSpec,
+        FixedNodePlacement,
+        LayoutReport,
+        LibraryAwareAcBiasOptimizationReport,
+        LibraryAwareDesignOptimizationReport,
+        NodeTimingConstraint,
+        PinRef,
+        PinTimingConstraint,
+        SynthesisReport,
+    )
+
+
+    def compile(circuit, plan: CompilePlan | None = None): ...
+    def compile_plan_report(circuit, plan: CompilePlan) -> CompileReport: ...
+    def compile_plan(circuit, plan: CompilePlan): ...
+    def compile_netlist(circuit, plan: CompilePlan | None = None) -> SynthesisReport: ...
+    def compile_layout(circuit, plan: CompilePlan | None = None, fixed_nodes: list[FixedNodePlacement] | None = None, blocked_regions: list[BlockedRegion] | None = None, timing_constraints: list[NodeTimingConstraint] | None = None, pin_timing_constraints: list[PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, min_hold_jtl_length_um: float | None = None, prefer_ptl_from_length_um: float | None = None, detour_margin_um: float | None = None, characterized_library_json: str | None = None, characterized_library_entries: list[str] | None = None) -> LayoutReport: ...
+    def analyze_ac_bias(circuit, plan: CompilePlan | None = None, fixed_nodes: list[FixedNodePlacement] | None = None, blocked_regions: list[BlockedRegion] | None = None, timing_constraints: list[NodeTimingConstraint] | None = None, pin_timing_constraints: list[PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None) -> AcBiasReport: ...
+    def optimize_ac_bias(circuit, plan: CompilePlan | None = None, fixed_nodes: list[FixedNodePlacement] | None = None, blocked_regions: list[BlockedRegion] | None = None, timing_constraints: list[NodeTimingConstraint] | None = None, pin_timing_constraints: list[PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None) -> AcBiasOptimizationReport: ...
+    def characterize_compound_cell(circuit, plan: CompilePlan | None = None, fixed_nodes: list[FixedNodePlacement] | None = None, blocked_regions: list[BlockedRegion] | None = None, timing_constraints: list[NodeTimingConstraint] | None = None, pin_timing_constraints: list[PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, cell_name: str = "compound_cell", simulation_mode: str = "auto", external_command: str | None = None) -> CompoundCellCharacterizationReport: ...
+    def merge_characterized_library(serialized_entries: list[str], base_name: str = "py-minimal-pdk") -> str: ...
+    def optimize_ac_bias_with_characterized_library(circuit, characterized_library_entries: list[str], plan: CompilePlan | None = None, fixed_nodes: list[FixedNodePlacement] | None = None, blocked_regions: list[BlockedRegion] | None = None, timing_constraints: list[NodeTimingConstraint] | None = None, pin_timing_constraints: list[PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65) -> LibraryAwareAcBiasOptimizationReport: ...
+    def optimize_design_with_characterized_library(circuit, characterized_library_entries: list[str], plan: CompilePlan | None = None, fixed_nodes: list[FixedNodePlacement] | None = None, blocked_regions: list[BlockedRegion] | None = None, timing_constraints: list[NodeTimingConstraint] | None = None, pin_timing_constraints: list[PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65, cell_delay_sigma_ratio: float = 0.05, wire_delay_sigma_ratio: float = 0.05, global_cell_delay_sigma_ratio: float = 0.0, global_wire_delay_sigma_ratio: float = 0.0, clock_uncertainty_sigma_ps: float = 0.0, cross_domain_uncertainty_sigma_ps: float = 0.0, max_delay_cross_domain_uncertainty_sigma_ps: float = 0.0, multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0, sigma_multiplier: float = 3.0) -> LibraryAwareDesignOptimizationReport: ...
