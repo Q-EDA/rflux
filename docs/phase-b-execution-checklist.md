@@ -61,6 +61,16 @@ Required files:
   linux-baseline-status.json
 ```
 
+Optional automation (recommended):
+
+```bash
+uv run python python/scripts/check_phase_b_artifact_bundle.py \
+  --artifact-dir target/waveform-compare-linux \
+  --linux-status-json target/waveform-baseline-status/linux.local.json \
+  --json-output target/waveform-compare-linux/phase-b-artifact-check.json \
+  --require-ready
+```
+
 3. Promote Linux approved baseline (after reviewed green run)
 
 ```bash
