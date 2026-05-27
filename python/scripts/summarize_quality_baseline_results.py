@@ -215,6 +215,75 @@ def validate_summary_payload(payload: dict[str, object], thresholds: dict[str, d
     return errors
 
 
+def _summary_rank(summary: str) -> int:
+    normalized = summary.strip().upper()
+    if normalized == "PASS":
+        return 0
+    if normalized == "FAIL":
+        return 1
+    if normalized == "MISSING":
+        return 2
+    return 3
+
+
+def validate_no_regression(
+    payload: dict[str, object],
+    previous_payload: dict[str, object],
+    tolerance: float,
+) -> list[str]:
+    errors: list[str] = []
+
+    previous_map: dict[tuple[str, str], dict[str, object]] = {}
+    for suite in previous_payload.get("suites", []):
+        if not isinstance(suite, dict):
+            continue
+        suite_name = str(suite.get("suite"))
+        for metric in suite.get("metrics", []):
+            if not isinstance(metric, dict):
+                continue
+            previous_map[(suite_name, str(metric.get("metric")))] = metric
+
+    for suite in payload.get("suites", []):
+        if not isinstance(suite, dict):
+            continue
+        suite_name = str(suite.get("suite"))
+        for metric in suite.get("metrics", []):
+            if not isinstance(metric, dict):
+                continue
+            metric_name = str(metric.get("metric"))
+            previous_metric = previous_map.get((suite_name, metric_name))
+            if not isinstance(previous_metric, dict):
+                continue
+
+            current_status = str(metric.get("status", "PASS"))
+            previous_status = str(previous_metric.get("status", "PASS"))
+            if _summary_rank(current_status) > _summary_rank(previous_status):
+                errors.append(
+                    f"metric regression for {suite_name}/{metric_name}: status worsened {previous_status} -> {current_status}"
+                )
+
+            current_value = metric.get("value")
+            previous_value = previous_metric.get("value")
+            if current_value is None or previous_value is None:
+                continue
+
+            current_value_f = float(current_value)
+            previous_value_f = float(previous_value)
+            min_v = metric.get("min")
+            max_v = metric.get("max")
+
+            if max_v is not None and current_value_f > previous_value_f + tolerance:
+                errors.append(
+                    f"metric regression for {suite_name}/{metric_name}: value increased {current_value_f:.6e} from {previous_value_f:.6e} beyond tolerance {tolerance:.6e}"
+                )
+            if min_v is not None and current_value_f < previous_value_f - tolerance:
+                errors.append(
+                    f"metric regression for {suite_name}/{metric_name}: value decreased {current_value_f:.6e} from {previous_value_f:.6e} beyond tolerance {tolerance:.6e}"
+                )
+
+    return errors
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize timing/verify/sim quality baseline results.")
     parser.add_argument(
@@ -227,6 +296,8 @@ def main() -> None:
     parser.add_argument("--summary-md", type=Path, required=True)
     parser.add_argument("--previous-summary-json", type=Path, default=None)
     parser.add_argument("--validate-pass", action="store_true")
+    parser.add_argument("--validate-no-regression", action="store_true")
+    parser.add_argument("--regression-tolerance", type=float, default=0.0)
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -257,6 +328,13 @@ def main() -> None:
 
     if args.validate_pass and int(payload.get("failures", 0)) > 0:
         raise SystemExit(f"quality baseline check failed with {payload['failures']} failure(s)")
+
+    if args.validate_no_regression:
+        if previous_summary is None:
+            raise SystemExit("--validate-no-regression requires --previous-summary-json")
+        regression_errors = validate_no_regression(payload, previous_summary, args.regression_tolerance)
+        if regression_errors:
+            raise SystemExit("\n".join(regression_errors))
 
 
 if __name__ == "__main__":

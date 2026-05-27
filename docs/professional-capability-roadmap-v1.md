@@ -97,8 +97,13 @@
 当前进展（本仓库现状）：
 
 - 已新增 `python/scripts/summarize_quality_baseline_results.py`，用于按阈值清单汇总 timing / verify / sim 指标并输出 JSON + Markdown 评审摘要。
-- 已新增阈值清单 `python/tests/benchmarks/week3/quality_thresholds.json` 和单测 `python/tests/test_quality_baseline_summary_utils.py`。
-- 主 CI 已新增显式 smoke anchor：`uv run pytest python/tests/test_quality_baseline_summary_utils.py -q`。
+- 已新增阈值清单 `python/tests/benchmarks/week3/quality_thresholds.json`、黄金样例 `python/tests/benchmarks/week3/quality_results.golden.json`，以及单测 `python/tests/test_quality_baseline_summary_utils.py` / `python/tests/test_quality_baseline_summary_runner.py`。
+- 已新增 `python/tests/benchmarks/week3/quality_summary.approved-baseline.json`，用于 `--previous-summary-json` no-regression 校验。
+- 主 CI 已新增显式 smoke anchor：
+  - `uv run pytest python/tests/test_quality_baseline_summary_utils.py -q`
+  - `uv run pytest python/tests/test_quality_baseline_summary_runner.py -q`
+  - `uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.json --summary-md target/week3-quality/quality_summary.current.md --validate-pass`
+  - `uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.with-history.json --summary-md target/week3-quality/quality_summary.current.with-history.md --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0`
 
 ### Week 4：诊断与支持闭环（P2）
 
