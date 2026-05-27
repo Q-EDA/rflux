@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "kind": "quality-thresholds",
+  "suites": {
+    "timing": {
+      "worst_setup_slack_ps": {
+        "min": 0.0,
+        "rationale": "Setup closure should remain non-negative on the golden timing sample."
+      },
+      "worst_hold_slack_ps": {
+        "min": 0.0,
+        "rationale": "Hold closure should remain non-negative on the golden timing sample."
+      }
+    },
+    "verify": {
+      "equivalence_pass_rate": {
+        "min": 1.0,
+        "rationale": "Golden verify samples should stay fully equivalent."
+      },
+      "counterexample_count": {
+        "max": 0.0,
+        "rationale": "No unexpected counterexample is allowed in golden verify runs."
+      }
+    },
+    "sim": {
+      "worst_max_abs_v": {
+        "max": 0.002,
+        "rationale": "Golden waveform drift should stay below 2mV."
+      },
+      "failing_deck_count": {
+        "max": 0.0,
+        "rationale": "Golden simulation decks should not produce threshold failures."
+      }
+    }
+  }
+}

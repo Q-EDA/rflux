@@ -131,6 +131,10 @@ jobs:
         run: |
           uv run python python/scripts/export_report_schema_surface.py --check
 
+      - name: Quality baseline summary helper smoke
+        run: |
+          uv run pytest python/tests/test_quality_baseline_summary_utils.py -q
+
       - name: Upload SAT and synth metric artifacts
         uses: actions/upload-artifact@v4
         with:

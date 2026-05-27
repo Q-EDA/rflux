@@ -94,6 +94,12 @@
 - `docs/sim-release-readiness-checklist.md`
 - 相关 pytest/cargo 回归集合
 
+当前进展（本仓库现状）：
+
+- 已新增 `python/scripts/summarize_quality_baseline_results.py`，用于按阈值清单汇总 timing / verify / sim 指标并输出 JSON + Markdown 评审摘要。
+- 已新增阈值清单 `python/tests/benchmarks/week3/quality_thresholds.json` 和单测 `python/tests/test_quality_baseline_summary_utils.py`。
+- 主 CI 已新增显式 smoke anchor：`uv run pytest python/tests/test_quality_baseline_summary_utils.py -q`。
+
 ### Week 4：诊断与支持闭环（P2）
 
 交付：
