@@ -94,6 +94,12 @@ Recommended no-regression command:
 uv run python python/scripts/run_waveform_compare_manifest.py --josim-command <josim-command> --result-dir <result-dir> --previous-summary-json <approved-baseline.json> --validate-no-regression --regression-tolerance-v <tolerance>
 ```
 
+Recommended baseline promotion command (after reviewed green run):
+
+```bash
+uv run python python/scripts/promote_waveform_approved_baseline.py --platform <platform> --candidate-json target/waveform-compare/waveform_compare_summary.candidate-baseline.json --candidate-md target/waveform-compare/waveform_compare_summary.candidate-baseline.md
+```
+
 Decision record:
 
 ```md

@@ -67,6 +67,12 @@
 - 对 phase-6 关键 deck 类别（含 JJ/CPR/传输线/互感）建立稳定阈值与漂移解释模板。
 - 将 external-warning 空合同场景纳入持续检查，避免“空即忽略”。
 
+当前准备：
+
+- 已新增 baseline 提升脚本：`python/scripts/promote_waveform_approved_baseline.py`。
+- 已新增脚本测试并接入 CI smoke：`python/tests/test_promote_waveform_approved_baseline.py`。
+- 已在仿真发布评审清单中加入基线提升命令锚点。
+
 退出条件：
 
 - Windows 与 Linux waveform 门都能稳定运行并产出对称评审包。

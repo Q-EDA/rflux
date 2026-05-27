@@ -89,6 +89,10 @@ jobs:
         run: |
           uv run pytest python/tests/test_waveform_compare_manifest_runner.py -q
 
+      - name: Waveform baseline promotion helper smoke
+        run: |
+          uv run pytest python/tests/test_promote_waveform_approved_baseline.py -q
+
       - name: External warning helper smoke
         run: |
           uv run pytest python/tests/test_external_warning_manifest_runner.py -q
