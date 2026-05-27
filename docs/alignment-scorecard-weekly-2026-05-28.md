@@ -71,3 +71,5 @@ Action 3: Require scorecard item IDs in PR template and refresh this report ever
 - Scorecard: `docs/alignment-scorecard.md`
 - Full plan: `docs/full-alignment-plan.md`
 - PR template: `.github/PULL_REQUEST_TEMPLATE.md`
+- Phase B checklist: `docs/phase-b-execution-checklist.md`
+- Phase B run record: `docs/phase-b-run-record-2026-05-28.md`
