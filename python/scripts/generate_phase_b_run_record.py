@@ -58,6 +58,32 @@ def _readiness_fields(linux_status: dict[str, object] | None) -> tuple[str, str]
     return (readiness_result, reason)
 
 
+def _bool_to_result(value: object) -> str:
+    if value is True:
+        return "pass"
+    if value is False:
+        return "fail"
+    return "pending"
+
+
+def _phase_b_precheck_fields(phase_b_check: dict[str, object] | None) -> tuple[str, str, str, str]:
+    if not isinstance(phase_b_check, dict):
+        return ("pending", "pending", "pending", "pending")
+
+    artifact_bundle_ready = _bool_to_result(phase_b_check.get("artifact_bundle_ready"))
+    candidate_promotable = _bool_to_result(phase_b_check.get("candidate_promotable"))
+    promotion_ready = _bool_to_result(phase_b_check.get("phase_b_promotion_ready"))
+
+    missing_files_raw = phase_b_check.get("missing_files")
+    if isinstance(missing_files_raw, list):
+        missing = [str(item) for item in missing_files_raw if str(item).strip()]
+        missing_files = "none" if not missing else ", ".join(missing)
+    else:
+        missing_files = "pending"
+
+    return (artifact_bundle_ready, candidate_promotable, promotion_ready, missing_files)
+
+
 def build_phase_b_run_record(
     *,
     record_date: str,
@@ -66,6 +92,7 @@ def build_phase_b_run_record(
     workflow_run_url: str,
     artifact_dir: Path,
     linux_status_json: Path,
+    phase_b_artifact_check_json: Path,
     output_path: Path,
 ) -> str:
     manifest_path = artifact_dir / "manifest.json"
@@ -74,11 +101,13 @@ def build_phase_b_run_record(
     candidate_md_path = artifact_dir / "waveform_compare_summary.candidate-baseline.md"
     validation_json_path = artifact_dir / "waveform_compare_summary.validation.json"
     linux_status_path = linux_status_json
+    phase_b_artifact_check_path = phase_b_artifact_check_json
 
     manifest = _load_json_if_exists(manifest_path)
     current_payload = _load_json_if_exists(current_json_path)
     validation_payload = _load_json_if_exists(validation_json_path)
     linux_status = _load_json_if_exists(linux_status_path)
+    phase_b_artifact_check = _load_json_if_exists(phase_b_artifact_check_path)
 
     josim_command = ""
     validate_no_regression = "pending"
@@ -96,8 +125,13 @@ def build_phase_b_run_record(
     fallback_notice = "yes" if no_regression_path == "fallback" else ("no" if no_regression_path == "strict" else "pending")
 
     readiness_result, readiness_reason = _readiness_fields(linux_status)
+    artifact_bundle_result, candidate_promotable_result, promotion_ready_result, missing_files = _phase_b_precheck_fields(
+        phase_b_artifact_check
+    )
 
     j04_status = "PASS" if gate_result == "pass" and readiness_result == "pass" else "FAIL"
+    if promotion_ready_result == "fail":
+        j04_status = "FAIL"
 
     content = f"""# Phase B Run Record - {record_date}
 
@@ -131,6 +165,7 @@ candidate baseline json: {_path_or_pending(candidate_json_path)}
 validation json: {_path_or_pending(validation_json_path)}
 manifest json: {_path_or_pending(manifest_path)}
 linux baseline status json: {_path_or_pending(linux_status_path)}
+phase-b artifact check json: {_path_or_pending(phase_b_artifact_check_path)}
 ```
 
 ## 4. Gate outcome
@@ -146,6 +181,14 @@ Failure reason (if any):
 
 ```md
 Promotion command executed: no
+Precheck command:
+uv run python python/scripts/check_phase_b_artifact_bundle.py --artifact-dir target/waveform-compare-linux --linux-status-json target/waveform-baseline-status/linux.local.json --json-output target/waveform-compare-linux/phase-b-artifact-check.json --require-ready
+
+precheck result: {promotion_ready_result}
+artifact bundle ready: {artifact_bundle_result}
+candidate promotable: {candidate_promotable_result}
+missing files: {missing_files}
+
 Command:
 uv run python python/scripts/promote_waveform_approved_baseline.py --platform linux --candidate-json {_path_or_pending(candidate_json_path)} --candidate-md {_path_or_pending(candidate_md_path)}
 
@@ -212,6 +255,12 @@ def main() -> None:
         help="Path to Linux baseline status JSON used for readiness fields.",
     )
     parser.add_argument(
+        "--phase-b-artifact-check-json",
+        type=Path,
+        default=Path("target/waveform-compare-linux/phase-b-artifact-check.json"),
+        help="Path to Phase B artifact checker JSON used for promotion precheck fields.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -223,6 +272,11 @@ def main() -> None:
     artifact_dir = args.artifact_dir if args.artifact_dir.is_absolute() else (repo_root / args.artifact_dir)
     linux_status_json = (
         args.linux_status_json if args.linux_status_json.is_absolute() else (repo_root / args.linux_status_json)
+    )
+    phase_b_artifact_check_json = (
+        args.phase_b_artifact_check_json
+        if args.phase_b_artifact_check_json.is_absolute()
+        else (repo_root / args.phase_b_artifact_check_json)
     )
     output_path = args.output
     if output_path is None:
@@ -237,6 +291,7 @@ def main() -> None:
         workflow_run_url=args.workflow_run_url,
         artifact_dir=artifact_dir,
         linux_status_json=linux_status_json,
+        phase_b_artifact_check_json=phase_b_artifact_check_json,
         output_path=output_path,
     )
 

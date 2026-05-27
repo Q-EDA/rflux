@@ -30,6 +30,7 @@ candidate baseline json:
 validation json:
 manifest json:
 linux baseline status json:
+phase-b artifact check json:
 ```
 
 ## 4. Gate outcome
@@ -45,6 +46,14 @@ Failure reason (if any):
 
 ```md
 Promotion command executed: yes / no
+Precheck command:
+uv run python python/scripts/check_phase_b_artifact_bundle.py --artifact-dir target/waveform-compare-linux --linux-status-json target/waveform-baseline-status/linux.local.json --json-output target/waveform-compare-linux/phase-b-artifact-check.json --require-ready
+
+precheck result: pass / fail
+artifact bundle ready: pass / fail
+candidate promotable: pass / fail
+missing files:
+
 Command:
 promoted linux baseline json path:
 promoted linux baseline md path:
