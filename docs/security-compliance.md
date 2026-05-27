@@ -29,6 +29,8 @@
 
 当前合规 artifact 生成已集中到 `python/scripts/prepare_security_compliance_artifacts.py`，由 optional workflow 统一产出 inventory、审查输入、副本文件和 manifest/README，而不再在 workflow 里散落多段 shell 重定向。
 
+对外部仿真失败后保留的 `rflux-ext-*` 运行目录，当前默认保留 7 天用于复审；复审完成后应先用 `python/scripts/cleanup_external_run_artifacts.py` 做 dry-run，再在确认无须保留时加 `--delete` 清理过期目录。
+
 ### 2.3 外部命令调用边界
 
 当前仓库存在外部命令执行面，主要在仿真路径：
