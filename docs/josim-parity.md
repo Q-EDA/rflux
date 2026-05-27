@@ -139,6 +139,13 @@ uv run python python/scripts/summarize_waveform_compare_results.py --result-dir 
 uv run python python/scripts/summarize_waveform_compare_results.py --result-dir python/tests/benchmarks/phase6 --previous-summary-json path/to/previous_waveform_compare_summary.json --markdown-output python/tests/benchmarks/phase6/waveform_compare_summary_with_diff.md --json-output python/tests/benchmarks/phase6/waveform_compare_summary_with_diff.json
 ```
 
+Linux gate path (workflow_dispatch):
+
+1. Run workflow `CI` with input `run_waveform_compare_linux=true`.
+2. Provide `josim_command_linux` pointing to a Linux-available JoSIM binary/command.
+3. Optional: provide `previous_summary_json_linux` and set `validate_no_regression_linux=true` after Linux approved baseline is promoted.
+4. Review artifact `waveform-compare-results-linux` and, for green runs, promote `waveform_compare_summary.candidate-baseline.{json,md}` via `python/scripts/promote_waveform_approved_baseline.py --platform linux`.
+
 The summary helper path also has an explicit CI smoke anchor now instead of relying only on the broad Python suite:
 
 - `uv run pytest python/tests/test_waveform_compare_summary_utils.py -q`

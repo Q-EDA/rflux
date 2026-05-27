@@ -72,6 +72,7 @@
 - 已新增 baseline 提升脚本：`python/scripts/promote_waveform_approved_baseline.py`。
 - 已新增脚本测试并接入 CI smoke：`python/tests/test_promote_waveform_approved_baseline.py`。
 - 已在仿真发布评审清单中加入基线提升命令锚点。
+- 已新增可手动触发的 Linux waveform gate：`waveform-compare-gate-linux-optional`（workflow_dispatch）。
 
 退出条件：
 

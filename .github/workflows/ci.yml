@@ -15,6 +15,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_waveform_compare_linux:
+        description: "Run optional Linux waveform compare gate"
+        required: false
+        default: false
+        type: boolean
       josim_command:
         description: "Optional override for the JoSIM command/path used by the Windows waveform gate"
         required: false
@@ -37,6 +42,26 @@ on:
         type: boolean
       regression_tolerance_v:
         description: "Allowed positive worst_max_abs_v drift during no-regression validation"
+        required: false
+        default: "0.0"
+        type: string
+      josim_command_linux:
+        description: "Required JoSIM command/path for the optional Linux waveform gate"
+        required: false
+        default: ""
+        type: string
+      previous_summary_json_linux:
+        description: "Optional repo-relative approved baseline summary JSON for Linux waveform history diff"
+        required: false
+        default: ""
+        type: string
+      validate_no_regression_linux:
+        description: "Fail Linux waveform gate when current summary regresses relative to baseline"
+        required: false
+        default: false
+        type: boolean
+      regression_tolerance_v_linux:
+        description: "Allowed positive worst_max_abs_v drift for Linux waveform no-regression checks"
         required: false
         default: "0.0"
         type: string
@@ -353,6 +378,112 @@ jobs:
             target/external-warning-review/selected_external_warning_contracts.json
             target/external-warning-review/manifest.json
             target/external-warning-review/README.txt
+            python/tests/benchmarks/phase6/waveform_thresholds.json
+
+  waveform-compare-gate-linux-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_waveform_compare_linux }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Resolve Linux waveform gate settings
+        shell: bash
+        run: |
+          if [ -z "${{ inputs.josim_command_linux }}" ]; then
+            echo "error=josim_command_linux is required for Linux waveform gate" >&2
+            exit 1
+          fi
+          echo "RFLOW_JOSIM_COMMAND=${{ inputs.josim_command_linux }}" >> "$GITHUB_ENV"
+          echo "RFLOW_PREVIOUS_SUMMARY_JSON=${{ inputs.previous_summary_json_linux }}" >> "$GITHUB_ENV"
+          echo "RFLOW_BASELINE_PLATFORM=linux" >> "$GITHUB_ENV"
+          echo "RFLOW_VALIDATE_NO_REGRESSION=${{ inputs.validate_no_regression_linux }}" >> "$GITHUB_ENV"
+          echo "RFLOW_REGRESSION_TOLERANCE_V=${{ inputs.regression_tolerance_v_linux }}" >> "$GITHUB_ENV"
+
+      - name: Build Python extension
+        run: uv run maturin develop -m crates/py/Cargo.toml
+
+      - name: Run Linux external waveform compare manifest
+        shell: bash
+        run: |
+          compare_args=(
+            "python/scripts/run_waveform_compare_manifest.py"
+            "--josim-command" "$RFLOW_JOSIM_COMMAND"
+            "--result-dir" "target/waveform-compare-linux/results"
+            "--baseline-platform" "$RFLOW_BASELINE_PLATFORM"
+            "--regression-tolerance-v" "$RFLOW_REGRESSION_TOLERANCE_V"
+            "--validate-pass"
+          )
+          if [ -n "$RFLOW_PREVIOUS_SUMMARY_JSON" ]; then
+            compare_args+=("--previous-summary-json" "$RFLOW_PREVIOUS_SUMMARY_JSON")
+          fi
+          if [ "$RFLOW_VALIDATE_NO_REGRESSION" = "true" ]; then
+            compare_args+=("--validate-no-regression")
+          fi
+          uv run python "${compare_args[@]}"
+
+      - name: Run Linux external warning manifest
+        shell: bash
+        run: |
+          uv run python python/scripts/run_external_warning_manifest.py --josim-command "$RFLOW_JOSIM_COMMAND" --result-dir target/external-warning-manifest-linux --validate-pass
+
+      - name: Prepare Linux waveform compare review artifacts
+        shell: bash
+        run: |
+          artifact_args=(
+            "python/scripts/prepare_waveform_compare_artifacts.py"
+            "--thresholds" "python/tests/benchmarks/phase6/waveform_thresholds.json"
+            "--benchmark-dir" "python/tests/benchmarks/phase6"
+            "--result-dir" "target/waveform-compare-linux/results"
+            "--artifact-dir" "target/waveform-compare-linux"
+            "--baseline-platform" "$RFLOW_BASELINE_PLATFORM"
+            "--regression-tolerance-v" "$RFLOW_REGRESSION_TOLERANCE_V"
+            "--josim-command" "$RFLOW_JOSIM_COMMAND"
+            "--github-workflow" "${{ github.workflow }}"
+            "--github-job" "waveform-compare-gate-linux-optional"
+            "--github-event-name" "${{ github.event_name }}"
+            "--github-run-id" "${{ github.run_id }}"
+            "--github-run-attempt" "${{ github.run_attempt }}"
+            "--github-sha" "${{ github.sha }}"
+            "--github-ref-name" "${{ github.ref_name }}"
+          )
+          if [ -n "$RFLOW_PREVIOUS_SUMMARY_JSON" ]; then
+            artifact_args+=("--previous-summary-json" "$RFLOW_PREVIOUS_SUMMARY_JSON")
+          fi
+          if [ "$RFLOW_VALIDATE_NO_REGRESSION" = "true" ]; then
+            artifact_args+=("--validate-no-regression")
+          fi
+          uv run python "${artifact_args[@]}"
+
+      - name: Prepare Linux external warning review artifacts
+        shell: bash
+        run: |
+          uv run python python/scripts/prepare_external_warning_artifacts.py --result-dir target/external-warning-manifest-linux --artifact-dir target/external-warning-review-linux --josim-command "$RFLOW_JOSIM_COMMAND" --github-workflow "${{ github.workflow }}" --github-job "waveform-compare-gate-linux-optional" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload Linux waveform compare artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveform-compare-results-linux
+          if-no-files-found: error
+          path: |
+            target/waveform-compare-linux/results/*.compare.json
+            target/waveform-compare-linux/waveform_compare_summary.current.md
+            target/waveform-compare-linux/waveform_compare_summary.current.json
+            target/waveform-compare-linux/waveform_compare_summary.approved-baseline.json
+            target/waveform-compare-linux/waveform_compare_summary.candidate-baseline.md
+            target/waveform-compare-linux/waveform_compare_summary.candidate-baseline.json
+            target/waveform-compare-linux/waveform_compare_summary.validation.json
+            target/waveform-compare-linux/manifest.json
+            target/waveform-compare-linux/README.txt
+            target/external-warning-review-linux/*.warning.json
+            target/external-warning-review-linux/external_warning_summary.current.md
+            target/external-warning-review-linux/external_warning_summary.current.json
+            target/external-warning-review-linux/selected_external_warning_contracts.json
+            target/external-warning-review-linux/manifest.json
+            target/external-warning-review-linux/README.txt
             python/tests/benchmarks/phase6/waveform_thresholds.json
 
   security-compliance-optional:
