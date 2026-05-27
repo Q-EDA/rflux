@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import stat
+import inspect
 from pathlib import Path
 
 import pytest
@@ -41,10 +42,68 @@ def test_core_version_callable():
     assert len(version) > 0
 
 
+def test_core_available_probe_and_public_error_types():
+    assert isinstance(rflux.core_available(), bool)
+    assert issubclass(rflux.RfluxCoreUnavailableError, RuntimeError)
+    assert issubclass(rflux.RfluxCoreUnavailableError, rflux.RfluxError)
+    assert "auto" in rflux.SIMULATION_MODES
+
+
+def test_core_status_reports_extension_diagnostics():
+    status = rflux.core_status()
+
+    assert isinstance(status, rflux.CoreStatus)
+    assert status.available is rflux.core_available()
+    assert status.version == rflux.core_version()
+    if status.available:
+        assert status.extension_path is not None
+        assert status.import_error is None
+
+
+def test_public_facades_have_docstrings_and_typed_marker():
+    public_functions = [
+        name
+        for name in rflux.__all__
+        if inspect.isfunction(getattr(rflux, name))
+    ]
+
+    assert public_functions
+    assert not [
+        name
+        for name in public_functions
+        if not inspect.getdoc(getattr(rflux, name))
+    ]
+    assert Path(rflux.__file__).with_name("py.typed").exists()
+    assert "simulate_text" in rflux.__all__
+    assert "simulate_file" in rflux.__all__
+    assert "SimulationReport" in rflux.__all__
+
+
 def test_compile_facade_returns_circuit():
     circuit = rflux.Circuit("demo")
-    with pytest.raises(NotImplementedError, match="experimental placeholder"):
-        rflux.compile(circuit)
+    compiled = rflux.compile(circuit)
+    assert compiled is circuit
+
+
+def test_compile_facade_accepts_plan_objects():
+    circuit = rflux.Circuit("demo")
+    source = circuit.add_node("port", "a")
+    sink = circuit.add_node("dff", "sink")
+
+    compiled = rflux.compile(
+        circuit,
+        rflux.CompilePlan(
+            connections=[
+                rflux.ConnectionSpec(
+                    from_pin=rflux.PinRef(source, 0),
+                    to_pin=rflux.PinRef(sink, 0),
+                )
+            ]
+        ),
+    )
+
+    assert compiled is circuit
+    assert circuit.edge_count() == 1
 
 
 def test_compile_plan_report_requires_compiled_extension(monkeypatch):
@@ -53,7 +112,7 @@ def test_compile_plan_report_requires_compiled_extension(monkeypatch):
 
     monkeypatch.setattr(rflux, "_core_compile_plan", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.compile_plan_report(circuit, plan)
 
 
@@ -63,15 +122,53 @@ def test_compile_netlist_requires_compiled_extension(monkeypatch):
     monkeypatch.setattr(rflux, "_core_compile_plan", None)
     monkeypatch.setattr(rflux, "_core_compile_netlist", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.compile_netlist(circuit)
 
 
 def test_read_bench_text_requires_compiled_extension(monkeypatch):
     monkeypatch.setattr(rflux, "_core_read_bench_text", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.read_bench_text("INPUT(a)\nOUTPUT(y)\ny = BUF(a)\n")
+
+
+def test_pdk_requires_compiled_extension(monkeypatch):
+    monkeypatch.setattr(rflux, "_CorePdk", None)
+
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"Pdk\.minimal\(\.\.\.\) requires the compiled rflux\._core extension"):
+        rflux.Pdk.minimal()
+
+
+def test_pdk_repr_and_constructor_validation():
+    pdk = rflux.Pdk.minimal("demo-pdk")
+
+    assert repr(pdk).startswith("Pdk(name='demo-pdk'")
+    assert "cell_library=" in repr(pdk)
+    with pytest.raises(ValueError, match="must not be None"):
+        rflux.Pdk(None)
+
+
+def test_simulate_text_requires_compiled_extension(monkeypatch):
+    monkeypatch.setattr(rflux, "_core_simulate_text", None)
+
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"simulate_text\(\.\.\.\) requires the compiled rflux\._core extension"):
+        rflux.simulate_text(".tran 1p 2p\n")
+
+
+def test_simulation_mode_validation_lists_allowed_modes():
+    with pytest.raises(ValueError, match=r"expected one of: auto, event_only, external_josim, internal_transient"):
+        rflux.simulate_text(".tran 1p 2p\n", simulation_mode="mystery")
+
+
+def test_simulate_file_accepts_path_objects(tmp_path):
+    deck = tmp_path / "smoke.cir"
+    deck.write_text(".tran 1p 2p\n", encoding="utf-8")
+
+    report = rflux.simulate_file(deck)
+
+    assert isinstance(report, rflux.SimulationReport)
+    assert report.backend == "event_only"
 
 
 def test_compile_layout_requires_compiled_extension(monkeypatch):
@@ -79,7 +176,7 @@ def test_compile_layout_requires_compiled_extension(monkeypatch):
 
     monkeypatch.setattr(rflux, "_core_compile_layout", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.compile_layout(circuit)
 
 
@@ -88,7 +185,7 @@ def test_analyze_timing_requires_compiled_extension(monkeypatch):
 
     monkeypatch.setattr(rflux, "_core_analyze_timing", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.analyze_timing(circuit)
 
 
@@ -97,7 +194,7 @@ def test_verify_layout_requires_compiled_extension(monkeypatch):
 
     monkeypatch.setattr(rflux, "_core_verify_layout", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.verify_layout(circuit)
 
 
@@ -106,8 +203,56 @@ def test_analyze_timing_statistical_requires_compiled_extension(monkeypatch):
 
     monkeypatch.setattr(rflux, "_core_analyze_timing_statistical", None)
 
-    with pytest.raises(RuntimeError, match=r"requires the compiled rflux\._core extension"):
+    with pytest.raises(rflux.RfluxCoreUnavailableError, match=r"requires the compiled rflux\._core extension"):
         rflux.analyze_timing_statistical(circuit)
+
+
+@pytest.mark.parametrize(
+    ("binding_name", "api_name", "call"),
+    [
+        ("_core_analyze_ac_bias", "analyze_ac_bias", lambda circuit: rflux.analyze_ac_bias(circuit)),
+        ("_core_optimize_ac_bias", "optimize_ac_bias", lambda circuit: rflux.optimize_ac_bias(circuit)),
+        (
+            "_core_characterize_compound_cell",
+            "characterize_compound_cell",
+            lambda circuit: rflux.characterize_compound_cell(circuit),
+        ),
+        (
+            "_core_analyze_advanced_constraints",
+            "analyze_advanced_constraints",
+            lambda circuit: rflux.analyze_advanced_constraints(circuit),
+        ),
+        (
+            "_core_optimize_ac_bias_with_characterized_library",
+            "optimize_ac_bias_with_characterized_library",
+            lambda circuit: rflux.optimize_ac_bias_with_characterized_library(circuit, []),
+        ),
+        (
+            "_core_optimize_design_with_characterized_library",
+            "optimize_design_with_characterized_library",
+            lambda circuit: rflux.optimize_design_with_characterized_library(circuit, []),
+        ),
+    ],
+)
+def test_advanced_facades_require_matching_core_binding(monkeypatch, binding_name, api_name, call):
+    circuit = rflux.Circuit("demo")
+    monkeypatch.setattr(rflux, binding_name, None)
+
+    with pytest.raises(
+        rflux.RfluxCoreUnavailableError,
+        match=rf"{api_name}\(\.\.\.\) requires the compiled rflux\._core extension",
+    ):
+        call(circuit)
+
+
+def test_merge_characterized_library_requires_core_binding(monkeypatch):
+    monkeypatch.setattr(rflux, "_core_merge_characterized_library", None)
+
+    with pytest.raises(
+        rflux.RfluxCoreUnavailableError,
+        match=r"merge_characterized_library\(\.\.\.\) requires the compiled rflux\._core extension",
+    ):
+        rflux.merge_characterized_library([])
 
 
 def test_compile_plan_facade_accepts_plan_objects():
@@ -171,6 +316,98 @@ def test_compile_plan_report_returns_counts():
     report = rflux.compile_plan_report(circuit, plan)
     assert report.connections_applied == 2
     assert report.splitters_inserted == 1
+
+
+def test_pdk_cell_library_entries_expose_effective_timing():
+    pdk = rflux.Pdk.minimal("library-api")
+
+    entries = pdk.cell_library_entries()
+    by_name = {entry.name: entry for entry in entries}
+    gate = by_name["sfq_gate"]
+
+    assert pdk.cell_library_name == "minimal-sfq"
+    assert pdk.cell_library_version == "0.1.0"
+    assert pdk.cell_library_source == "rflux-minimal"
+    assert pdk.cell_library_metadata() == rflux.CellLibraryMetadata(
+        name="minimal-sfq",
+        version="0.1.0",
+        source="rflux-minimal",
+    )
+    assert pdk.cell_library_kinds() == [
+        "generic_gate",
+        "macro",
+        "splitter",
+        "dff",
+        "jtl",
+        "ptl",
+        "port",
+    ]
+    summary = pdk.cell_library_summary()
+    assert isinstance(summary, rflux.CellLibrarySummary)
+    assert summary.cell_count == 7
+    assert summary.kind_count == 7
+    assert summary.kind_counts["generic_gate"] == 1
+    assert summary.kind_counts["macro"] == 1
+    assert summary.named_timing_count == 0
+    assert summary.kind_timing_count == 7
+    assert summary.missing_timing_count == 0
+    assert summary.characterized_cell_count == 0
+    assert summary.named_timing_cells == []
+    assert summary.missing_timing_cells == []
+    assert summary.characterized_cells == []
+    assert len(entries) >= 7
+    assert isinstance(gate, rflux.CellLibraryEntry)
+    assert gate.kind == "generic_gate"
+    assert gate.timing_source == "kind"
+    assert gate.intrinsic_delay_ps == 8.0
+    assert not gate.has_characterization_metadata
+    assert pdk.cell_library_entry("sfq_gate") == gate
+    assert pdk.cell_library_entry("missing") is None
+    assert [entry.name for entry in pdk.cell_library_entries_by_kind("macro")] == ["sfq_macro"]
+    assert [entry.name for entry in pdk.cell_library_entries_by_kind("Macro")] == ["sfq_macro"]
+
+
+def test_pdk_cell_library_entries_reflect_characterized_cells():
+    pdk = rflux.Pdk.minimal("library-api").merge_characterized_library_json(
+        json.dumps(
+            {
+                "cell": {
+                    "name": "compound_buf",
+                    "kind": "Macro",
+                    "area_um2": 52.0,
+                    "pipeline_stages": 2,
+                },
+                "timing": {
+                    "kind": "Macro",
+                    "intrinsic_delay_ps": 17.5,
+                    "setup_ps": 8.5,
+                    "hold_ps": 5.5,
+                },
+                "metadata": {
+                    "waveform_path": "compound.raw",
+                    "simulated_delay_ps": 18.0,
+                    "delay_calibration_sigma_ps": 0.5,
+                },
+            }
+        )
+    )
+
+    entry = next(entry for entry in pdk.cell_library_entries() if entry.name == "compound_buf")
+
+    assert entry.kind == "macro"
+    assert entry.area_um2 == 52.0
+    assert entry.pipeline_stages == 2
+    assert entry.intrinsic_delay_ps == 17.5
+    assert entry.timing_source == "named"
+    assert entry.has_characterization_metadata
+    summary = pdk.cell_library_summary()
+    assert summary.kind_counts["macro"] == 2
+    assert summary.named_timing_count == 1
+    assert summary.characterized_cell_count == 1
+    assert summary.missing_timing_count == 0
+    assert summary.named_timing_cells == ["compound_buf"]
+    assert summary.characterized_cells == ["compound_buf"]
+    assert summary.missing_timing_cells == []
 
 
 def test_compile_plan_report_tracks_level_balancing():
@@ -304,6 +541,13 @@ def test_compile_layout_returns_physical_summary():
     assert report.analyzed_timing_arcs == 2
     assert report.critical_path_delay_ps > 0.0
     assert report.worst_setup_slack_ps <= 120.0
+    assert isinstance(report.timing_closure, rflux.TimingClosureSummary)
+    assert report.timing_closure.status == "closed"
+    assert report.timing_closure.closed is True
+    assert isinstance(report.timing_closure_loop, rflux.TimingClosureLoopReport)
+    assert report.timing_closure_loop.status == "closed"
+    assert report.timing_closure_loop.hold_fix_applied is report.hold_fix_applied
+    assert report.timing_closure_loop.final_hold_violations == report.final_hold_violations
     assert report.initial_hold_violations >= report.final_hold_violations
     assert isinstance(report.hold_fix_applied, bool)
     assert report.setup_violations >= 0
@@ -313,6 +557,42 @@ def test_compile_layout_returns_physical_summary():
     assert isinstance(report.detour_feedback_applied, bool)
     assert report.node_count == 3
     assert report.edge_count == 2
+
+
+def test_compile_layout_can_apply_hold_fix_closure_loop():
+    circuit = rflux.Circuit("demo")
+    source = circuit.add_node("cell", "source")
+    sink = circuit.add_node("dff", "tight_hold_dff")
+    circuit.connect(source, 0, sink, 0)
+
+    report = rflux.compile_layout(
+        circuit,
+        min_hold_jtl_length_um=60.0,
+        characterized_library_entries=[
+            json.dumps(
+                {
+                    "cell": {
+                        "name": "tight_hold_dff",
+                        "kind": "Dff",
+                        "area_um2": 24.0,
+                        "pipeline_stages": 1,
+                    },
+                    "timing": {
+                        "kind": "Dff",
+                        "intrinsic_delay_ps": 6.0,
+                        "setup_ps": 12.0,
+                        "hold_ps": 20.0,
+                    },
+                }
+            )
+        ],
+    )
+
+    assert report.timing_closure_loop.hold_fix_attempted is True
+    assert report.timing_closure_loop.hold_fix_applied is True
+    assert report.timing_closure_loop.initial_hold_violations > 0
+    assert report.timing_closure_loop.final_hold_violations == 0
+    assert report.timing_closure.status == "closed"
 
 
 def test_analyze_timing_returns_standalone_summary():
@@ -327,6 +607,40 @@ def test_analyze_timing_returns_standalone_summary():
     assert report.critical_path_delay_ps > 0.0
     assert report.setup_violations >= 0
     assert report.hold_violations >= 0
+    assert report.closure.status == "closed"
+    assert report.closure.closed is True
+
+
+def test_compile_layout_reports_reduce_route_delay_candidate():
+    circuit = rflux.Circuit("demo")
+    source = circuit.add_node("cell", "source")
+    sink = circuit.add_node("dff", "sink")
+    circuit.connect(source, 0, sink, 0)
+
+    report = rflux.compile_layout(
+        circuit,
+        fixed_nodes=[
+            rflux.FixedNodePlacement(node=source, x_um=0.0, y_um=0.0),
+            rflux.FixedNodePlacement(node=sink, x_um=120.0, y_um=0.0),
+        ],
+        timing_constraints=[rflux.NodeTimingConstraint(node=sink, required_ps=20.0)],
+    )
+
+    assert report.timing_closure.status == "open"
+    assert report.timing_closure.reduce_route_delay_actions == 1
+    assert report.timing_closure_loop.reduce_route_delay_candidate_available is True
+    assert report.timing_closure_loop.recommended_route_mode == "jtl"
+    assert report.timing_closure_loop.recommended_prefer_ptl_from_length_um == 121.0
+    assert report.timing_closure_loop.estimated_route_length_um == 120.0
+    assert report.timing_closure_loop.estimated_slack_deficit_ps is not None
+    assert report.timing_closure_loop.estimated_slack_deficit_ps > 0.0
+    assert report.timing_closure_loop.reduce_route_delay_candidate_attempted is True
+    assert report.timing_closure_loop.reduce_route_delay_candidate_improved is False
+    assert report.timing_closure_loop.candidate_setup_violations == report.setup_violations
+    assert report.timing_closure_loop.candidate_hold_violations == report.final_hold_violations
+    assert report.timing_closure_loop.candidate_route_mode == "jtl"
+    assert report.timing_closure_loop.candidate_route_length_um == 120.0
+    assert report.timing_closure_loop.candidate_worst_setup_slack_ps is not None
 
 
 def test_analyze_timing_accepts_clock_domain_constraints():
@@ -344,6 +658,28 @@ def test_analyze_timing_accepts_clock_domain_constraints():
     assert report.analyzed_timing_arcs == 1
     assert report.setup_violations == 1
     assert report.worst_setup_slack_ps < 0.0
+    assert report.closure.status == "open"
+    assert report.closure.failing_checks == ["setup", "capture_window"]
+    assert report.closure.action_count == 2
+    assert len(report.closure.actions) == 2
+    assert report.closure.actions[0].check == "setup"
+    assert report.closure.actions[1].check == "capture_window"
+    assert report.closure.primary_action == report.closure.actions[0]
+    assert report.closure.actions[0].priority == 1
+    assert (
+        report.closure.actions[0].remediation_kind
+        == "relax_constraint_or_improve_library_timing"
+    )
+    assert (
+        report.closure.actions[1].remediation_kind
+        == "adjust_sfq_phase_or_pulse_window"
+    )
+    assert report.closure.reduce_route_delay_actions == 0
+    assert report.closure.relax_constraint_or_improve_library_timing_actions == 1
+    assert report.closure.add_hold_padding_actions == 0
+    assert report.closure.adjust_sfq_phase_or_pulse_window_actions == 1
+    assert report.closure.actions[0].slack_ps < 0.0
+    assert report.closure.actions[0].to_pin.node == sink
 
 
 def test_analyze_timing_pin_constraint_overrides_node_constraint():
@@ -400,6 +736,55 @@ def test_analyze_timing_accepts_false_path_crossing_constraints():
     assert report.timing_arcs[0].route_length_um == 40.0
     assert report.timing_arcs[0].from_domain == 1
     assert report.timing_arcs[0].to_domain == 2
+    assert report.timing_arcs[0].launch_phase == 0
+    assert report.timing_arcs[0].capture_phase == 0
+    assert report.timing_arcs[0].launch_window_start_ps == 0.0
+    assert report.timing_arcs[0].launch_window_end_ps == 4.0
+    assert report.timing_arcs[0].capture_window_start_ps == 0.0
+    assert report.timing_arcs[0].capture_window_end_ps == 4.0
+    assert report.timing_arcs[0].arrival_phase_offset_ps == 8.0
+    assert report.timing_arcs[0].capture_window_slack_ps == -4.0
+    assert report.timing_arcs[0].capture_window_violation is False
+
+
+def test_analyze_timing_closure_reports_capture_window_violation():
+    circuit = rflux.Circuit("demo")
+    source = circuit.add_node("port", "a")
+    sink = circuit.add_node("dff", "sink")
+    circuit.connect(source, 0, sink, 0)
+
+    report = rflux.analyze_timing(
+        circuit,
+        timing_constraints=[
+            rflux.NodeTimingConstraint(
+                node=sink,
+                required_ps=120.0,
+                clock_domain=1,
+            ),
+        ],
+        clock_domains=[rflux.ClockDomainConstraint(id=1, period_ps=10.0)],
+    )
+
+    assert report.setup_violations == 0
+    assert report.hold_violations == 0
+    assert report.capture_window_violations == 1
+    assert report.timing_arcs[0].capture_window_violation is True
+    assert report.timing_arcs[0].arrival_phase_offset_ps == 8.0
+    assert report.timing_arcs[0].capture_window_slack_ps == -4.0
+    assert report.closure.status == "open"
+    assert report.closure.closed is False
+    assert report.closure.setup_closed is True
+    assert report.closure.hold_closed is True
+    assert report.closure.capture_window_closed is False
+    assert report.closure.capture_window_violations == 1
+    assert report.closure.failing_checks == ["capture_window"]
+    assert report.closure.action_count == 1
+    assert report.closure.actions[0].check == "capture_window"
+    assert (
+        report.closure.actions[0].remediation_kind
+        == "adjust_sfq_phase_or_pulse_window"
+    )
+    assert report.closure.adjust_sfq_phase_or_pulse_window_actions == 1
 
 
 def test_analyze_timing_statistical_returns_pessimistic_summary():
@@ -656,7 +1041,7 @@ def test_verify_layout_reports_missing_external_simulator_with_deck_path():
     assert report.generated_deck_path is not None
     assert report.waveform_path is None
     assert report.reported_violations == 0
-    assert report.external_result is None
+    assert report.external_result == "external_command_spawn_failed"
 
 
 def test_verify_layout_event_only_mode_ignores_external_command():
@@ -2370,4 +2755,41 @@ def test_check_single_step_sequential_equivalence_reports_counterexample():
     assert "state" in report.counterexample_states
     assert report.counterexample_states["state"].lhs_next is True
     assert report.counterexample_states["state"].rhs_next is False
+    assert report.sat_recursive_calls >= 1
+
+
+def test_check_bounded_sequential_equivalence_reports_first_failing_step():
+    lhs = rflux.Circuit("lhs_seq")
+    lhs_data = lhs.add_node("port", "data")
+    lhs.add_node("port", "enable")
+    lhs_clock = lhs.add_node("port", "clock")
+    lhs_state = lhs.add_node("dff", "state")
+    lhs_out = lhs.add_node("port", "out")
+    lhs.connect(lhs_data, 0, lhs_state, 0)
+    lhs.connect(lhs_clock, 0, lhs_state, 1)
+    lhs.connect(lhs_state, 0, lhs_out, 0)
+
+    rhs = rflux.Circuit("rhs_seq")
+    rhs_data = rhs.add_node("port", "data")
+    rhs_enable = rhs.add_node("port", "enable")
+    rhs_clock = rhs.add_node("port", "clock")
+    rhs_state = rhs.add_node("dff", "state", logic_op="dffe")
+    rhs_out = rhs.add_node("port", "out")
+    rhs.connect(rhs_data, 0, rhs_state, 0)
+    rhs.connect(rhs_enable, 0, rhs_state, 1)
+    rhs.connect(rhs_clock, 0, rhs_state, 2)
+    rhs.connect(rhs_state, 0, rhs_out, 0)
+
+    report = rflux.check_bounded_sequential_equivalence(lhs, rhs, depth=3)
+
+    assert report.equivalent is False
+    assert report.depth == 3
+    assert report.checked_steps == 1
+    assert report.unroll_mode == "state_unrolled"
+    assert report.checked_outputs == ["out"]
+    assert report.checked_states == ["state"]
+    assert report.first_failing_step == 0
+    assert len(report.steps) == 1
+    assert report.steps[0].step == 0
+    assert "state" in report.steps[0].report.counterexample_states
     assert report.sat_recursive_calls >= 1

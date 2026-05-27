@@ -1,0 +1,56 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "Port",
+      "name": "d"
+    },
+    {
+      "id": 1,
+      "kind": "Port",
+      "name": "clk"
+    },
+    {
+      "id": 2,
+      "kind": "Dff",
+      "name": "q"
+    },
+    {
+      "id": 3,
+      "kind": "Port",
+      "name": "q"
+    }
+  ],
+  "edges": [
+    [
+      {
+        "node": 0,
+        "port": 0
+      },
+      {
+        "node": 2,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 1,
+        "port": 0
+      },
+      {
+        "node": 2,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 2,
+        "port": 0
+      },
+      {
+        "node": 3,
+        "port": 0
+      }
+    ]
+  ]
+}

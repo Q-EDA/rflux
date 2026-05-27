@@ -1,0 +1,5 @@
+.title include-source-pwl-subckt-smoke
+.include "hier_source_pwl/driver.inc"
+X1 out driver params: rval=10 cval=1p
+.tran 0.5p 10p
+.end

@@ -1,0 +1,73 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "Port",
+      "name": "a"
+    },
+    {
+      "id": 1,
+      "kind": "Port",
+      "name": "b"
+    },
+    {
+      "id": 2,
+      "kind": "CellInstance",
+      "name": "x0__bench_xnor_inner",
+      "logic_op": "Xor"
+    },
+    {
+      "id": 3,
+      "kind": "CellInstance",
+      "name": "x0",
+      "logic_op": "Not"
+    },
+    {
+      "id": 4,
+      "kind": "Port",
+      "name": "x0"
+    }
+  ],
+  "edges": [
+    [
+      {
+        "node": 0,
+        "port": 0
+      },
+      {
+        "node": 2,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 1,
+        "port": 0
+      },
+      {
+        "node": 2,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 2,
+        "port": 0
+      },
+      {
+        "node": 3,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 3,
+        "port": 0
+      },
+      {
+        "node": 4,
+        "port": 0
+      }
+    ]
+  ]
+}

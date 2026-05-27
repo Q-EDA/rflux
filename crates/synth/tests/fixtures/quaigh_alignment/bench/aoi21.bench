@@ -1,0 +1,5 @@
+INPUT(a)
+INPUT(b)
+INPUT(c)
+y = AOI21(a, b, c)
+OUTPUT(y)

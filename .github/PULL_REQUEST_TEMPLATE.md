@@ -15,6 +15,8 @@ Describe the change briefly.
 
 List the commands or checks you ran.
 
+If this PR changes `crates/sim`, JoSIM correlation scripts, or phase-6 waveform thresholds, also state whether [docs/sim-release-readiness-checklist.md](../docs/sim-release-readiness-checklist.md) was completed or why it does not apply.
+
 ## Compatibility
 
 - [ ] No public API or schema change
@@ -29,6 +31,7 @@ If compatibility changed, describe it here.
 - [ ] Updated docs if user-facing behavior changed
 - [ ] Considered benchmark or QoR impact
 - [ ] Considered error reporting and diagnostics
+- [ ] If sim / waveform compare behavior changed, considered baseline, history diff, and no-regression impact
 
 ## Follow-up
 

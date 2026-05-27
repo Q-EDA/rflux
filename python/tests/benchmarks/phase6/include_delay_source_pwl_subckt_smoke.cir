@@ -1,0 +1,5 @@
+.title include-delay-source-pwl-subckt-smoke
+.include "hier_delay_source_pwl/defs.inc"
+X1 out delay_driver params: z0=50 td=3p rval=50
+.tran 0.5p 10p
+.end

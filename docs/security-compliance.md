@@ -27,12 +27,14 @@
 
 这些工件当前通过 GitHub Actions artifact 保留，供内部审查与发布前检查使用。
 
+当前合规 artifact 生成已集中到 `python/scripts/prepare_security_compliance_artifacts.py`，由 optional workflow 统一产出 inventory、审查输入、副本文件和 manifest/README，而不再在 workflow 里散落多段 shell 重定向。
+
 ### 2.3 外部命令调用边界
 
 当前仓库存在外部命令执行面，主要在仿真路径：
 
 - 只有当调用方显式提供 `external_command`，并选择 `external_josim` 或 `auto` 下的外部路径时，才会触发外部命令调用。
-- 当前实现只允许裸命令 `josim` / `josim.exe`；带目录路径的可执行文件和其他程序名都会在进入 `Command::new(...)` 前被拒绝。
+- 当前实现只允许最终文件名在去掉 `.exe` / `.cmd` / `.bat` / `.sh` 后匹配 `josim` / `josim-cli`；路径形式允许，但其他程序名仍会在进入 `Command::new(...)` 前被拒绝。
 - 当前实现使用 `std::process::Command::new(command).arg(deck_path)` 调用外部程序，不通过 shell 拼接命令行。
 - 当前已具备最小 allowlist、最小路径信任规则、最小环境隔离和最小副作用文件约束，且策略已固化在 `docs/external-command-policy.md`；但尚未建立 sandbox、签名校验或更完整的环境与文件策略，因此 `external_command` 仍应被视为受信任操作者输入，而不是面向不受控用户输入的安全接口。
 
@@ -54,6 +56,10 @@
 2. 引入新第三方依赖后。
 3. 调整外部命令调用路径后。
 4. 准备对外试点或正式发布前。
+
+Python 合规导出命令族现在也有显式 CI smoke anchor，而不只是依赖全量 `uv run pytest`：
+
+- `uv run pytest python/tests/test_security_compliance_utils.py -q`
 
 ## 5. 达到阶段 4 要补齐的内容
 

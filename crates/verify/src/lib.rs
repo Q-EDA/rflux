@@ -3,7 +3,7 @@ use rflux_synth::{
     Compiler, EquivalenceSatProblem, SatEquivalenceReport, SequentialEquivalenceReport,
 };
 
-pub use rflux_synth::{EquivalenceCheckKind, EquivalenceCheckTarget, EquivalenceSatProblem as ExportedEquivalenceSatProblem, SatEquivalenceReport as CombinationalEquivalenceReport, SequentialEquivalenceReport as SingleStepSequentialEquivalenceReport};
+pub use rflux_synth::{BoundedSequentialEquivalenceReport, BoundedSequentialEquivalenceStepReport, EquivalenceCheckKind, EquivalenceCheckTarget, EquivalenceSatProblem as ExportedEquivalenceSatProblem, SatEquivalenceReport as CombinationalEquivalenceReport, SequentialEquivalenceReport as SingleStepSequentialEquivalenceReport};
 
 #[derive(Debug, Default)]
 pub struct Verifier {
@@ -31,6 +31,16 @@ impl Verifier {
         rhs: &Netlist,
     ) -> Result<SequentialEquivalenceReport, SynthError> {
         self.compiler.check_sequential_equivalence_sat(lhs, rhs)
+    }
+
+    pub fn check_bounded_sequential_equivalence(
+        &self,
+        lhs: &Netlist,
+        rhs: &Netlist,
+        depth: usize,
+    ) -> Result<BoundedSequentialEquivalenceReport, SynthError> {
+        self.compiler
+            .check_bounded_sequential_equivalence_sat(lhs, rhs, depth)
     }
 
     pub fn build_boolean_equivalence_problem(
@@ -119,6 +129,42 @@ mod tests {
 
         assert!(!report.equivalent);
         assert!(report.counterexample_states.is_some());
+        assert!(report.sat_stats.recursive_calls >= 1);
+    }
+
+    #[test]
+    fn verifier_reports_bounded_sequential_counterexample() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let _enable_l = lhs.add_node(NodeKind::Port, "enable");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
+        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
+        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let enable_r = rhs.add_node(NodeKind::Port, "enable");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node_with_logic(NodeKind::Dff, "state", Some(LogicOp::DffEnable));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dffe");
+        rhs.connect(PinRef { node: enable_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("enable->dffe");
+        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 2 }).expect("clock->dffe");
+        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dffe->out");
+
+        let report = verifier
+            .check_bounded_sequential_equivalence(&lhs, &rhs, 4)
+            .expect("bounded sequential equivalence should run");
+
+        assert_eq!(report.depth, 4);
+        assert!(!report.equivalent);
+        assert_eq!(report.first_failing_step, Some(0));
+        assert_eq!(report.steps.len(), 1);
         assert!(report.sat_stats.recursive_calls >= 1);
     }
 

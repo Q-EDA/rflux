@@ -139,6 +139,16 @@
 3. 然后为 CLI JSON / IR JSON / PDK JSON 加 schema version。
 4. 最后再处理默认行为是否要显式化。
 
+### 6.1 当前建议分级结果（第一版）
+
+基于当前仓库状态，建议先按以下口径冻结第一版：
+
+- `stable`：`rflux-ir` JSON、PDK JSON、`solve-dimacs`、最小 CLI / Python 本地运行路径。
+- `limited`：`compile-netlist`、`compile-layout`、`analyze-timing`、`verify-layout`、`check-equivalence`、`simulate-file` / `simulate_text` 当前受限子集、自定义 PDK JSON 导入。
+- `experimental`：通用 HDL frontend、通用 SPICE / JoSIM 兼容、`compile(...)` placeholder、统计时序作为正式签核依据。
+
+这一定义应与 `docs/support-matrix.md` 和 `docs/product-scope.md` 保持同步，后续只有在实现、回归和文档同时到位时才允许升级等级。
+
 ## 7. 立即可开的整改项
 
 ### 高优先级

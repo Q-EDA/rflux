@@ -1,0 +1,8 @@
+INPUT(a)
+INPUT(b)
+INPUT(c)
+INPUT(d)
+INPUT(e)
+INPUT(f)
+y = OAI222(a, b, c, d, e, f)
+OUTPUT(y)

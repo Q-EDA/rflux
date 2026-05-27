@@ -3,7 +3,7 @@ mod bool_opt;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rflux_ir::{IrError, Netlist, NodeKind, PinRef};
-use rflux_sat::{CnfFormula, IncrementalSolver, Lit, SolveResult, SolveStats};
+use rflux_sat::{CnfFormula, IncrementalSolver, Lit, Model, SolveResult, SolveStats};
 use rflux_tech::{Pdk, SfCell, SfCellKind};
 use thiserror::Error;
 
@@ -94,6 +94,26 @@ pub struct SequentialEquivalenceReport {
     pub sat_elapsed_ns: u128,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedSequentialEquivalenceStepReport {
+    pub step: usize,
+    pub report: SequentialEquivalenceReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedSequentialEquivalenceReport {
+    pub equivalent: bool,
+    pub depth: usize,
+    pub checked_steps: usize,
+    pub unroll_mode: String,
+    pub checked_outputs: Vec<String>,
+    pub checked_states: Vec<String>,
+    pub first_failing_step: Option<usize>,
+    pub steps: Vec<BoundedSequentialEquivalenceStepReport>,
+    pub sat_stats: SolveStats,
+    pub sat_elapsed_ns: u128,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SatStateTransitionMismatch {
     pub lhs_next: bool,
@@ -118,6 +138,32 @@ struct SequentialEquivalenceProblemData {
     rhs_outputs: BTreeMap<String, usize>,
     lhs_states: BTreeMap<String, SequentialSatState>,
     rhs_states: BTreeMap<String, SequentialSatState>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundedSequentialCheck {
+    step: usize,
+    diff_var: usize,
+    prior_diff_vars: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundedSequentialFrameData {
+    input_vars: BTreeMap<String, usize>,
+    lhs_present_state_vars: BTreeMap<String, usize>,
+    lhs_outputs: BTreeMap<String, usize>,
+    rhs_outputs: BTreeMap<String, usize>,
+    lhs_states: BTreeMap<String, SequentialSatState>,
+    rhs_states: BTreeMap<String, SequentialSatState>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundedSequentialProblemData {
+    formula: CnfFormula,
+    checks: Vec<BoundedSequentialCheck>,
+    frames: Vec<BoundedSequentialFrameData>,
+    checked_outputs: Vec<String>,
+    checked_states: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,6 +739,88 @@ impl Compiler {
         })
     }
 
+    pub fn check_bounded_sequential_equivalence_sat(
+        &self,
+        lhs: &Netlist,
+        rhs: &Netlist,
+        depth: usize,
+    ) -> Result<BoundedSequentialEquivalenceReport, SynthError> {
+        let depth = depth.max(1);
+        let problem = build_bounded_sequential_equivalence_problem_data(lhs, rhs, depth)?;
+        let incremental_solver = IncrementalSolver::from_formula(problem.formula.clone());
+        let mut aggregated_stats = SolveStats::default();
+        let mut aggregated_elapsed_ns = 0_u128;
+
+        for check in &problem.checks {
+            let mut assumptions = check
+                .prior_diff_vars
+                .iter()
+                .map(|var| Lit::neg(*var))
+                .collect::<Vec<_>>();
+            assumptions.push(Lit::pos(check.diff_var));
+
+            let (solve_result, sat_metrics) =
+                incremental_solver.solve_with_assumptions_and_metrics(&assumptions);
+            merge_solve_stats(&mut aggregated_stats, &sat_metrics.stats);
+            aggregated_elapsed_ns += sat_metrics.elapsed_ns;
+
+            if let SolveResult::Satisfiable(model) = solve_result {
+                let frame = &problem.frames[check.step];
+                let report = sequential_report_from_bounded_model(
+                    &problem.checked_outputs,
+                    &problem.checked_states,
+                    frame,
+                    &model,
+                    aggregated_stats.clone(),
+                    aggregated_elapsed_ns,
+                );
+                return Ok(BoundedSequentialEquivalenceReport {
+                    equivalent: false,
+                    depth,
+                    checked_steps: check.step + 1,
+                    unroll_mode: "state_unrolled".to_string(),
+                    checked_outputs: problem.checked_outputs,
+                    checked_states: problem.checked_states,
+                    first_failing_step: Some(check.step),
+                    steps: vec![BoundedSequentialEquivalenceStepReport {
+                        step: check.step,
+                        report,
+                    }],
+                    sat_stats: aggregated_stats,
+                    sat_elapsed_ns: aggregated_elapsed_ns,
+                });
+            }
+        }
+
+        Ok(BoundedSequentialEquivalenceReport {
+            equivalent: true,
+            depth,
+            checked_steps: depth,
+            unroll_mode: "state_unrolled".to_string(),
+            checked_outputs: problem.checked_outputs,
+            checked_states: problem.checked_states,
+            first_failing_step: None,
+            steps: (0..depth)
+                .map(|step| BoundedSequentialEquivalenceStepReport {
+                    step,
+                    report: SequentialEquivalenceReport {
+                        equivalent: true,
+                        checked_outputs: Vec::new(),
+                        checked_states: Vec::new(),
+                        counterexample_inputs: None,
+                        counterexample_present_states: None,
+                        counterexample_outputs: None,
+                        counterexample_states: None,
+                        sat_stats: SolveStats::default(),
+                        sat_elapsed_ns: 0,
+                    },
+                })
+                .collect(),
+            sat_stats: aggregated_stats,
+            sat_elapsed_ns: aggregated_elapsed_ns,
+        })
+    }
+
     pub fn build_boolean_equivalence_problem(
         &self,
         lhs: &Netlist,
@@ -717,6 +845,63 @@ fn merge_solve_stats(into: &mut SolveStats, other: &SolveStats) {
     into.pure_literal_assignments += other.pure_literal_assignments;
     into.backtracks += other.backtracks;
     into.restarts += other.restarts;
+}
+
+fn sequential_report_from_bounded_model(
+    checked_outputs: &[String],
+    checked_states: &[String],
+    frame: &BoundedSequentialFrameData,
+    model: &Model,
+    sat_stats: SolveStats,
+    sat_elapsed_ns: u128,
+) -> SequentialEquivalenceReport {
+    let mut input_assignment = BTreeMap::new();
+    for (name, var) in &frame.input_vars {
+        input_assignment.insert(name.clone(), model.value(*var).unwrap_or(false));
+    }
+
+    let mut present_state_assignment = BTreeMap::new();
+    for (name, lhs_var) in &frame.lhs_present_state_vars {
+        present_state_assignment.insert(name.clone(), model.value(*lhs_var).unwrap_or(false));
+    }
+
+    let mut output_mismatch = BTreeMap::new();
+    for (name, lhs_var) in frame.lhs_outputs.iter() {
+        let rhs_var = frame.rhs_outputs.get(name).expect("rhs output must exist");
+        output_mismatch.insert(
+            name.clone(),
+            SatOutputMismatch {
+                lhs: model.value(*lhs_var).unwrap_or(false),
+                rhs: model.value(*rhs_var).unwrap_or(false),
+            },
+        );
+    }
+
+    let mut state_mismatch = BTreeMap::new();
+    for (name, lhs_state) in frame.lhs_states.iter() {
+        let rhs_state = frame.rhs_states.get(name).expect("rhs state must exist");
+        state_mismatch.insert(
+            name.clone(),
+            SatStateTransitionMismatch {
+                lhs_next: model.value(lhs_state.next_var).unwrap_or(false),
+                rhs_next: model.value(rhs_state.next_var).unwrap_or(false),
+                lhs_clock: model.value(lhs_state.clock_var).unwrap_or(false),
+                rhs_clock: model.value(rhs_state.clock_var).unwrap_or(false),
+            },
+        );
+    }
+
+    SequentialEquivalenceReport {
+        equivalent: false,
+        checked_outputs: checked_outputs.to_vec(),
+        checked_states: checked_states.to_vec(),
+        counterexample_inputs: Some(input_assignment),
+        counterexample_present_states: Some(present_state_assignment),
+        counterexample_outputs: Some(output_mismatch),
+        counterexample_states: Some(state_mismatch),
+        sat_stats,
+        sat_elapsed_ns,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -900,6 +1085,152 @@ fn build_sequential_equivalence_problem_data(
         lhs_states: lhs_encoded.states,
         rhs_states: rhs_encoded.states,
     })
+}
+
+fn build_bounded_sequential_equivalence_problem_data(
+    lhs: &Netlist,
+    rhs: &Netlist,
+    depth: usize,
+) -> Result<BoundedSequentialProblemData, SynthError> {
+    let mut formula = CnfFormula::new(0);
+    let mut frames = Vec::<BoundedSequentialFrameData>::with_capacity(depth);
+    let mut checks = Vec::new();
+    let mut prior_diff_vars = Vec::<usize>::new();
+    let mut checked_outputs = Vec::<String>::new();
+    let mut checked_states = Vec::<String>::new();
+
+    for step in 0..depth {
+        let mut shared_input_vars = BTreeMap::<String, usize>::new();
+        let mut lhs_state_vars = BTreeMap::<String, usize>::new();
+        let mut rhs_state_vars = BTreeMap::<String, usize>::new();
+
+        let lhs_encoded = encode_netlist_for_sequential_sat(
+            lhs,
+            &mut formula,
+            &mut shared_input_vars,
+            &mut lhs_state_vars,
+        )?;
+        let rhs_encoded = encode_netlist_for_sequential_sat(
+            rhs,
+            &mut formula,
+            &mut shared_input_vars,
+            &mut rhs_state_vars,
+        )?;
+
+        validate_sequential_interfaces(&lhs_encoded, &rhs_encoded)?;
+        if step == 0 {
+            checked_outputs = lhs_encoded.outputs.keys().cloned().collect();
+            checked_states = lhs_encoded.states.keys().cloned().collect();
+            for state_name in lhs_encoded.states.keys() {
+                let lhs_initial = *lhs_state_vars
+                    .get(state_name)
+                    .expect("lhs initial state var must exist");
+                let rhs_initial = *rhs_state_vars
+                    .get(state_name)
+                    .expect("rhs initial state var must exist");
+                encode_equal(&mut formula, lhs_initial, rhs_initial)?;
+            }
+        }
+
+        if let Some(previous_frame) = frames.last() {
+            for state_name in lhs_encoded.states.keys() {
+                let previous_lhs = previous_frame
+                    .lhs_states
+                    .get(state_name)
+                    .expect("previous lhs state must exist");
+                let previous_rhs = previous_frame
+                    .rhs_states
+                    .get(state_name)
+                    .expect("previous rhs state must exist");
+                let current_lhs = *lhs_state_vars
+                    .get(state_name)
+                    .expect("current lhs state var must exist");
+                let current_rhs = *rhs_state_vars
+                    .get(state_name)
+                    .expect("current rhs state var must exist");
+                encode_equal(&mut formula, current_lhs, previous_lhs.next_var)?;
+                encode_equal(&mut formula, current_rhs, previous_rhs.next_var)?;
+            }
+        }
+
+        for output in lhs_encoded.outputs.keys() {
+            let lhs_var = *lhs_encoded.outputs.get(output).expect("lhs output key must exist");
+            let rhs_var = *rhs_encoded.outputs.get(output).expect("rhs output key must exist");
+            let diff_var = formula.add_var();
+            encode_xor_eq(&mut formula, diff_var, lhs_var, rhs_var)?;
+            checks.push(BoundedSequentialCheck {
+                step,
+                diff_var,
+                prior_diff_vars: prior_diff_vars.clone(),
+            });
+            prior_diff_vars.push(diff_var);
+        }
+
+        for state_name in lhs_encoded.states.keys() {
+            let lhs_state = lhs_encoded.states.get(state_name).expect("lhs state must exist");
+            let rhs_state = rhs_encoded.states.get(state_name).expect("rhs state must exist");
+            let next_diff_var = formula.add_var();
+            encode_xor_eq(&mut formula, next_diff_var, lhs_state.next_var, rhs_state.next_var)?;
+            let clock_diff_var = formula.add_var();
+            encode_xor_eq(&mut formula, clock_diff_var, lhs_state.clock_var, rhs_state.clock_var)?;
+            let state_diff_var = formula.add_var();
+            encode_or_eq(&mut formula, state_diff_var, &[next_diff_var, clock_diff_var])?;
+            checks.push(BoundedSequentialCheck {
+                step,
+                diff_var: state_diff_var,
+                prior_diff_vars: prior_diff_vars.clone(),
+            });
+            prior_diff_vars.push(state_diff_var);
+        }
+
+        frames.push(BoundedSequentialFrameData {
+            input_vars: shared_input_vars,
+            lhs_present_state_vars: lhs_state_vars,
+            lhs_outputs: lhs_encoded.outputs,
+            rhs_outputs: rhs_encoded.outputs,
+            lhs_states: lhs_encoded.states,
+            rhs_states: rhs_encoded.states,
+        });
+    }
+
+    Ok(BoundedSequentialProblemData {
+        formula,
+        checks,
+        frames,
+        checked_outputs,
+        checked_states,
+    })
+}
+
+fn validate_sequential_interfaces(
+    lhs_encoded: &SequentialSatEncodedNetlist,
+    rhs_encoded: &SequentialSatEncodedNetlist,
+) -> Result<(), SynthError> {
+    if lhs_encoded.inputs != rhs_encoded.inputs {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "input sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.inputs, rhs_encoded.inputs
+        )));
+    }
+    if lhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+        != rhs_encoded.outputs.keys().collect::<BTreeSet<_>>()
+    {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "output sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.outputs.keys().collect::<Vec<_>>(),
+            rhs_encoded.outputs.keys().collect::<Vec<_>>()
+        )));
+    }
+    if lhs_encoded.states.keys().collect::<BTreeSet<_>>()
+        != rhs_encoded.states.keys().collect::<BTreeSet<_>>()
+    {
+        return Err(SynthError::SatInterfaceMismatch(format!(
+            "state sets differ: lhs={:?}, rhs={:?}",
+            lhs_encoded.states.keys().collect::<Vec<_>>(),
+            rhs_encoded.states.keys().collect::<Vec<_>>()
+        )));
+    }
+    Ok(())
 }
 
 fn encode_netlist_for_sequential_sat(
@@ -1249,6 +1580,11 @@ fn encode_or_eq(formula: &mut CnfFormula, z: usize, inputs: &[usize]) -> Result<
     let mut reverse = vec![Lit::neg(z)];
     reverse.extend(inputs.iter().map(|x| Lit::pos(*x)));
     add_clause(formula, reverse)
+}
+
+fn encode_equal(formula: &mut CnfFormula, x: usize, y: usize) -> Result<(), SynthError> {
+    add_clause(formula, vec![Lit::neg(x), Lit::pos(y)])?;
+    add_clause(formula, vec![Lit::pos(x), Lit::neg(y)])
 }
 
 fn encode_xor_eq(formula: &mut CnfFormula, z: usize, x: usize, y: usize) -> Result<(), SynthError> {
@@ -2973,6 +3309,39 @@ mod tests {
         assert!(state.lhs_next != state.rhs_next || state.lhs_clock != state.rhs_clock);
         assert!(report.sat_stats.recursive_calls >= 1);
         assert!(report.sat_elapsed_ns > 0);
+    }
+
+    #[test]
+    fn bounded_sequential_equivalence_constrains_initial_states_equal() {
+        let compiler = Compiler::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(PinRef { node: data_l, port: 0 }, PinRef { node: dff_l, port: 0 }).expect("data->dff");
+        lhs.connect(PinRef { node: clock_l, port: 0 }, PinRef { node: dff_l, port: 1 }).expect("clock->dff");
+        lhs.connect(PinRef { node: dff_l, port: 0 }, PinRef { node: out_l, port: 0 }).expect("dff->out");
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node(NodeKind::Dff, "state");
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(PinRef { node: data_r, port: 0 }, PinRef { node: dff_r, port: 0 }).expect("data->dff");
+        rhs.connect(PinRef { node: clock_r, port: 0 }, PinRef { node: dff_r, port: 1 }).expect("clock->dff");
+        rhs.connect(PinRef { node: dff_r, port: 0 }, PinRef { node: out_r, port: 0 }).expect("dff->out");
+
+        let report = compiler
+            .check_bounded_sequential_equivalence_sat(&lhs, &rhs, 3)
+            .expect("bounded sequential equivalence should run");
+
+        assert!(report.equivalent);
+        assert_eq!(report.depth, 3);
+        assert_eq!(report.checked_steps, 3);
+        assert_eq!(report.unroll_mode, "state_unrolled");
+        assert!(report.first_failing_step.is_none());
     }
 
     #[test]

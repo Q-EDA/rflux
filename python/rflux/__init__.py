@@ -1,10 +1,31 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+import importlib.util
 import json
 import sys
 
 from ._version import __version__
+
+
+SIMULATION_MODES = ("auto", "event_only", "external_josim", "internal_transient")
+_CORE_IMPORT_ERROR: str | None = None
+
+
+class RfluxError(Exception):
+    """Base class for rflux Python API errors."""
+
+
+class RfluxCoreUnavailableError(RfluxError, RuntimeError):
+    """Raised when an API requires the compiled ``rflux._core`` extension."""
+
+
+@dataclass(frozen=True)
+class CoreStatus:
+    available: bool
+    version: str
+    extension_path: str | None
+    import_error: str | None
 
 
 def _extend_package_path_for_extension() -> None:
@@ -56,6 +77,7 @@ try:
         compile_plan as _core_compile_plan,
         check_equivalence as _core_check_equivalence,
         check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
+        check_bounded_sequential_equivalence as _core_check_bounded_sequential_equivalence,
         simulate_file as _core_simulate_file,
         simulate_text as _core_simulate_text,
         read_bench_file as _core_read_bench_file,
@@ -63,7 +85,7 @@ try:
         verify_layout as _core_verify_layout,
         version as core_version,
     )
-except ImportError:
+except ImportError as relative_import_error:
     try:
         from _core import (  # type: ignore[attr-defined]
             Circuit,
@@ -91,6 +113,7 @@ except ImportError:
             compile_plan as _core_compile_plan,
             check_equivalence as _core_check_equivalence,
             check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
+            check_bounded_sequential_equivalence as _core_check_bounded_sequential_equivalence,
             simulate_file as _core_simulate_file,
             simulate_text as _core_simulate_text,
             read_bench_file as _core_read_bench_file,
@@ -98,8 +121,12 @@ except ImportError:
             verify_layout as _core_verify_layout,
             version as core_version,
         )
-    except ImportError:
+    except ImportError as absolute_import_error:
         # The extension may be unavailable before maturin develop is run.
+        _CORE_IMPORT_ERROR = (
+            f"relative import failed: {relative_import_error}; "
+            f"absolute import failed: {absolute_import_error}"
+        )
         core_version = lambda: "unavailable"
         _CoreBlockedRegion = None
         _CoreClockDomainConstraint = None
@@ -125,6 +152,7 @@ except ImportError:
         _core_compile_plan = None
         _core_check_equivalence = None
         _core_check_single_step_sequential_equivalence = None
+        _core_check_bounded_sequential_equivalence = None
         _core_simulate_file = None
         _core_simulate_text = None
         _core_read_bench_file = None
@@ -317,6 +345,9 @@ class LayoutReport:
     analyzed_timing_arcs: int
     false_path_arcs: int
     setup_violations: int
+    capture_window_violations: int
+    timing_closure: "TimingClosureSummary"
+    timing_closure_loop: "TimingClosureLoopReport"
     routed_nets: int
     total_route_length_um: float
     initial_total_detour_overhead_um: float
@@ -330,6 +361,68 @@ class LayoutReport:
 
 
 @dataclass(frozen=True)
+class TimingClosureLoopReport:
+    detour_feedback_attempted: bool
+    detour_feedback_applied: bool
+    initial_total_detour_overhead_um: float
+    final_total_detour_overhead_um: float
+    reduce_route_delay_candidate_available: bool
+    recommended_prefer_ptl_from_length_um: float | None
+    recommended_detour_margin_um: float | None
+    recommended_route_mode: str | None
+    estimated_route_length_um: float | None
+    estimated_slack_deficit_ps: float | None
+    reduce_route_delay_candidate_attempted: bool
+    reduce_route_delay_candidate_improved: bool
+    candidate_worst_setup_slack_ps: float | None
+    candidate_setup_violations: int | None
+    candidate_hold_violations: int | None
+    candidate_route_mode: str | None
+    candidate_route_length_um: float | None
+    hold_fix_attempted: bool
+    hold_fix_applied: bool
+    initial_hold_violations: int
+    final_hold_violations: int
+    status: str
+    next_step: str
+
+
+@dataclass(frozen=True)
+class TimingClosureSummary:
+    closed: bool
+    status: str
+    setup_closed: bool
+    hold_closed: bool
+    capture_window_closed: bool
+    setup_violations: int
+    hold_violations: int
+    capture_window_violations: int
+    failing_checks: list[str]
+    action_count: int
+    primary_action: "TimingClosureAction | None"
+    reduce_route_delay_actions: int
+    relax_constraint_or_improve_library_timing_actions: int
+    add_hold_padding_actions: int
+    adjust_sfq_phase_or_pulse_window_actions: int
+    actions: list["TimingClosureAction"]
+    next_step: str
+
+
+@dataclass(frozen=True)
+class TimingClosureAction:
+    check: str
+    priority: int
+    remediation_kind: str
+    from_pin: PinRef
+    to_pin: PinRef
+    slack_ps: float
+    route_mode: str
+    route_length_um: float
+    from_domain: int | None
+    to_domain: int | None
+
+
+@dataclass(frozen=True)
 class TimingAnalysisReport:
     worst_setup_slack_ps: float
     worst_hold_slack_ps: float
@@ -338,8 +431,10 @@ class TimingAnalysisReport:
     false_path_arcs: int
     setup_violations: int
     hold_violations: int
+    capture_window_violations: int
     detour_feedback_applied: bool
     hold_fix_applied: bool
+    closure: TimingClosureSummary
     timing_arcs: list["TimingArcReport"]
 
 
@@ -364,6 +459,15 @@ class TimingArcReport:
     route_length_um: float
     from_domain: int | None
     to_domain: int | None
+    launch_phase: int
+    capture_phase: int
+    launch_window_start_ps: float
+    launch_window_end_ps: float
+    capture_window_start_ps: float
+    capture_window_end_ps: float
+    arrival_phase_offset_ps: float
+    capture_window_slack_ps: float
+    capture_window_violation: bool
     arrival_ps: float
     required_ps: float
     setup_slack_ps: float
@@ -379,6 +483,15 @@ class StatisticalTimingArcReport:
     route_length_um: float
     from_domain: int | None
     to_domain: int | None
+    launch_phase: int
+    capture_phase: int
+    launch_window_start_ps: float
+    launch_window_end_ps: float
+    capture_window_start_ps: float
+    capture_window_end_ps: float
+    arrival_phase_offset_ps: float
+    capture_window_slack_ps: float
+    capture_window_violation: bool
     mean_arrival_ps: float
     mean_required_ps: float
     setup_slack_ps: float
@@ -446,33 +559,158 @@ class LibraryAwareDesignOptimizationReport:
     statistical_candidates_evaluated: int = 1
 
 
+@dataclass(frozen=True)
+class CellLibraryEntry:
+    name: str
+    kind: str
+    area_um2: float
+    pipeline_stages: int
+    intrinsic_delay_ps: float
+    setup_ps: float
+    hold_ps: float
+    timing_source: str
+    has_characterization_metadata: bool
+
+
+@dataclass(frozen=True)
+class CellLibraryMetadata:
+    name: str
+    version: str | None
+    source: str | None
+
+
+@dataclass(frozen=True)
+class CellLibrarySummary:
+    cell_count: int
+    kind_count: int
+    kind_counts: dict[str, int]
+    named_timing_count: int
+    kind_timing_count: int
+    missing_timing_count: int
+    characterized_cell_count: int
+    named_timing_cells: list[str]
+    missing_timing_cells: list[str]
+    characterized_cells: list[str]
+
+
+def _cell_library_entry_from_core(entry) -> CellLibraryEntry:
+    return CellLibraryEntry(
+        name=entry.name,
+        kind=entry.kind,
+        area_um2=entry.area_um2,
+        pipeline_stages=entry.pipeline_stages,
+        intrinsic_delay_ps=entry.intrinsic_delay_ps,
+        setup_ps=entry.setup_ps,
+        hold_ps=entry.hold_ps,
+        timing_source=entry.timing_source,
+        has_characterization_metadata=entry.has_characterization_metadata,
+    )
+
+
+def _cell_library_metadata_from_core(metadata) -> CellLibraryMetadata:
+    return CellLibraryMetadata(
+        name=metadata.name,
+        version=metadata.version,
+        source=metadata.source,
+    )
+
+
+def _cell_library_summary_from_core(summary) -> CellLibrarySummary:
+    return CellLibrarySummary(
+        cell_count=summary.cell_count,
+        kind_count=summary.kind_count,
+        kind_counts=dict(summary.kind_counts),
+        named_timing_count=summary.named_timing_count,
+        kind_timing_count=summary.kind_timing_count,
+        missing_timing_count=summary.missing_timing_count,
+        characterized_cell_count=summary.characterized_cell_count,
+        named_timing_cells=list(summary.named_timing_cells),
+        missing_timing_cells=list(summary.missing_timing_cells),
+        characterized_cells=list(summary.characterized_cells),
+    )
+
+
 class Pdk:
     def __init__(self, core) -> None:
+        if core is None:
+            raise ValueError("Pdk core object must not be None")
         self._core = core
+
+    def __repr__(self) -> str:
+        version = self.cell_library_version
+        version_suffix = "" if version is None else f", version={version!r}"
+        return f"Pdk(name={self.name!r}, cell_library={self.cell_library_name!r}{version_suffix})"
 
     @classmethod
     def minimal(cls, name: str = "py-minimal-pdk") -> "Pdk":
-        if _CorePdk is None:
-            raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+        """Create the built-in minimal PDK."""
+        _require_core_extension("Pdk.minimal(...)", _CorePdk)
         return cls(_CorePdk.minimal(name))
 
     @classmethod
     def from_json(cls, payload: str) -> "Pdk":
-        if _CorePdk is None:
-            raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+        """Load a PDK from its JSON representation."""
+        _require_core_extension("Pdk.from_json(...)", _CorePdk)
         return cls(_CorePdk.from_json(payload))
 
     @property
     def name(self) -> str:
+        """PDK name."""
         return self._core.name
 
     def to_json(self) -> str:
+        """Serialize this PDK to JSON."""
         return self._core.to_json()
 
+    @property
+    def cell_library_name(self) -> str:
+        """Name of the active cell library."""
+        return self._core.cell_library_name
+
+    @property
+    def cell_library_version(self) -> str | None:
+        """Version of the active cell library, when available."""
+        return self._core.cell_library_version
+
+    @property
+    def cell_library_source(self) -> str | None:
+        """Source label or path for the active cell library, when available."""
+        return self._core.cell_library_source
+
+    def cell_library_metadata(self) -> CellLibraryMetadata:
+        """Return metadata for the active cell library."""
+        return _cell_library_metadata_from_core(self._core.cell_library_metadata())
+
+    def cell_library_kinds(self) -> list[str]:
+        """Return the cell kinds represented by the active library."""
+        return list(self._core.cell_library_kinds())
+
+    def cell_library_entries(self) -> list[CellLibraryEntry]:
+        """Return all active cell library entries."""
+        return [_cell_library_entry_from_core(entry) for entry in self._core.cell_library_entries()]
+
+    def cell_library_summary(self) -> CellLibrarySummary:
+        """Return a compact summary of active cell library coverage."""
+        return _cell_library_summary_from_core(self._core.cell_library_summary())
+
+    def cell_library_entries_by_kind(self, kind: str) -> list[CellLibraryEntry]:
+        """Return active cell library entries matching ``kind``."""
+        return [
+            _cell_library_entry_from_core(entry)
+            for entry in self._core.cell_library_entries_by_kind(kind)
+        ]
+
+    def cell_library_entry(self, cell_name: str) -> CellLibraryEntry | None:
+        """Return a named cell library entry, if present."""
+        entry = self._core.cell_library_entry(cell_name)
+        return None if entry is None else _cell_library_entry_from_core(entry)
+
     def merge_characterized_library_json(self, serialized_entry: str) -> "Pdk":
+        """Return a PDK with one characterized cell entry merged in."""
         return Pdk(self._core.merge_characterized_library_json(serialized_entry))
 
     def merge_characterized_library_entries(self, serialized_entries: list[str]) -> "Pdk":
+        """Return a PDK with multiple characterized cell entries merged in."""
         return Pdk(self._core.merge_characterized_library_entries(serialized_entries))
 
 
@@ -534,6 +772,29 @@ class SingleStepSequentialEquivalenceReport:
     counterexample_present_states: dict[str, bool]
     counterexample_outputs: dict[str, OutputMismatch]
     counterexample_states: dict[str, StateTransitionMismatch]
+    sat_recursive_calls: int
+    sat_decisions: int
+    sat_backtracks: int
+    sat_restarts: int
+    sat_elapsed_ns: int
+
+
+@dataclass(frozen=True)
+class BoundedSequentialEquivalenceStepReport:
+    step: int
+    report: SingleStepSequentialEquivalenceReport
+
+
+@dataclass(frozen=True)
+class BoundedSequentialEquivalenceReport:
+    equivalent: bool
+    depth: int
+    checked_steps: int
+    unroll_mode: str
+    checked_outputs: list[str]
+    checked_states: list[str]
+    first_failing_step: int | None
+    steps: list[BoundedSequentialEquivalenceStepReport]
     sat_recursive_calls: int
     sat_decisions: int
     sat_backtracks: int
@@ -637,25 +898,58 @@ class SimulationReport:
     external_result: str | None
 
 
-def compile(circuit: Circuit) -> Circuit:
-    raise NotImplementedError(
-        "rflux.compile(...) remains an experimental placeholder; use compile_netlist(...) or compile_layout(...) instead"
+def core_available() -> bool:
+    """Return whether the compiled ``rflux._core`` extension is importable."""
+    return core_version() != "unavailable"
+
+
+def core_status() -> CoreStatus:
+    """Return diagnostic information for the compiled ``rflux._core`` extension."""
+    extension_path = None
+    if core_available():
+        spec = importlib.util.find_spec("rflux._core")
+        extension_path = None if spec is None else spec.origin
+    return CoreStatus(
+        available=core_available(),
+        version=core_version(),
+        extension_path=extension_path,
+        import_error=_CORE_IMPORT_ERROR,
     )
 
 
 def _require_core_extension(api_name: str, binding) -> None:
     if binding is None:
-        raise RuntimeError(
-            f"{api_name} requires the compiled rflux._core extension; run `uv run maturin develop -m crates/py/Cargo.toml`"
+        details = "" if _CORE_IMPORT_ERROR is None else f" Import error: {_CORE_IMPORT_ERROR}"
+        raise RfluxCoreUnavailableError(
+            f"{api_name} requires the compiled rflux._core extension; run `uv run maturin develop -m crates/py/Cargo.toml`."
+            f"{details}"
         )
 
 
+def _validate_simulation_mode(simulation_mode: str) -> None:
+    if simulation_mode not in SIMULATION_MODES:
+        allowed = ", ".join(SIMULATION_MODES)
+        raise ValueError(f"unknown simulation mode: {simulation_mode}; expected one of: {allowed}")
+
+
+def compile(circuit: Circuit, plan: CompilePlan | None = None) -> Circuit:
+    """Apply a synthesis compile plan to ``circuit`` and return the same circuit.
+
+    This is the lightweight in-memory facade. Use :func:`compile_netlist` when
+    you need the synthesis summary, or :func:`compile_layout` when you need
+    placement, routing, timing, and verification reports.
+    """
+    return compile_plan(circuit, plan or CompilePlan())
+
+
 def read_bench_file(file_path: str | Path, name: str | None = None) -> Circuit:
+    """Read a Berkeley BENCH file into a :class:`Circuit`."""
     _require_core_extension("read_bench_file(...)", _core_read_bench_file)
     return _core_read_bench_file(str(file_path), name)
 
 
 def read_bench_text(text: str, name: str | None = None) -> Circuit:
+    """Parse Berkeley BENCH text into a :class:`Circuit`."""
     _require_core_extension("read_bench_text(...)", _core_read_bench_text)
     return _core_read_bench_text(text, name)
 
@@ -665,10 +959,9 @@ def simulate_text(
     simulation_mode: str = "auto",
     external_command: str | None = None,
 ) -> SimulationReport:
-    if simulation_mode not in {"auto", "event_only", "external_josim", "internal_transient"}:
-        raise ValueError(f"unknown simulation mode: {simulation_mode}")
-    if _core_simulate_text is None:
-        raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+    """Simulate a SPICE-like deck string and return a structured report."""
+    _validate_simulation_mode(simulation_mode)
+    _require_core_extension("simulate_text(...)", _core_simulate_text)
 
     report = _core_simulate_text(deck_text, simulation_mode, external_command)
     return SimulationReport(
@@ -760,16 +1053,15 @@ def simulate_text(
 
 
 def simulate_file(
-    file_path: str,
+    file_path: str | Path,
     simulation_mode: str = "auto",
     external_command: str | None = None,
 ) -> SimulationReport:
-    if simulation_mode not in {"auto", "event_only", "external_josim", "internal_transient"}:
-        raise ValueError(f"unknown simulation mode: {simulation_mode}")
-    if _core_simulate_file is None:
-        raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+    """Simulate a SPICE-like deck file and return a structured report."""
+    _validate_simulation_mode(simulation_mode)
+    _require_core_extension("simulate_file(...)", _core_simulate_file)
 
-    report = _core_simulate_file(file_path, simulation_mode, external_command)
+    report = _core_simulate_file(str(file_path), simulation_mode, external_command)
     return SimulationReport(
         backend=report.backend,
         simulated_events=report.simulated_events,
@@ -862,8 +1154,8 @@ def check_equivalence(
     lhs: Circuit,
     rhs: Circuit,
 ) -> CombinationalEquivalenceReport:
-    if _core_check_equivalence is None:
-        raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+    """Check combinational equivalence between two circuits."""
+    _require_core_extension("check_equivalence(...)", _core_check_equivalence)
 
     report = _core_check_equivalence(lhs, rhs)
     return CombinationalEquivalenceReport(
@@ -886,8 +1178,11 @@ def check_single_step_sequential_equivalence(
     lhs: Circuit,
     rhs: Circuit,
 ) -> SingleStepSequentialEquivalenceReport:
-    if _core_check_single_step_sequential_equivalence is None:
-        raise RuntimeError("rflux extension is unavailable; run `uv run maturin develop`")
+    """Check one-step sequential equivalence between two circuits."""
+    _require_core_extension(
+        "check_single_step_sequential_equivalence(...)",
+        _core_check_single_step_sequential_equivalence,
+    )
 
     report = _core_check_single_step_sequential_equivalence(lhs, rhs)
     return SingleStepSequentialEquivalenceReport(
@@ -911,6 +1206,71 @@ def check_single_step_sequential_equivalence(
             )
             for entry in report.counterexample_states
         },
+        sat_recursive_calls=report.sat_recursive_calls,
+        sat_decisions=report.sat_decisions,
+        sat_backtracks=report.sat_backtracks,
+        sat_restarts=report.sat_restarts,
+        sat_elapsed_ns=report.sat_elapsed_ns,
+    )
+
+
+def _single_step_sequential_report_from_core(report) -> SingleStepSequentialEquivalenceReport:
+    return SingleStepSequentialEquivalenceReport(
+        equivalent=report.equivalent,
+        checked_outputs=list(report.checked_outputs),
+        checked_states=list(report.checked_states),
+        counterexample_inputs={entry.name: entry.value for entry in report.counterexample_inputs},
+        counterexample_present_states={
+            entry.name: entry.value for entry in report.counterexample_present_states
+        },
+        counterexample_outputs={
+            entry.name: OutputMismatch(lhs=entry.lhs, rhs=entry.rhs)
+            for entry in report.counterexample_outputs
+        },
+        counterexample_states={
+            entry.name: StateTransitionMismatch(
+                lhs_next=entry.lhs_next,
+                rhs_next=entry.rhs_next,
+                lhs_clock=entry.lhs_clock,
+                rhs_clock=entry.rhs_clock,
+            )
+            for entry in report.counterexample_states
+        },
+        sat_recursive_calls=report.sat_recursive_calls,
+        sat_decisions=report.sat_decisions,
+        sat_backtracks=report.sat_backtracks,
+        sat_restarts=report.sat_restarts,
+        sat_elapsed_ns=report.sat_elapsed_ns,
+    )
+
+
+def check_bounded_sequential_equivalence(
+    lhs: Circuit,
+    rhs: Circuit,
+    depth: int = 2,
+) -> BoundedSequentialEquivalenceReport:
+    """Check state-unrolled bounded sequential equivalence up to ``depth`` steps."""
+    _require_core_extension(
+        "check_bounded_sequential_equivalence(...)",
+        _core_check_bounded_sequential_equivalence,
+    )
+
+    report = _core_check_bounded_sequential_equivalence(lhs, rhs, depth)
+    return BoundedSequentialEquivalenceReport(
+        equivalent=report.equivalent,
+        depth=report.depth,
+        checked_steps=report.checked_steps,
+        unroll_mode=report.unroll_mode,
+        checked_outputs=list(report.checked_outputs),
+        checked_states=list(report.checked_states),
+        first_failing_step=report.first_failing_step,
+        steps=[
+            BoundedSequentialEquivalenceStepReport(
+                step=step.step,
+                report=_single_step_sequential_report_from_core(step.report),
+            )
+            for step in report.steps
+        ],
         sat_recursive_calls=report.sat_recursive_calls,
         sat_decisions=report.sat_decisions,
         sat_backtracks=report.sat_backtracks,
@@ -1082,6 +1442,15 @@ def _statistical_timing_report_from_core(report) -> StatisticalTimingAnalysisRep
                 route_length_um=arc.route_length_um,
                 from_domain=arc.from_domain,
                 to_domain=arc.to_domain,
+                launch_phase=arc.launch_phase,
+                capture_phase=arc.capture_phase,
+                launch_window_start_ps=arc.launch_window_start_ps,
+                launch_window_end_ps=arc.launch_window_end_ps,
+                capture_window_start_ps=arc.capture_window_start_ps,
+                capture_window_end_ps=arc.capture_window_end_ps,
+                arrival_phase_offset_ps=arc.arrival_phase_offset_ps,
+                capture_window_slack_ps=arc.capture_window_slack_ps,
+                capture_window_violation=arc.capture_window_violation,
                 mean_arrival_ps=arc.mean_arrival_ps,
                 mean_required_ps=arc.mean_required_ps,
                 setup_slack_ps=arc.setup_slack_ps,
@@ -1112,177 +1481,8 @@ def _to_core_crossing_constraints(crossing_constraints: list[CrossingConstraint]
     ]
 
 
-def _effective_required_ps(
-    timing_constraints: list[NodeTimingConstraint] | None,
-    pin_timing_constraints: list[PinTimingConstraint] | None,
-    clock_domains: list[ClockDomainConstraint] | None,
-    crossing_constraints: list[CrossingConstraint] | None = None,
-    default_period_ps: float = 120.0,
-) -> float:
-    domain_periods = {domain.id: domain.period_ps for domain in clock_domains or []}
-    candidates = [default_period_ps]
-    for constraint in crossing_constraints or []:
-        if constraint.kind == "max_delay" and constraint.value_ps is not None:
-            candidates.append(constraint.value_ps)
-        elif constraint.kind == "multicycle" and constraint.cycles is not None:
-            period_ps = domain_periods.get(constraint.to_domain, default_period_ps)
-            candidates.append(period_ps * max(constraint.cycles, 1))
-    for constraint in pin_timing_constraints or []:
-        if constraint.required_ps is not None:
-            candidates.append(constraint.required_ps)
-        elif constraint.clock_domain is not None and constraint.clock_domain in domain_periods:
-            candidates.append(domain_periods[constraint.clock_domain])
-    for constraint in timing_constraints or []:
-        if constraint.required_ps is not None:
-            candidates.append(constraint.required_ps)
-        elif constraint.clock_domain is not None and constraint.clock_domain in domain_periods:
-            candidates.append(domain_periods[constraint.clock_domain])
-    return min(candidates)
-
-
-def _fallback_false_path_arcs(
-    circuit: Circuit,
-    timing_constraints: list[NodeTimingConstraint] | None,
-    pin_timing_constraints: list[PinTimingConstraint] | None,
-    crossing_constraints: list[CrossingConstraint] | None,
-) -> int:
-    false_path_pairs = {
-        (constraint.from_domain, constraint.to_domain)
-        for constraint in crossing_constraints or []
-        if constraint.kind == "false_path"
-    }
-    if not false_path_pairs:
-        return 0
-
-    pin_domains = {
-        (constraint.pin.node, constraint.pin.port): constraint.clock_domain
-        for constraint in pin_timing_constraints or []
-        if constraint.clock_domain is not None
-    }
-    node_domains = {
-        constraint.node: constraint.clock_domain
-        for constraint in timing_constraints or []
-        if constraint.clock_domain is not None
-    }
-
-    count = 0
-    for (from_node, from_port), (to_node, to_port) in circuit.edges():
-        from_domain = pin_domains.get((from_node, from_port), node_domains.get(from_node))
-        to_domain = pin_domains.get((to_node, to_port), node_domains.get(to_node))
-        if from_domain is None or to_domain is None:
-            continue
-        if (from_domain, to_domain) in false_path_pairs and from_domain != to_domain:
-            count += 1
-    return count
-
-
-def _fallback_timing_arcs(
-    circuit: Circuit,
-    timing_constraints: list[NodeTimingConstraint] | None,
-    pin_timing_constraints: list[PinTimingConstraint] | None,
-    clock_domains: list[ClockDomainConstraint] | None,
-    crossing_constraints: list[CrossingConstraint] | None,
-) -> list[TimingArcReport]:
-    domain_periods = {domain.id: domain.period_ps for domain in clock_domains or []}
-    pin_domains = {
-        (constraint.pin.node, constraint.pin.port): constraint.clock_domain
-        for constraint in pin_timing_constraints or []
-        if constraint.clock_domain is not None
-    }
-    node_domains = {
-        constraint.node: constraint.clock_domain
-        for constraint in timing_constraints or []
-        if constraint.clock_domain is not None
-    }
-    false_path_pairs = {
-        (constraint.from_domain, constraint.to_domain)
-        for constraint in crossing_constraints or []
-        if constraint.kind == "false_path"
-    }
-
-    arcs: list[TimingArcReport] = []
-    for index, ((from_node, from_port), (to_node, to_port)) in enumerate(circuit.edges(), start=1):
-        from_domain = pin_domains.get((from_node, from_port), node_domains.get(from_node))
-        to_domain = pin_domains.get((to_node, to_port), node_domains.get(to_node))
-        is_false_path = (
-            from_domain is not None
-            and to_domain is not None
-            and from_domain != to_domain
-            and (from_domain, to_domain) in false_path_pairs
-        )
-        arrival_ps = float(index * 18)
-        required_ps = float("inf") if is_false_path else _effective_required_ps(
-            timing_constraints,
-            pin_timing_constraints,
-            clock_domains,
-            crossing_constraints,
-        )
-        setup_slack_ps = float("inf") if is_false_path else required_ps - arrival_ps
-        hold_slack_ps = 0.0
-        arcs.append(
-            TimingArcReport(
-                from_pin=PinRef(node=from_node, port=from_port),
-                to_pin=PinRef(node=to_node, port=to_port),
-                is_false_path=is_false_path,
-                route_mode="jtl",
-                route_length_um=40.0,
-                from_domain=from_domain,
-                to_domain=to_domain,
-                arrival_ps=arrival_ps,
-                required_ps=required_ps,
-                setup_slack_ps=setup_slack_ps,
-                hold_slack_ps=hold_slack_ps,
-            )
-        )
-    return arcs
-
-
-def _fallback_compile_report(plan: CompilePlan) -> CompileReport:
-    splitters_inserted = 0
-    seen_sources: set[PinRef] = set()
-    sink_inputs: dict[int, list[tuple[PinRef, int]]] = {}
-
-    for connection in plan.connections:
-        if connection.from_pin in seen_sources:
-            splitters_inserted += 1
-        else:
-            seen_sources.add(connection.from_pin)
-
-        sink_inputs.setdefault(connection.to_pin.node, []).append(
-            (connection.from_pin, _source_level(plan, connection.from_pin))
-        )
-
-    balancing_dffs_inserted = 0
-    if plan.balance_strategy is BalanceStrategy.EXPLICIT:
-        balancing_dffs_inserted = len(plan.balancing_sources)
-    elif plan.balance_strategy is BalanceStrategy.ALL_CONNECTED_SOURCES:
-        balancing_dffs_inserted = len({connection.from_pin for connection in plan.connections})
-    elif plan.balance_strategy is BalanceStrategy.BY_SINK_LEVEL:
-        for incoming in sink_inputs.values():
-            if len(incoming) < 2:
-                continue
-            max_level = max(level for _, level in incoming)
-            balancing_dffs_inserted += sum(max_level - level for _, level in incoming)
-
-    return CompileReport(
-        connections_applied=len(plan.connections),
-        splitters_inserted=splitters_inserted,
-        balancing_dffs_inserted=balancing_dffs_inserted,
-    )
-
-
-def _source_level(plan: CompilePlan, source: PinRef) -> int:
-    level_by_node: dict[int, int] = {}
-    for connection in plan.connections:
-        from_level = level_by_node.get(connection.from_pin.node, 0)
-        candidate = from_level + 1
-        current = level_by_node.get(connection.to_pin.node, 0)
-        if candidate > current:
-            level_by_node[connection.to_pin.node] = candidate
-    return level_by_node.get(source.node, 0)
-
-
 def compile_plan_report(circuit: Circuit, plan: CompilePlan) -> CompileReport:
+    """Apply a compile plan and return the synthesis edit counts."""
     _require_core_extension("compile_plan_report(...)", _core_compile_plan)
     core_plan = _to_core_compile_plan(plan)
     report = _core_compile_plan(circuit, core_plan)
@@ -1294,11 +1494,13 @@ def compile_plan_report(circuit: Circuit, plan: CompilePlan) -> CompileReport:
 
 
 def compile_plan(circuit: Circuit, plan: CompilePlan) -> Circuit:
+    """Apply a compile plan in place and return ``circuit``."""
     _ = compile_plan_report(circuit, plan)
     return circuit
 
 
 def compile_netlist(circuit: Circuit, plan: CompilePlan | None = None) -> SynthesisReport:
+    """Run synthesis-level compilation and return a netlist summary."""
     _require_core_extension("compile_netlist(...)", _core_compile_netlist)
     core_plan = _to_core_compile_plan(plan) if plan is not None else None
     report = _core_compile_netlist(circuit, core_plan)
@@ -1326,7 +1528,13 @@ def compile_layout(
     pin_timing_constraints: list[PinTimingConstraint] | None = None,
     clock_domains: list[ClockDomainConstraint] | None = None,
     crossing_constraints: list[CrossingConstraint] | None = None,
+    min_hold_jtl_length_um: float | None = None,
+    prefer_ptl_from_length_um: float | None = None,
+    detour_margin_um: float | None = None,
+    characterized_library_json: str | None = None,
+    characterized_library_entries: list[str] | None = None,
 ) -> LayoutReport:
+    """Run synthesis, placement, routing, timing, and layout verification."""
     _require_core_extension("compile_layout(...)", _core_compile_layout)
     core_plan = _to_core_compile_plan(plan) if plan is not None else None
     report = _core_compile_layout(
@@ -1338,6 +1546,11 @@ def compile_layout(
         _to_core_pin_timing_constraints(pin_timing_constraints),
         _to_core_clock_domains(clock_domains),
         _to_core_crossing_constraints(crossing_constraints),
+        min_hold_jtl_length_um,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
+        characterized_library_json,
+        characterized_library_entries,
     )
     return LayoutReport(
         connections_applied=report.connections_applied,
@@ -1361,6 +1574,9 @@ def compile_layout(
         analyzed_timing_arcs=report.analyzed_timing_arcs,
         false_path_arcs=report.false_path_arcs,
         setup_violations=report.setup_violations,
+        capture_window_violations=report.capture_window_violations,
+        timing_closure=_timing_closure_from_core(report.timing_closure),
+        timing_closure_loop=_timing_closure_loop_from_core(report.timing_closure_loop),
         routed_nets=report.routed_nets,
         total_route_length_um=report.total_route_length_um,
         initial_total_detour_overhead_um=report.initial_total_detour_overhead_um,
@@ -1371,6 +1587,82 @@ def compile_layout(
         ptl_routes=report.ptl_routes,
         node_count=report.node_count,
         edge_count=report.edge_count,
+    )
+
+
+def _timing_closure_loop_from_core(loop_report) -> TimingClosureLoopReport:
+    return TimingClosureLoopReport(
+        detour_feedback_attempted=loop_report.detour_feedback_attempted,
+        detour_feedback_applied=loop_report.detour_feedback_applied,
+        initial_total_detour_overhead_um=loop_report.initial_total_detour_overhead_um,
+        final_total_detour_overhead_um=loop_report.final_total_detour_overhead_um,
+        reduce_route_delay_candidate_available=loop_report.reduce_route_delay_candidate_available,
+        recommended_prefer_ptl_from_length_um=loop_report.recommended_prefer_ptl_from_length_um,
+        recommended_detour_margin_um=loop_report.recommended_detour_margin_um,
+        recommended_route_mode=loop_report.recommended_route_mode,
+        estimated_route_length_um=loop_report.estimated_route_length_um,
+        estimated_slack_deficit_ps=loop_report.estimated_slack_deficit_ps,
+        reduce_route_delay_candidate_attempted=loop_report.reduce_route_delay_candidate_attempted,
+        reduce_route_delay_candidate_improved=loop_report.reduce_route_delay_candidate_improved,
+        candidate_worst_setup_slack_ps=loop_report.candidate_worst_setup_slack_ps,
+        candidate_setup_violations=loop_report.candidate_setup_violations,
+        candidate_hold_violations=loop_report.candidate_hold_violations,
+        candidate_route_mode=loop_report.candidate_route_mode,
+        candidate_route_length_um=loop_report.candidate_route_length_um,
+        hold_fix_attempted=loop_report.hold_fix_attempted,
+        hold_fix_applied=loop_report.hold_fix_applied,
+        initial_hold_violations=loop_report.initial_hold_violations,
+        final_hold_violations=loop_report.final_hold_violations,
+        status=loop_report.status,
+        next_step=loop_report.next_step,
+    )
+
+
+def _timing_closure_from_core(closure) -> TimingClosureSummary:
+    return TimingClosureSummary(
+        closed=closure.closed,
+        status=closure.status,
+        setup_closed=closure.setup_closed,
+        hold_closed=closure.hold_closed,
+        capture_window_closed=closure.capture_window_closed,
+        setup_violations=closure.setup_violations,
+        hold_violations=closure.hold_violations,
+        capture_window_violations=closure.capture_window_violations,
+        failing_checks=list(closure.failing_checks),
+        action_count=closure.action_count,
+        primary_action=(
+            None
+            if closure.primary_action is None
+            else _timing_closure_action_from_core(closure.primary_action)
+        ),
+        reduce_route_delay_actions=closure.reduce_route_delay_actions,
+        relax_constraint_or_improve_library_timing_actions=(
+            closure.relax_constraint_or_improve_library_timing_actions
+        ),
+        add_hold_padding_actions=closure.add_hold_padding_actions,
+        adjust_sfq_phase_or_pulse_window_actions=(
+            closure.adjust_sfq_phase_or_pulse_window_actions
+        ),
+        actions=[
+            _timing_closure_action_from_core(action)
+            for action in closure.actions
+        ],
+        next_step=closure.next_step,
+    )
+
+
+def _timing_closure_action_from_core(action) -> TimingClosureAction:
+    return TimingClosureAction(
+        check=action.check,
+        priority=action.priority,
+        remediation_kind=action.remediation_kind,
+        from_pin=PinRef(node=action.from_pin.node, port=action.from_pin.port),
+        to_pin=PinRef(node=action.to_pin.node, port=action.to_pin.port),
+        slack_ps=action.slack_ps,
+        route_mode=action.route_mode,
+        route_length_um=action.route_length_um,
+        from_domain=action.from_domain,
+        to_domain=action.to_domain,
     )
 
 
@@ -1386,6 +1678,7 @@ def analyze_timing(
     characterized_library_json: str | None = None,
     characterized_library_entries: list[str] | None = None,
 ) -> TimingAnalysisReport:
+    """Run static timing analysis and return per-arc closure diagnostics."""
     _require_core_extension("analyze_timing(...)", _core_analyze_timing)
     core_plan = _to_core_compile_plan(plan) if plan is not None else None
     report = _core_analyze_timing(
@@ -1408,8 +1701,10 @@ def analyze_timing(
         false_path_arcs=report.false_path_arcs,
         setup_violations=report.setup_violations,
         hold_violations=report.hold_violations,
+        capture_window_violations=report.capture_window_violations,
         detour_feedback_applied=report.detour_feedback_applied,
         hold_fix_applied=report.hold_fix_applied,
+        closure=_timing_closure_from_core(report.closure),
         timing_arcs=[
             TimingArcReport(
                 from_pin=PinRef(node=arc.from_pin.node, port=arc.from_pin.port),
@@ -1419,6 +1714,15 @@ def analyze_timing(
                 route_length_um=arc.route_length_um,
                 from_domain=arc.from_domain,
                 to_domain=arc.to_domain,
+                launch_phase=arc.launch_phase,
+                capture_phase=arc.capture_phase,
+                launch_window_start_ps=arc.launch_window_start_ps,
+                launch_window_end_ps=arc.launch_window_end_ps,
+                capture_window_start_ps=arc.capture_window_start_ps,
+                capture_window_end_ps=arc.capture_window_end_ps,
+                arrival_phase_offset_ps=arc.arrival_phase_offset_ps,
+                capture_window_slack_ps=arc.capture_window_slack_ps,
+                capture_window_violation=arc.capture_window_violation,
                 arrival_ps=arc.arrival_ps,
                 required_ps=arc.required_ps,
                 setup_slack_ps=arc.setup_slack_ps,
@@ -1450,6 +1754,7 @@ def analyze_timing_statistical(
     multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0,
     sigma_multiplier: float = 3.0,
 ) -> StatisticalTimingAnalysisReport:
+    """Run statistical timing analysis and return pessimistic slack estimates."""
     _require_core_extension("analyze_timing_statistical(...)", _core_analyze_timing_statistical)
     core_plan = _to_core_compile_plan(plan) if plan is not None else None
     report = _core_analyze_timing_statistical(
@@ -1486,86 +1791,32 @@ def analyze_ac_bias(
     clock_domains: list[ClockDomainConstraint] | None = None,
     crossing_constraints: list[CrossingConstraint] | None = None,
 ) -> AcBiasReport:
-    if _core_analyze_ac_bias is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_analyze_ac_bias(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-        )
-        return AcBiasReport(
-            routed_nets=report.routed_nets,
-            jtl_carrier_candidates=report.jtl_carrier_candidates,
-            ptl_coupling_risk_routes=report.ptl_coupling_risk_routes,
-            clock_sink_count=report.clock_sink_count,
-            estimated_static_power_savings_uw=report.estimated_static_power_savings_uw,
-            estimated_area_overhead_ratio=report.estimated_area_overhead_ratio,
-            estimated_frequency_derate_ratio=report.estimated_frequency_derate_ratio,
-            worst_setup_slack_ps=report.worst_setup_slack_ps,
-            worst_hold_slack_ps=report.worst_hold_slack_ps,
-            timing_guardband_score=report.timing_guardband_score,
-            feasibility_score=report.feasibility_score,
-            optimization_score=report.optimization_score,
-        )
-
-    layout = compile_layout(
+    """Analyze AC-bias routing feasibility and timing guardband metrics."""
+    _require_core_extension("analyze_ac_bias(...)", _core_analyze_ac_bias)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_analyze_ac_bias(
         circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-    )
-    routed_nets = layout.routed_nets
-    jtl_carrier_candidates = layout.jtl_routes
-    ptl_coupling_risk_routes = layout.ptl_routes
-    clock_sink_count = layout.clock_sinks
-    estimated_static_power_savings_uw = jtl_carrier_candidates * 0.35
-    estimated_area_overhead_ratio = 1.0 if routed_nets == 0 else 1.0 + 0.23 * (jtl_carrier_candidates / routed_nets)
-    estimated_frequency_derate_ratio = 1.0 if clock_sink_count == 0 else max(0.25, 1.0 - 0.15 * (clock_sink_count / max(clock_sink_count + jtl_carrier_candidates, 1)))
-    worst_setup_slack_ps = layout.worst_setup_slack_ps
-    worst_hold_slack_ps = layout.worst_hold_slack_ps
-    carrier_ratio = 0.0 if routed_nets == 0 else jtl_carrier_candidates / routed_nets
-    coupling_penalty = 0.0 if routed_nets == 0 else ptl_coupling_risk_routes / routed_nets
-    feasibility_score = min(1.0, max(0.0, carrier_ratio * 0.7 + estimated_frequency_derate_ratio * 0.3 - coupling_penalty * 0.4))
-    normalized_power_savings = 0.0 if routed_nets == 0 else min(1.0, estimated_static_power_savings_uw / (routed_nets * 0.35))
-    normalized_area_efficiency = min(1.0, 1.0 / estimated_area_overhead_ratio)
-    normalized_coupling_margin = min(1.0, max(0.0, 1.0 - coupling_penalty))
-    normalized_setup_guardband = 0.0 if worst_setup_slack_ps <= 0.0 else min(1.0, worst_setup_slack_ps / (worst_setup_slack_ps + 20.0))
-    normalized_hold_guardband = 0.0 if worst_hold_slack_ps <= 0.0 else min(1.0, worst_hold_slack_ps / (worst_hold_slack_ps + 5.0))
-    timing_guardband_score = min(1.0, max(0.0, normalized_setup_guardband * 0.7 + normalized_hold_guardband * 0.3))
-    optimization_score = min(
-        1.0,
-        max(
-            0.0,
-            feasibility_score * 0.35
-            + timing_guardband_score * 0.25
-            + estimated_frequency_derate_ratio * 0.15
-            + normalized_area_efficiency * 0.10
-            + normalized_power_savings * 0.08
-            + normalized_coupling_margin * 0.07,
-        ),
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
     )
     return AcBiasReport(
-        routed_nets=layout.routed_nets,
-        jtl_carrier_candidates=layout.jtl_routes,
-        ptl_coupling_risk_routes=layout.ptl_routes,
-        clock_sink_count=layout.clock_sinks,
-        estimated_static_power_savings_uw=estimated_static_power_savings_uw,
-        estimated_area_overhead_ratio=estimated_area_overhead_ratio,
-        estimated_frequency_derate_ratio=estimated_frequency_derate_ratio,
-        worst_setup_slack_ps=worst_setup_slack_ps,
-        worst_hold_slack_ps=worst_hold_slack_ps,
-        timing_guardband_score=timing_guardband_score,
-        feasibility_score=feasibility_score,
-        optimization_score=optimization_score,
+        routed_nets=report.routed_nets,
+        jtl_carrier_candidates=report.jtl_carrier_candidates,
+        ptl_coupling_risk_routes=report.ptl_coupling_risk_routes,
+        clock_sink_count=report.clock_sink_count,
+        estimated_static_power_savings_uw=report.estimated_static_power_savings_uw,
+        estimated_area_overhead_ratio=report.estimated_area_overhead_ratio,
+        estimated_frequency_derate_ratio=report.estimated_frequency_derate_ratio,
+        worst_setup_slack_ps=report.worst_setup_slack_ps,
+        worst_hold_slack_ps=report.worst_hold_slack_ps,
+        timing_guardband_score=report.timing_guardband_score,
+        feasibility_score=report.feasibility_score,
+        optimization_score=report.optimization_score,
     )
 
 
@@ -1579,81 +1830,55 @@ def optimize_ac_bias(
     clock_domains: list[ClockDomainConstraint] | None = None,
     crossing_constraints: list[CrossingConstraint] | None = None,
 ) -> AcBiasOptimizationReport:
-    if _core_optimize_ac_bias is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_optimize_ac_bias(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-        )
-        return AcBiasOptimizationReport(
-            baseline=AcBiasReport(
-                routed_nets=report.baseline.routed_nets,
-                jtl_carrier_candidates=report.baseline.jtl_carrier_candidates,
-                ptl_coupling_risk_routes=report.baseline.ptl_coupling_risk_routes,
-                clock_sink_count=report.baseline.clock_sink_count,
-                estimated_static_power_savings_uw=report.baseline.estimated_static_power_savings_uw,
-                estimated_area_overhead_ratio=report.baseline.estimated_area_overhead_ratio,
-                estimated_frequency_derate_ratio=report.baseline.estimated_frequency_derate_ratio,
-                worst_setup_slack_ps=report.baseline.worst_setup_slack_ps,
-                worst_hold_slack_ps=report.baseline.worst_hold_slack_ps,
-                timing_guardband_score=report.baseline.timing_guardband_score,
-                feasibility_score=report.baseline.feasibility_score,
-                optimization_score=report.baseline.optimization_score,
-            ),
-            optimized=AcBiasReport(
-                routed_nets=report.optimized.routed_nets,
-                jtl_carrier_candidates=report.optimized.jtl_carrier_candidates,
-                ptl_coupling_risk_routes=report.optimized.ptl_coupling_risk_routes,
-                clock_sink_count=report.optimized.clock_sink_count,
-                estimated_static_power_savings_uw=report.optimized.estimated_static_power_savings_uw,
-                estimated_area_overhead_ratio=report.optimized.estimated_area_overhead_ratio,
-                estimated_frequency_derate_ratio=report.optimized.estimated_frequency_derate_ratio,
-                worst_setup_slack_ps=report.optimized.worst_setup_slack_ps,
-                worst_hold_slack_ps=report.optimized.worst_hold_slack_ps,
-                timing_guardband_score=report.optimized.timing_guardband_score,
-                feasibility_score=report.optimized.feasibility_score,
-                optimization_score=report.optimized.optimization_score,
-            ),
-            baseline_prefer_ptl_from_length_um=report.baseline_prefer_ptl_from_length_um,
-            optimized_prefer_ptl_from_length_um=report.optimized_prefer_ptl_from_length_um,
-            baseline_detour_margin_um=report.baseline_detour_margin_um,
-            optimized_detour_margin_um=report.optimized_detour_margin_um,
-            threshold_candidates_evaluated=report.threshold_candidates_evaluated,
-            detour_margin_candidates_evaluated=report.detour_margin_candidates_evaluated,
-            optimization_applied=report.optimization_applied,
-        )
-
-    baseline = analyze_ac_bias(
+    """Search AC-bias routing knobs and return before/after metrics."""
+    _require_core_extension("optimize_ac_bias(...)", _core_optimize_ac_bias)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_optimize_ac_bias(
         circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
     )
-    baseline_threshold = 60.0
-    baseline_detour_margin = 12.0
-    threshold_candidates = [baseline_threshold]
-    detour_margin_candidates = [baseline_detour_margin]
-
     return AcBiasOptimizationReport(
-        baseline=baseline,
-        optimized=baseline,
-        baseline_prefer_ptl_from_length_um=baseline_threshold,
-        optimized_prefer_ptl_from_length_um=baseline_threshold,
-        threshold_candidates_evaluated=len(threshold_candidates),
-        baseline_detour_margin_um=baseline_detour_margin,
-        optimized_detour_margin_um=baseline_detour_margin,
-        detour_margin_candidates_evaluated=len(detour_margin_candidates),
-        optimization_applied=False,
+        baseline=AcBiasReport(
+            routed_nets=report.baseline.routed_nets,
+            jtl_carrier_candidates=report.baseline.jtl_carrier_candidates,
+            ptl_coupling_risk_routes=report.baseline.ptl_coupling_risk_routes,
+            clock_sink_count=report.baseline.clock_sink_count,
+            estimated_static_power_savings_uw=report.baseline.estimated_static_power_savings_uw,
+            estimated_area_overhead_ratio=report.baseline.estimated_area_overhead_ratio,
+            estimated_frequency_derate_ratio=report.baseline.estimated_frequency_derate_ratio,
+            worst_setup_slack_ps=report.baseline.worst_setup_slack_ps,
+            worst_hold_slack_ps=report.baseline.worst_hold_slack_ps,
+            timing_guardband_score=report.baseline.timing_guardband_score,
+            feasibility_score=report.baseline.feasibility_score,
+            optimization_score=report.baseline.optimization_score,
+        ),
+        optimized=AcBiasReport(
+            routed_nets=report.optimized.routed_nets,
+            jtl_carrier_candidates=report.optimized.jtl_carrier_candidates,
+            ptl_coupling_risk_routes=report.optimized.ptl_coupling_risk_routes,
+            clock_sink_count=report.optimized.clock_sink_count,
+            estimated_static_power_savings_uw=report.optimized.estimated_static_power_savings_uw,
+            estimated_area_overhead_ratio=report.optimized.estimated_area_overhead_ratio,
+            estimated_frequency_derate_ratio=report.optimized.estimated_frequency_derate_ratio,
+            worst_setup_slack_ps=report.optimized.worst_setup_slack_ps,
+            worst_hold_slack_ps=report.optimized.worst_hold_slack_ps,
+            timing_guardband_score=report.optimized.timing_guardband_score,
+            feasibility_score=report.optimized.feasibility_score,
+            optimization_score=report.optimized.optimization_score,
+        ),
+        baseline_prefer_ptl_from_length_um=report.baseline_prefer_ptl_from_length_um,
+        optimized_prefer_ptl_from_length_um=report.optimized_prefer_ptl_from_length_um,
+        baseline_detour_margin_um=report.baseline_detour_margin_um,
+        optimized_detour_margin_um=report.optimized_detour_margin_um,
+        threshold_candidates_evaluated=report.threshold_candidates_evaluated,
+        detour_margin_candidates_evaluated=report.detour_margin_candidates_evaluated,
+        optimization_applied=report.optimization_applied,
     )
 
 
@@ -1669,8 +1894,8 @@ def verify_layout(
     simulation_mode: str = "auto",
     external_command: str | None = None,
 ) -> VerificationReport:
-    if simulation_mode not in {"auto", "event_only", "external_josim", "internal_transient"}:
-        raise ValueError(f"unknown simulation mode: {simulation_mode}")
+    """Run structural, routing, and simulation-backed layout checks."""
+    _validate_simulation_mode(simulation_mode)
     _require_core_extension("verify_layout(...)", _core_verify_layout)
     core_plan = _to_core_compile_plan(plan) if plan is not None else None
     report = _core_verify_layout(
@@ -1791,111 +2016,42 @@ def characterize_compound_cell(
     simulation_mode: str = "auto",
     external_command: str | None = None,
 ) -> CompoundCellCharacterizationReport:
-    if simulation_mode not in {"auto", "event_only", "external_josim", "internal_transient"}:
-        raise ValueError(f"unknown simulation mode: {simulation_mode}")
+    """Characterize a circuit as a reusable compound cell library entry."""
+    _validate_simulation_mode(simulation_mode)
 
-    if _core_characterize_compound_cell is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_characterize_compound_cell(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            cell_name,
-            simulation_mode,
-            external_command,
-        )
-        return CompoundCellCharacterizationReport(
-            cell_name=report.cell_name,
-            node_count=report.node_count,
-            edge_count=report.edge_count,
-            mapped_nodes=report.mapped_nodes,
-            total_area_um2=report.total_area_um2,
-            derived_intrinsic_delay_ps=report.derived_intrinsic_delay_ps,
-            derived_setup_ps=report.derived_setup_ps,
-            derived_hold_ps=report.derived_hold_ps,
-            generated_cell_kind=report.generated_cell_kind,
-            generated_pipeline_stages=report.generated_pipeline_stages,
-            generated_library_json=report.generated_library_json,
-            simulated_delay_ps=report.simulated_delay_ps,
-            simulation_backend=report.simulation_backend,
-            generated_deck_lines=report.generated_deck_lines,
-            generated_deck_path=report.generated_deck_path,
-            waveform_path=report.waveform_path,
-            reported_violations=report.reported_violations,
-        )
-
-    layout = compile_layout(
+    _require_core_extension("characterize_compound_cell(...)", _core_characterize_compound_cell)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_characterize_compound_cell(
         circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-    )
-    verification = verify_layout(
-        circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-        simulation_mode=simulation_mode,
-        external_command=external_command,
-    )
-    generated_cell_kind = "macro" if layout.mapped_nodes > 1 or layout.node_count > 1 else "generic_gate"
-    generated_pipeline_stages = max(layout.clock_phase_count, 1)
-    generated_library_json = json.dumps(
-        {
-            "cell": {
-                "name": cell_name,
-                "kind": "Macro" if generated_cell_kind == "macro" else "GenericGate",
-                "area_um2": layout.total_area_um2,
-                "pipeline_stages": generated_pipeline_stages,
-            },
-            "timing": {
-                "kind": "Macro" if generated_cell_kind == "macro" else "GenericGate",
-                "intrinsic_delay_ps": (
-                    verification.reported_worst_delay_ps
-                    if verification.reported_worst_delay_ps is not None
-                    else layout.critical_path_delay_ps
-                ),
-                "setup_ps": max(layout.critical_path_delay_ps * 0.12, float(layout.setup_violations)),
-                "hold_ps": max(layout.worst_hold_slack_ps, 0.0),
-            },
-        },
-        indent=2,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        cell_name,
+        simulation_mode,
+        external_command,
     )
     return CompoundCellCharacterizationReport(
-        cell_name=cell_name,
-        node_count=layout.node_count,
-        edge_count=layout.edge_count,
-        mapped_nodes=layout.mapped_nodes,
-        total_area_um2=layout.total_area_um2,
-        derived_intrinsic_delay_ps=(
-            verification.reported_worst_delay_ps
-            if verification.reported_worst_delay_ps is not None
-            else layout.critical_path_delay_ps
-        ),
-        derived_setup_ps=max(layout.critical_path_delay_ps * 0.12, float(layout.setup_violations)),
-        derived_hold_ps=max(layout.worst_hold_slack_ps, 0.0),
-        generated_cell_kind=generated_cell_kind,
-        generated_pipeline_stages=generated_pipeline_stages,
-        generated_library_json=generated_library_json,
-        simulated_delay_ps=verification.reported_worst_delay_ps,
-        simulation_backend=verification.simulation_backend,
-        generated_deck_lines=verification.generated_deck_lines,
-        generated_deck_path=verification.generated_deck_path,
-        waveform_path=verification.waveform_path,
-        reported_violations=verification.reported_violations,
+        cell_name=report.cell_name,
+        node_count=report.node_count,
+        edge_count=report.edge_count,
+        mapped_nodes=report.mapped_nodes,
+        total_area_um2=report.total_area_um2,
+        derived_intrinsic_delay_ps=report.derived_intrinsic_delay_ps,
+        derived_setup_ps=report.derived_setup_ps,
+        derived_hold_ps=report.derived_hold_ps,
+        generated_cell_kind=report.generated_cell_kind,
+        generated_pipeline_stages=report.generated_pipeline_stages,
+        generated_library_json=report.generated_library_json,
+        simulated_delay_ps=report.simulated_delay_ps,
+        simulation_backend=report.simulation_backend,
+        generated_deck_lines=report.generated_deck_lines,
+        generated_deck_path=report.generated_deck_path,
+        waveform_path=report.waveform_path,
+        reported_violations=report.reported_violations,
     )
 
 
@@ -1914,82 +2070,41 @@ def analyze_advanced_constraints(
     max_detour_overhead_ratio: float = 0.35,
     max_ptl_coupling_ratio: float = 0.65,
 ) -> AdvancedConstraintReport:
-    if _core_analyze_advanced_constraints is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_analyze_advanced_constraints(
-            circuit,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            max_estimated_thermal_load_uw,
-            max_estimated_mechanical_stress_score,
-            max_jtl_density_per_100um,
-            max_detour_overhead_ratio,
-            max_ptl_coupling_ratio,
-        )
-        return AdvancedConstraintReport(
-            estimated_thermal_load_uw=report.estimated_thermal_load_uw,
-            estimated_mechanical_stress_score=report.estimated_mechanical_stress_score,
-            jtl_density_per_100um=report.jtl_density_per_100um,
-            detour_overhead_ratio=report.detour_overhead_ratio,
-            ptl_coupling_ratio=report.ptl_coupling_ratio,
-            manufacturing_hotspots=report.manufacturing_hotspots,
-            violation_count=report.violation_count,
-            violations=[
-                AdvancedConstraintViolation(
-                    category=violation.category,
-                    detail=violation.detail,
-                    measured_value=violation.measured_value,
-                    limit_value=violation.limit_value,
-                )
-                for violation in report.violations
-            ],
-        )
-
-    layout = compile_layout(
+    """Evaluate thermal, mechanical, manufacturing, and coupling budgets."""
+    _require_core_extension("analyze_advanced_constraints(...)", _core_analyze_advanced_constraints)
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_analyze_advanced_constraints(
         circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        max_estimated_thermal_load_uw,
+        max_estimated_mechanical_stress_score,
+        max_jtl_density_per_100um,
+        max_detour_overhead_ratio,
+        max_ptl_coupling_ratio,
     )
-    total_length_um = max(layout.total_route_length_um, 1.0)
-    routed_nets = max(layout.routed_nets, 1)
-    estimated_thermal_load_uw = layout.jtl_routes * 0.22 + layout.ptl_routes * 0.08 + layout.clock_sinks * 0.05
-    detour_overhead_ratio = min(1.0, max(0.0, layout.total_detour_overhead_um / total_length_um))
-    ptl_coupling_ratio = min(1.0, max(0.0, layout.ptl_routes / routed_nets))
-    jtl_density_per_100um = layout.jtl_routes / max(total_length_um / 100.0, 1.0)
-    estimated_mechanical_stress_score = min(
-        1.0,
-        max(0.0, detour_overhead_ratio * 0.6 + ptl_coupling_ratio * 0.25 + (jtl_density_per_100um / 10.0) * 0.15),
-    )
-    violations: list[AdvancedConstraintViolation] = []
-    if estimated_thermal_load_uw > max_estimated_thermal_load_uw:
-        violations.append(AdvancedConstraintViolation("thermal", "estimated thermal load exceeds configured budget", estimated_thermal_load_uw, max_estimated_thermal_load_uw))
-    if estimated_mechanical_stress_score > max_estimated_mechanical_stress_score:
-        violations.append(AdvancedConstraintViolation("mechanical", "estimated mechanical stress score exceeds configured limit", estimated_mechanical_stress_score, max_estimated_mechanical_stress_score))
-    if jtl_density_per_100um > max_jtl_density_per_100um:
-        violations.append(AdvancedConstraintViolation("manufacturing", "JTL density exceeds configured manufacturing limit", jtl_density_per_100um, max_jtl_density_per_100um))
-    if detour_overhead_ratio > max_detour_overhead_ratio:
-        violations.append(AdvancedConstraintViolation("manufacturing", "detour overhead ratio exceeds configured manufacturability limit", detour_overhead_ratio, max_detour_overhead_ratio))
-    if ptl_coupling_ratio > max_ptl_coupling_ratio:
-        violations.append(AdvancedConstraintViolation("electrical", "PTL coupling ratio exceeds configured electrical limit", ptl_coupling_ratio, max_ptl_coupling_ratio))
     return AdvancedConstraintReport(
-        estimated_thermal_load_uw=estimated_thermal_load_uw,
-        estimated_mechanical_stress_score=estimated_mechanical_stress_score,
-        jtl_density_per_100um=jtl_density_per_100um,
-        detour_overhead_ratio=detour_overhead_ratio,
-        ptl_coupling_ratio=ptl_coupling_ratio,
-        manufacturing_hotspots=layout.detoured_routes + int(detour_overhead_ratio > 0.20) + int(ptl_coupling_ratio > 0.50),
-        violation_count=len(violations),
-        violations=violations,
+        estimated_thermal_load_uw=report.estimated_thermal_load_uw,
+        estimated_mechanical_stress_score=report.estimated_mechanical_stress_score,
+        jtl_density_per_100um=report.jtl_density_per_100um,
+        detour_overhead_ratio=report.detour_overhead_ratio,
+        ptl_coupling_ratio=report.ptl_coupling_ratio,
+        manufacturing_hotspots=report.manufacturing_hotspots,
+        violation_count=report.violation_count,
+        violations=[
+            AdvancedConstraintViolation(
+                category=violation.category,
+                detail=violation.detail,
+                measured_value=violation.measured_value,
+                limit_value=violation.limit_value,
+            )
+            for violation in report.violations
+        ],
     )
 
 
@@ -1997,19 +2112,9 @@ def merge_characterized_library(
     serialized_entries: list[str],
     base_name: str = "py-minimal-pdk",
 ) -> str:
-    if _core_merge_characterized_library is not None:
-        return _core_merge_characterized_library(serialized_entries, base_name)
-    if _CorePdk is not None:
-        pdk = Pdk.minimal(base_name)
-        for entry in serialized_entries:
-            pdk = pdk.merge_characterized_library_json(entry)
-        return pdk.to_json()
-    if len(serialized_entries) == 1:
-        return serialized_entries[0]
-    return json.dumps(
-        {"entries": [json.loads(entry) for entry in serialized_entries]},
-        indent=2,
-    )
+    """Merge characterized library JSON entries into a PDK JSON document."""
+    _require_core_extension("merge_characterized_library(...)", _core_merge_characterized_library)
+    return _core_merge_characterized_library(serialized_entries, base_name)
 
 
 def optimize_ac_bias_with_characterized_library(
@@ -2028,133 +2133,34 @@ def optimize_ac_bias_with_characterized_library(
     max_detour_overhead_ratio: float = 0.35,
     max_ptl_coupling_ratio: float = 0.65,
 ) -> LibraryAwareAcBiasOptimizationReport:
-    if _core_optimize_ac_bias_with_characterized_library is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_optimize_ac_bias_with_characterized_library(
-            circuit,
-            characterized_library_entries,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            max_estimated_thermal_load_uw,
-            max_estimated_mechanical_stress_score,
-            max_jtl_density_per_100um,
-            max_detour_overhead_ratio,
-            max_ptl_coupling_ratio,
-        )
-        return LibraryAwareAcBiasOptimizationReport(
-            ac_bias=AcBiasOptimizationReport(
-                baseline=AcBiasReport(
-                    routed_nets=report.ac_bias.baseline.routed_nets,
-                    jtl_carrier_candidates=report.ac_bias.baseline.jtl_carrier_candidates,
-                    ptl_coupling_risk_routes=report.ac_bias.baseline.ptl_coupling_risk_routes,
-                    clock_sink_count=report.ac_bias.baseline.clock_sink_count,
-                    estimated_static_power_savings_uw=report.ac_bias.baseline.estimated_static_power_savings_uw,
-                    estimated_area_overhead_ratio=report.ac_bias.baseline.estimated_area_overhead_ratio,
-                    estimated_frequency_derate_ratio=report.ac_bias.baseline.estimated_frequency_derate_ratio,
-                    worst_setup_slack_ps=report.ac_bias.baseline.worst_setup_slack_ps,
-                    worst_hold_slack_ps=report.ac_bias.baseline.worst_hold_slack_ps,
-                    timing_guardband_score=report.ac_bias.baseline.timing_guardband_score,
-                    feasibility_score=report.ac_bias.baseline.feasibility_score,
-                    optimization_score=report.ac_bias.baseline.optimization_score,
-                ),
-                optimized=AcBiasReport(
-                    routed_nets=report.ac_bias.optimized.routed_nets,
-                    jtl_carrier_candidates=report.ac_bias.optimized.jtl_carrier_candidates,
-                    ptl_coupling_risk_routes=report.ac_bias.optimized.ptl_coupling_risk_routes,
-                    clock_sink_count=report.ac_bias.optimized.clock_sink_count,
-                    estimated_static_power_savings_uw=report.ac_bias.optimized.estimated_static_power_savings_uw,
-                    estimated_area_overhead_ratio=report.ac_bias.optimized.estimated_area_overhead_ratio,
-                    estimated_frequency_derate_ratio=report.ac_bias.optimized.estimated_frequency_derate_ratio,
-                    worst_setup_slack_ps=report.ac_bias.optimized.worst_setup_slack_ps,
-                    worst_hold_slack_ps=report.ac_bias.optimized.worst_hold_slack_ps,
-                    timing_guardband_score=report.ac_bias.optimized.timing_guardband_score,
-                    feasibility_score=report.ac_bias.optimized.feasibility_score,
-                    optimization_score=report.ac_bias.optimized.optimization_score,
-                ),
-                baseline_prefer_ptl_from_length_um=report.ac_bias.baseline_prefer_ptl_from_length_um,
-                optimized_prefer_ptl_from_length_um=report.ac_bias.optimized_prefer_ptl_from_length_um,
-                baseline_detour_margin_um=report.ac_bias.baseline_detour_margin_um,
-                optimized_detour_margin_um=report.ac_bias.optimized_detour_margin_um,
-                threshold_candidates_evaluated=report.ac_bias.threshold_candidates_evaluated,
-                detour_margin_candidates_evaluated=report.ac_bias.detour_margin_candidates_evaluated,
-                optimization_applied=report.ac_bias.optimization_applied,
-            ),
-            baseline_constraints=AdvancedConstraintReport(
-                estimated_thermal_load_uw=report.baseline_constraints.estimated_thermal_load_uw,
-                estimated_mechanical_stress_score=report.baseline_constraints.estimated_mechanical_stress_score,
-                jtl_density_per_100um=report.baseline_constraints.jtl_density_per_100um,
-                detour_overhead_ratio=report.baseline_constraints.detour_overhead_ratio,
-                ptl_coupling_ratio=report.baseline_constraints.ptl_coupling_ratio,
-                manufacturing_hotspots=report.baseline_constraints.manufacturing_hotspots,
-                violation_count=report.baseline_constraints.violation_count,
-                violations=[
-                    AdvancedConstraintViolation(
-                        category=item.category,
-                        detail=item.detail,
-                        measured_value=item.measured_value,
-                        limit_value=item.limit_value,
-                    )
-                    for item in report.baseline_constraints.violations
-                ],
-            ),
-            optimized_constraints=AdvancedConstraintReport(
-                estimated_thermal_load_uw=report.optimized_constraints.estimated_thermal_load_uw,
-                estimated_mechanical_stress_score=report.optimized_constraints.estimated_mechanical_stress_score,
-                jtl_density_per_100um=report.optimized_constraints.jtl_density_per_100um,
-                detour_overhead_ratio=report.optimized_constraints.detour_overhead_ratio,
-                ptl_coupling_ratio=report.optimized_constraints.ptl_coupling_ratio,
-                manufacturing_hotspots=report.optimized_constraints.manufacturing_hotspots,
-                violation_count=report.optimized_constraints.violation_count,
-                violations=[
-                    AdvancedConstraintViolation(
-                        category=item.category,
-                        detail=item.detail,
-                        measured_value=item.measured_value,
-                        limit_value=item.limit_value,
-                    )
-                    for item in report.optimized_constraints.violations
-                ],
-            ),
-            characterized_cells_merged=report.characterized_cells_merged,
-            library_optimization_score=report.library_optimization_score,
-        )
-
-    ac_bias = optimize_ac_bias(
-        circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
+    """Optimize AC-bias settings using characterized cell library feedback."""
+    _require_core_extension(
+        "optimize_ac_bias_with_characterized_library(...)",
+        _core_optimize_ac_bias_with_characterized_library,
     )
-    baseline_constraints = analyze_advanced_constraints(
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_optimize_ac_bias_with_characterized_library(
         circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-        max_estimated_thermal_load_uw=max_estimated_thermal_load_uw,
-        max_estimated_mechanical_stress_score=max_estimated_mechanical_stress_score,
-        max_jtl_density_per_100um=max_jtl_density_per_100um,
-        max_detour_overhead_ratio=max_detour_overhead_ratio,
-        max_ptl_coupling_ratio=max_ptl_coupling_ratio,
+        characterized_library_entries,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        max_estimated_thermal_load_uw,
+        max_estimated_mechanical_stress_score,
+        max_jtl_density_per_100um,
+        max_detour_overhead_ratio,
+        max_ptl_coupling_ratio,
     )
     return LibraryAwareAcBiasOptimizationReport(
-        ac_bias=ac_bias,
-        baseline_constraints=baseline_constraints,
-        optimized_constraints=baseline_constraints,
-        characterized_cells_merged=len(characterized_library_entries),
-        library_optimization_score=ac_bias.optimized.optimization_score,
+        ac_bias=_ac_bias_optimization_report_from_core(report.ac_bias),
+        baseline_constraints=_advanced_constraint_report_from_core(report.baseline_constraints),
+        optimized_constraints=_advanced_constraint_report_from_core(report.optimized_constraints),
+        characterized_cells_merged=report.characterized_cells_merged,
+        library_optimization_score=report.library_optimization_score,
     )
 
 
@@ -2183,95 +2189,53 @@ def optimize_design_with_characterized_library(
     multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0,
     sigma_multiplier: float = 3.0,
 ) -> LibraryAwareDesignOptimizationReport:
-    if _core_optimize_design_with_characterized_library is not None:
-        core_plan = _to_core_compile_plan(plan) if plan is not None else None
-        report = _core_optimize_design_with_characterized_library(
-            circuit,
-            characterized_library_entries,
-            core_plan,
-            _to_core_fixed_nodes(fixed_nodes),
-            _to_core_blocked_regions(blocked_regions),
-            _to_core_timing_constraints(timing_constraints),
-            _to_core_pin_timing_constraints(pin_timing_constraints),
-            _to_core_clock_domains(clock_domains),
-            _to_core_crossing_constraints(crossing_constraints),
-            max_estimated_thermal_load_uw,
-            max_estimated_mechanical_stress_score,
-            max_jtl_density_per_100um,
-            max_detour_overhead_ratio,
-            max_ptl_coupling_ratio,
-            cell_delay_sigma_ratio,
-            wire_delay_sigma_ratio,
-            global_cell_delay_sigma_ratio,
-            global_wire_delay_sigma_ratio,
-            clock_uncertainty_sigma_ps,
-            cross_domain_uncertainty_sigma_ps,
-            max_delay_cross_domain_uncertainty_sigma_ps,
-            multicycle_cross_domain_uncertainty_sigma_ps,
-            sigma_multiplier,
-        )
-        return LibraryAwareDesignOptimizationReport(
-            ac_bias=_ac_bias_optimization_report_from_core(report.ac_bias),
-            baseline_statistical=_statistical_timing_report_from_core(report.baseline_statistical),
-            optimized_statistical=_statistical_timing_report_from_core(report.optimized_statistical),
-            baseline_constraints=_advanced_constraint_report_from_core(report.baseline_constraints),
-            optimized_constraints=_advanced_constraint_report_from_core(report.optimized_constraints),
-            characterized_cells_merged=report.characterized_cells_merged,
-            design_optimization_score=report.design_optimization_score,
-            baseline_cell_delay_sigma_ratio=report.baseline_cell_delay_sigma_ratio,
-            optimized_cell_delay_sigma_ratio=report.optimized_cell_delay_sigma_ratio,
-            baseline_sigma_multiplier=report.baseline_sigma_multiplier,
-            optimized_sigma_multiplier=report.optimized_sigma_multiplier,
-            baseline_placement_halo_scale=report.baseline_placement_halo_scale,
-            optimized_placement_halo_scale=report.optimized_placement_halo_scale,
-            placement_candidates_evaluated=report.placement_candidates_evaluated,
-            statistical_candidates_evaluated=report.statistical_candidates_evaluated,
-        )
-
-    ac_report = optimize_ac_bias_with_characterized_library(
+    """Optimize routing, constraints, and statistical timing using library feedback."""
+    _require_core_extension(
+        "optimize_design_with_characterized_library(...)",
+        _core_optimize_design_with_characterized_library,
+    )
+    core_plan = _to_core_compile_plan(plan) if plan is not None else None
+    report = _core_optimize_design_with_characterized_library(
         circuit,
         characterized_library_entries,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-        max_estimated_thermal_load_uw=max_estimated_thermal_load_uw,
-        max_estimated_mechanical_stress_score=max_estimated_mechanical_stress_score,
-        max_jtl_density_per_100um=max_jtl_density_per_100um,
-        max_detour_overhead_ratio=max_detour_overhead_ratio,
-        max_ptl_coupling_ratio=max_ptl_coupling_ratio,
-    )
-    baseline_statistical = analyze_timing_statistical(
-        circuit,
-        plan=plan,
-        fixed_nodes=fixed_nodes,
-        blocked_regions=blocked_regions,
-        timing_constraints=timing_constraints,
-        pin_timing_constraints=pin_timing_constraints,
-        clock_domains=clock_domains,
-        crossing_constraints=crossing_constraints,
-        characterized_library_entries=characterized_library_entries,
-        cell_delay_sigma_ratio=cell_delay_sigma_ratio,
-        wire_delay_sigma_ratio=wire_delay_sigma_ratio,
-        global_cell_delay_sigma_ratio=global_cell_delay_sigma_ratio,
-        global_wire_delay_sigma_ratio=global_wire_delay_sigma_ratio,
-        clock_uncertainty_sigma_ps=clock_uncertainty_sigma_ps,
-        cross_domain_uncertainty_sigma_ps=cross_domain_uncertainty_sigma_ps,
-        max_delay_cross_domain_uncertainty_sigma_ps=max_delay_cross_domain_uncertainty_sigma_ps,
-        multicycle_cross_domain_uncertainty_sigma_ps=multicycle_cross_domain_uncertainty_sigma_ps,
-        sigma_multiplier=sigma_multiplier,
+        core_plan,
+        _to_core_fixed_nodes(fixed_nodes),
+        _to_core_blocked_regions(blocked_regions),
+        _to_core_timing_constraints(timing_constraints),
+        _to_core_pin_timing_constraints(pin_timing_constraints),
+        _to_core_clock_domains(clock_domains),
+        _to_core_crossing_constraints(crossing_constraints),
+        max_estimated_thermal_load_uw,
+        max_estimated_mechanical_stress_score,
+        max_jtl_density_per_100um,
+        max_detour_overhead_ratio,
+        max_ptl_coupling_ratio,
+        cell_delay_sigma_ratio,
+        wire_delay_sigma_ratio,
+        global_cell_delay_sigma_ratio,
+        global_wire_delay_sigma_ratio,
+        clock_uncertainty_sigma_ps,
+        cross_domain_uncertainty_sigma_ps,
+        max_delay_cross_domain_uncertainty_sigma_ps,
+        multicycle_cross_domain_uncertainty_sigma_ps,
+        sigma_multiplier,
     )
     return LibraryAwareDesignOptimizationReport(
-        ac_bias=ac_report.ac_bias,
-        baseline_statistical=baseline_statistical,
-        optimized_statistical=baseline_statistical,
-        baseline_constraints=ac_report.baseline_constraints,
-        optimized_constraints=ac_report.optimized_constraints,
-        characterized_cells_merged=ac_report.characterized_cells_merged,
-        design_optimization_score=ac_report.library_optimization_score,
+        ac_bias=_ac_bias_optimization_report_from_core(report.ac_bias),
+        baseline_statistical=_statistical_timing_report_from_core(report.baseline_statistical),
+        optimized_statistical=_statistical_timing_report_from_core(report.optimized_statistical),
+        baseline_constraints=_advanced_constraint_report_from_core(report.baseline_constraints),
+        optimized_constraints=_advanced_constraint_report_from_core(report.optimized_constraints),
+        characterized_cells_merged=report.characterized_cells_merged,
+        design_optimization_score=report.design_optimization_score,
+        baseline_cell_delay_sigma_ratio=report.baseline_cell_delay_sigma_ratio,
+        optimized_cell_delay_sigma_ratio=report.optimized_cell_delay_sigma_ratio,
+        baseline_sigma_multiplier=report.baseline_sigma_multiplier,
+        optimized_sigma_multiplier=report.optimized_sigma_multiplier,
+        baseline_placement_halo_scale=report.baseline_placement_halo_scale,
+        optimized_placement_halo_scale=report.optimized_placement_halo_scale,
+        placement_candidates_evaluated=report.placement_candidates_evaluated,
+        statistical_candidates_evaluated=report.statistical_candidates_evaluated,
     )
 
 
@@ -2282,6 +2246,13 @@ __all__ = [
     "ClockDomainConstraint",
     "CrossingConstraint",
     "Circuit",
+    "CoreStatus",
+    "RfluxError",
+    "RfluxCoreUnavailableError",
+    "SIMULATION_MODES",
+    "CellLibraryEntry",
+    "CellLibraryMetadata",
+    "CellLibrarySummary",
     "CompilePlan",
     "CompileReport",
     "ConnectionSpec",
@@ -2291,6 +2262,9 @@ __all__ = [
     "PinTimingConstraint",
     "TimingAnalysisReport",
     "TimingArcReport",
+    "TimingClosureAction",
+    "TimingClosureLoopReport",
+    "TimingClosureSummary",
     "StatisticalTimingAnalysisReport",
     "StatisticalTimingArcReport",
     "AcBiasReport",
@@ -2300,6 +2274,8 @@ __all__ = [
     "Pdk",
     "AdvancedConstraintReport",
     "AdvancedConstraintViolation",
+    "BoundedSequentialEquivalenceReport",
+    "BoundedSequentialEquivalenceStepReport",
     "CombinationalEquivalenceReport",
     "VerificationReport",
     "CompoundCellCharacterizationReport",
@@ -2310,6 +2286,7 @@ __all__ = [
     "SimulationEndpointRef",
     "SimulationMeasurementDetail",
     "SimulationMeasurementWarning",
+    "SimulationReport",
     "SimulationViolationDetail",
     "SingleStepSequentialEquivalenceReport",
     "StateTransitionMismatch",
@@ -2324,13 +2301,18 @@ __all__ = [
     "merge_characterized_library",
     "read_bench_file",
     "read_bench_text",
+    "simulate_file",
+    "simulate_text",
     "compile",
     "compile_layout",
     "compile_netlist",
     "compile_plan",
     "compile_plan_report",
     "check_equivalence",
+    "check_bounded_sequential_equivalence",
     "check_single_step_sequential_equivalence",
+    "core_available",
+    "core_status",
     "core_version",
     "verify_layout",
 ]

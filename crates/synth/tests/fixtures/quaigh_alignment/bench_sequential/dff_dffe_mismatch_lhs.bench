@@ -1,0 +1,5 @@
+INPUT(d)
+INPUT(en)
+INPUT(clk)
+q = DFF(d, clk)
+OUTPUT(q)

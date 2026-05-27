@@ -1,0 +1,5 @@
+.title include-chain-source-jj-subckt-smoke
+.include "include_chain_source_jj_defs.inc"
+X1 0 source_jj_stage params: stage_r=10
+.tran 1p 8p
+.end

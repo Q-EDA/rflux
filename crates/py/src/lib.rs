@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 use std::fs;
 use rflux_flow::{
     AcBiasOptimizationReport, AcBiasReport, AdvancedConstraintConfig, AdvancedConstraintReport,
@@ -18,7 +18,7 @@ use rflux_synth::{
     BalanceStrategy, BoolOptConfig, CompilePlan, CompileReport, Compiler, ConnectionSpec,
     SynthesisConfig, SynthesisReport,
 };
-use rflux_tech::Pdk;
+use rflux_tech::{Pdk, SfCellKind};
 use rflux_timing::{
     ClockDomainConstraint, CrossingConstraint, CrossingConstraintKind, NodeTimingConstraint,
     PinTimingConstraint, StatisticalTimingConfig, TimingConfig,
@@ -100,6 +100,46 @@ struct PySingleStepSequentialEquivalenceReport {
     counterexample_outputs: Vec<PyOutputMismatchEntry>,
     #[pyo3(get)]
     counterexample_states: Vec<PyStateMismatchEntry>,
+    #[pyo3(get)]
+    sat_recursive_calls: usize,
+    #[pyo3(get)]
+    sat_decisions: usize,
+    #[pyo3(get)]
+    sat_backtracks: usize,
+    #[pyo3(get)]
+    sat_restarts: usize,
+    #[pyo3(get)]
+    sat_elapsed_ns: u128,
+}
+
+#[derive(Clone)]
+#[pyclass]
+struct PyBoundedSequentialEquivalenceStepReport {
+    #[pyo3(get)]
+    step: usize,
+    #[pyo3(get)]
+    report: PySingleStepSequentialEquivalenceReport,
+}
+
+#[derive(Clone)]
+#[pyclass]
+struct PyBoundedSequentialEquivalenceReport {
+    #[pyo3(get)]
+    equivalent: bool,
+    #[pyo3(get)]
+    depth: usize,
+    #[pyo3(get)]
+    checked_steps: usize,
+    #[pyo3(get)]
+    unroll_mode: String,
+    #[pyo3(get)]
+    checked_outputs: Vec<String>,
+    #[pyo3(get)]
+    checked_states: Vec<String>,
+    #[pyo3(get)]
+    first_failing_step: Option<usize>,
+    #[pyo3(get)]
+    steps: Vec<PyBoundedSequentialEquivalenceStepReport>,
     #[pyo3(get)]
     sat_recursive_calls: usize,
     #[pyo3(get)]
@@ -532,6 +572,12 @@ struct PyLayoutReport {
     #[pyo3(get)]
     setup_violations: usize,
     #[pyo3(get)]
+    capture_window_violations: usize,
+    #[pyo3(get)]
+    timing_closure: PyTimingClosureSummary,
+    #[pyo3(get)]
+    timing_closure_loop: PyTimingClosureLoopReport,
+    #[pyo3(get)]
     routed_nets: usize,
     #[pyo3(get)]
     total_route_length_um: f64,
@@ -555,6 +601,121 @@ struct PyLayoutReport {
 
 #[pyclass]
 #[derive(Clone)]
+struct PyTimingClosureLoopReport {
+    #[pyo3(get)]
+    detour_feedback_attempted: bool,
+    #[pyo3(get)]
+    detour_feedback_applied: bool,
+    #[pyo3(get)]
+    initial_total_detour_overhead_um: f64,
+    #[pyo3(get)]
+    final_total_detour_overhead_um: f64,
+    #[pyo3(get)]
+    reduce_route_delay_candidate_available: bool,
+    #[pyo3(get)]
+    recommended_prefer_ptl_from_length_um: Option<f64>,
+    #[pyo3(get)]
+    recommended_detour_margin_um: Option<f64>,
+    #[pyo3(get)]
+    recommended_route_mode: Option<String>,
+    #[pyo3(get)]
+    estimated_route_length_um: Option<f64>,
+    #[pyo3(get)]
+    estimated_slack_deficit_ps: Option<f64>,
+    #[pyo3(get)]
+    reduce_route_delay_candidate_attempted: bool,
+    #[pyo3(get)]
+    reduce_route_delay_candidate_improved: bool,
+    #[pyo3(get)]
+    candidate_worst_setup_slack_ps: Option<f64>,
+    #[pyo3(get)]
+    candidate_setup_violations: Option<usize>,
+    #[pyo3(get)]
+    candidate_hold_violations: Option<usize>,
+    #[pyo3(get)]
+    candidate_route_mode: Option<String>,
+    #[pyo3(get)]
+    candidate_route_length_um: Option<f64>,
+    #[pyo3(get)]
+    hold_fix_attempted: bool,
+    #[pyo3(get)]
+    hold_fix_applied: bool,
+    #[pyo3(get)]
+    initial_hold_violations: usize,
+    #[pyo3(get)]
+    final_hold_violations: usize,
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    next_step: String,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyTimingClosureSummary {
+    #[pyo3(get)]
+    closed: bool,
+    #[pyo3(get)]
+    status: String,
+    #[pyo3(get)]
+    setup_closed: bool,
+    #[pyo3(get)]
+    hold_closed: bool,
+    #[pyo3(get)]
+    capture_window_closed: bool,
+    #[pyo3(get)]
+    setup_violations: usize,
+    #[pyo3(get)]
+    hold_violations: usize,
+    #[pyo3(get)]
+    capture_window_violations: usize,
+    #[pyo3(get)]
+    failing_checks: Vec<String>,
+    #[pyo3(get)]
+    action_count: usize,
+    #[pyo3(get)]
+    primary_action: Option<PyTimingClosureAction>,
+    #[pyo3(get)]
+    reduce_route_delay_actions: usize,
+    #[pyo3(get)]
+    relax_constraint_or_improve_library_timing_actions: usize,
+    #[pyo3(get)]
+    add_hold_padding_actions: usize,
+    #[pyo3(get)]
+    adjust_sfq_phase_or_pulse_window_actions: usize,
+    #[pyo3(get)]
+    actions: Vec<PyTimingClosureAction>,
+    #[pyo3(get)]
+    next_step: String,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyTimingClosureAction {
+    #[pyo3(get)]
+    check: String,
+    #[pyo3(get)]
+    priority: usize,
+    #[pyo3(get)]
+    remediation_kind: String,
+    #[pyo3(get)]
+    from_pin: PyPinRef,
+    #[pyo3(get)]
+    to_pin: PyPinRef,
+    #[pyo3(get)]
+    slack_ps: f64,
+    #[pyo3(get)]
+    route_mode: String,
+    #[pyo3(get)]
+    route_length_um: f64,
+    #[pyo3(get)]
+    from_domain: Option<usize>,
+    #[pyo3(get)]
+    to_domain: Option<usize>,
+}
+
+#[pyclass]
+#[derive(Clone)]
 struct PyTimingArcReport {
     #[pyo3(get)]
     from_pin: PyPinRef,
@@ -570,6 +731,24 @@ struct PyTimingArcReport {
     from_domain: Option<usize>,
     #[pyo3(get)]
     to_domain: Option<usize>,
+    #[pyo3(get)]
+    launch_phase: usize,
+    #[pyo3(get)]
+    capture_phase: usize,
+    #[pyo3(get)]
+    launch_window_start_ps: f64,
+    #[pyo3(get)]
+    launch_window_end_ps: f64,
+    #[pyo3(get)]
+    capture_window_start_ps: f64,
+    #[pyo3(get)]
+    capture_window_end_ps: f64,
+    #[pyo3(get)]
+    arrival_phase_offset_ps: f64,
+    #[pyo3(get)]
+    capture_window_slack_ps: f64,
+    #[pyo3(get)]
+    capture_window_violation: bool,
     #[pyo3(get)]
     arrival_ps: f64,
     #[pyo3(get)]
@@ -597,9 +776,13 @@ struct PyTimingAnalysisReport {
     #[pyo3(get)]
     hold_violations: usize,
     #[pyo3(get)]
+    capture_window_violations: usize,
+    #[pyo3(get)]
     detour_feedback_applied: bool,
     #[pyo3(get)]
     hold_fix_applied: bool,
+    #[pyo3(get)]
+    closure: PyTimingClosureSummary,
     #[pyo3(get)]
     timing_arcs: Vec<PyTimingArcReport>,
 }
@@ -621,6 +804,24 @@ struct PyStatisticalTimingArcReport {
     from_domain: Option<usize>,
     #[pyo3(get)]
     to_domain: Option<usize>,
+    #[pyo3(get)]
+    launch_phase: usize,
+    #[pyo3(get)]
+    capture_phase: usize,
+    #[pyo3(get)]
+    launch_window_start_ps: f64,
+    #[pyo3(get)]
+    launch_window_end_ps: f64,
+    #[pyo3(get)]
+    capture_window_start_ps: f64,
+    #[pyo3(get)]
+    capture_window_end_ps: f64,
+    #[pyo3(get)]
+    arrival_phase_offset_ps: f64,
+    #[pyo3(get)]
+    capture_window_slack_ps: f64,
+    #[pyo3(get)]
+    capture_window_violation: bool,
     #[pyo3(get)]
     mean_arrival_ps: f64,
     #[pyo3(get)]
@@ -694,6 +895,152 @@ struct PyPdk {
     inner: Pdk,
 }
 
+#[pyclass]
+#[derive(Clone)]
+struct PyCellLibraryEntry {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    area_um2: f64,
+    #[pyo3(get)]
+    pipeline_stages: u8,
+    #[pyo3(get)]
+    intrinsic_delay_ps: f64,
+    #[pyo3(get)]
+    setup_ps: f64,
+    #[pyo3(get)]
+    hold_ps: f64,
+    #[pyo3(get)]
+    timing_source: String,
+    #[pyo3(get)]
+    has_characterization_metadata: bool,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyCellLibraryMetadata {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    version: Option<String>,
+    #[pyo3(get)]
+    source: Option<String>,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyCellLibrarySummary {
+    #[pyo3(get)]
+    cell_count: usize,
+    #[pyo3(get)]
+    kind_count: usize,
+    kind_counts: Vec<(String, usize)>,
+    #[pyo3(get)]
+    named_timing_count: usize,
+    #[pyo3(get)]
+    kind_timing_count: usize,
+    #[pyo3(get)]
+    missing_timing_count: usize,
+    #[pyo3(get)]
+    characterized_cell_count: usize,
+    #[pyo3(get)]
+    named_timing_cells: Vec<String>,
+    #[pyo3(get)]
+    missing_timing_cells: Vec<String>,
+    #[pyo3(get)]
+    characterized_cells: Vec<String>,
+}
+
+impl From<rflux_tech::CellLibraryMetadata> for PyCellLibraryMetadata {
+    fn from(metadata: rflux_tech::CellLibraryMetadata) -> Self {
+        Self {
+            name: metadata.name,
+            version: metadata.version,
+            source: metadata.source,
+        }
+    }
+}
+
+impl From<rflux_verify::BoundedSequentialEquivalenceReport>
+    for PyBoundedSequentialEquivalenceReport
+{
+    fn from(value: rflux_verify::BoundedSequentialEquivalenceReport) -> Self {
+        Self {
+            equivalent: value.equivalent,
+            depth: value.depth,
+            checked_steps: value.checked_steps,
+            unroll_mode: value.unroll_mode,
+            checked_outputs: value.checked_outputs,
+            checked_states: value.checked_states,
+            first_failing_step: value.first_failing_step,
+            steps: value
+                .steps
+                .into_iter()
+                .map(|step| PyBoundedSequentialEquivalenceStepReport {
+                    step: step.step,
+                    report: step.report.into(),
+                })
+                .collect(),
+            sat_recursive_calls: value.sat_stats.recursive_calls,
+            sat_decisions: value.sat_stats.decisions,
+            sat_backtracks: value.sat_stats.backtracks,
+            sat_restarts: value.sat_stats.restarts,
+            sat_elapsed_ns: value.sat_elapsed_ns,
+        }
+    }
+}
+
+impl From<rflux_tech::CellLibraryEntry> for PyCellLibraryEntry {
+    fn from(entry: rflux_tech::CellLibraryEntry) -> Self {
+        Self {
+            name: entry.name,
+            kind: sf_cell_kind_name(entry.kind).to_string(),
+            area_um2: entry.area_um2,
+            pipeline_stages: entry.pipeline_stages,
+            intrinsic_delay_ps: entry.intrinsic_delay_ps,
+            setup_ps: entry.setup_ps,
+            hold_ps: entry.hold_ps,
+            timing_source: entry.timing_source,
+            has_characterization_metadata: entry.has_characterization_metadata,
+        }
+    }
+}
+
+impl From<rflux_tech::CellLibrarySummary> for PyCellLibrarySummary {
+    fn from(summary: rflux_tech::CellLibrarySummary) -> Self {
+        Self {
+            cell_count: summary.cell_count,
+            kind_count: summary.kind_count,
+            kind_counts: summary
+                .kind_counts
+                .into_iter()
+                .map(|(kind, count)| (sf_cell_kind_name(kind).to_string(), count))
+                .collect(),
+            named_timing_count: summary.named_timing_count,
+            kind_timing_count: summary.kind_timing_count,
+            missing_timing_count: summary.missing_timing_count,
+            characterized_cell_count: summary.characterized_cell_count,
+            named_timing_cells: summary.named_timing_cells,
+            missing_timing_cells: summary.missing_timing_cells,
+            characterized_cells: summary.characterized_cells,
+        }
+    }
+}
+
+#[pymethods]
+impl PyCellLibrarySummary {
+    #[getter]
+    fn kind_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new_bound(py);
+        for (kind, count) in &self.kind_counts {
+            dict.set_item(kind, count)?;
+        }
+        Ok(dict)
+    }
+}
+
 #[pymethods]
 impl PyPdk {
     #[staticmethod]
@@ -721,6 +1068,60 @@ impl PyPdk {
         self.inner
             .to_json()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    #[getter]
+    fn cell_library_name(&self) -> String {
+        self.inner.cell_library_name().to_string()
+    }
+
+    #[getter]
+    fn cell_library_version(&self) -> Option<String> {
+        self.inner.cell_library_version().map(str::to_string)
+    }
+
+    #[getter]
+    fn cell_library_source(&self) -> Option<String> {
+        self.inner.cell_library_source().map(str::to_string)
+    }
+
+    fn cell_library_metadata(&self) -> PyCellLibraryMetadata {
+        self.inner.cell_library_metadata().into()
+    }
+
+    fn cell_library_kinds(&self) -> Vec<String> {
+        self.inner
+            .cell_library_kinds()
+            .into_iter()
+            .map(|kind| sf_cell_kind_name(kind).to_string())
+            .collect()
+    }
+
+    fn cell_library_entries(&self) -> Vec<PyCellLibraryEntry> {
+        self.inner
+            .cell_library_entries()
+            .into_iter()
+            .map(PyCellLibraryEntry::from)
+            .collect()
+    }
+
+    fn cell_library_summary(&self) -> PyCellLibrarySummary {
+        self.inner.cell_library_summary().into()
+    }
+
+    fn cell_library_entries_by_kind(&self, kind: &str) -> PyResult<Vec<PyCellLibraryEntry>> {
+        Ok(self
+            .inner
+            .cell_library_entries_by_kind(parse_sf_cell_kind(kind)?)
+            .into_iter()
+            .map(PyCellLibraryEntry::from)
+            .collect())
+    }
+
+    fn cell_library_entry(&self, cell_name: &str) -> Option<PyCellLibraryEntry> {
+        self.inner
+            .cell_library_entry(cell_name)
+            .map(PyCellLibraryEntry::from)
     }
 
     fn merge_characterized_library_json(&self, serialized_entry: &str) -> PyResult<Self> {
@@ -1046,6 +1447,9 @@ impl From<LayoutReport> for PyLayoutReport {
             analyzed_timing_arcs: value.timing.analyzed_arcs,
             false_path_arcs: value.timing.false_path_arcs,
             setup_violations: value.timing.setup_violations,
+            capture_window_violations: value.timing.capture_window_violations,
+            timing_closure: value.timing_closure.into(),
+            timing_closure_loop: value.timing_closure_loop.into(),
             routed_nets: value.routing.routed_nets,
             total_route_length_um: value.routing.total_length_um,
             initial_total_detour_overhead_um: value.initial_total_detour_overhead_um,
@@ -1060,6 +1464,111 @@ impl From<LayoutReport> for PyLayoutReport {
     }
 }
 
+impl From<rflux_flow::TimingClosureLoopReport> for PyTimingClosureLoopReport {
+    fn from(value: rflux_flow::TimingClosureLoopReport) -> Self {
+        Self {
+            detour_feedback_attempted: value.detour_feedback_attempted,
+            detour_feedback_applied: value.detour_feedback_applied,
+            initial_total_detour_overhead_um: value.initial_total_detour_overhead_um,
+            final_total_detour_overhead_um: value.final_total_detour_overhead_um,
+            reduce_route_delay_candidate_available: value.reduce_route_delay_candidate_available,
+            recommended_prefer_ptl_from_length_um: value.recommended_prefer_ptl_from_length_um,
+            recommended_detour_margin_um: value.recommended_detour_margin_um,
+            recommended_route_mode: value.recommended_route_mode.map(|mode| match mode {
+                RouteMode::Jtl => "jtl".to_string(),
+                RouteMode::Ptl => "ptl".to_string(),
+            }),
+            estimated_route_length_um: value.estimated_route_length_um,
+            estimated_slack_deficit_ps: value.estimated_slack_deficit_ps,
+            reduce_route_delay_candidate_attempted: value.reduce_route_delay_candidate_attempted,
+            reduce_route_delay_candidate_improved: value.reduce_route_delay_candidate_improved,
+            candidate_worst_setup_slack_ps: value.candidate_worst_setup_slack_ps,
+            candidate_setup_violations: value.candidate_setup_violations,
+            candidate_hold_violations: value.candidate_hold_violations,
+            candidate_route_mode: value.candidate_route_mode.map(|mode| match mode {
+                RouteMode::Jtl => "jtl".to_string(),
+                RouteMode::Ptl => "ptl".to_string(),
+            }),
+            candidate_route_length_um: value.candidate_route_length_um,
+            hold_fix_attempted: value.hold_fix_attempted,
+            hold_fix_applied: value.hold_fix_applied,
+            initial_hold_violations: value.initial_hold_violations,
+            final_hold_violations: value.final_hold_violations,
+            status: value.status,
+            next_step: value.next_step,
+        }
+    }
+}
+
+impl From<rflux_flow::TimingClosureSummary> for PyTimingClosureSummary {
+    fn from(value: rflux_flow::TimingClosureSummary) -> Self {
+        Self {
+            closed: value.closed,
+            status: value.status,
+            setup_closed: value.setup_closed,
+            hold_closed: value.hold_closed,
+            capture_window_closed: value.capture_window_closed,
+            setup_violations: value.setup_violations,
+            hold_violations: value.hold_violations,
+            capture_window_violations: value.capture_window_violations,
+            failing_checks: value.failing_checks,
+            action_count: value.action_count,
+            primary_action: value.primary_action.map(PyTimingClosureAction::from),
+            reduce_route_delay_actions: value.reduce_route_delay_actions,
+            relax_constraint_or_improve_library_timing_actions: value
+                .relax_constraint_or_improve_library_timing_actions,
+            add_hold_padding_actions: value.add_hold_padding_actions,
+            adjust_sfq_phase_or_pulse_window_actions: value
+                .adjust_sfq_phase_or_pulse_window_actions,
+            actions: value.actions.into_iter().map(PyTimingClosureAction::from).collect(),
+            next_step: value.next_step,
+        }
+    }
+}
+
+impl From<rflux_flow::TimingClosureAction> for PyTimingClosureAction {
+    fn from(value: rflux_flow::TimingClosureAction) -> Self {
+        Self {
+            check: match value.check {
+                rflux_flow::TimingClosureCheck::Setup => "setup".to_string(),
+                rflux_flow::TimingClosureCheck::Hold => "hold".to_string(),
+                rflux_flow::TimingClosureCheck::CaptureWindow => "capture_window".to_string(),
+            },
+            priority: value.priority,
+            remediation_kind: match value.remediation_kind {
+                rflux_flow::TimingClosureRemediationKind::ReduceRouteDelay => {
+                    "reduce_route_delay".to_string()
+                }
+                rflux_flow::TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming => {
+                    "relax_constraint_or_improve_library_timing".to_string()
+                }
+                rflux_flow::TimingClosureRemediationKind::AddHoldPadding => {
+                    "add_hold_padding".to_string()
+                }
+                rflux_flow::TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow => {
+                    "adjust_sfq_phase_or_pulse_window".to_string()
+                }
+            },
+            from_pin: PyPinRef {
+                node: value.from.node.0,
+                port: value.from.port,
+            },
+            to_pin: PyPinRef {
+                node: value.to.node.0,
+                port: value.to.port,
+            },
+            slack_ps: value.slack_ps,
+            route_mode: match value.route_mode {
+                RouteMode::Jtl => "jtl".to_string(),
+                RouteMode::Ptl => "ptl".to_string(),
+            },
+            route_length_um: value.route_length_um,
+            from_domain: value.from_domain,
+            to_domain: value.to_domain,
+        }
+    }
+}
+
 impl From<TimingAnalysisReport> for PyTimingAnalysisReport {
     fn from(value: TimingAnalysisReport) -> Self {
         Self {
@@ -1070,8 +1579,10 @@ impl From<TimingAnalysisReport> for PyTimingAnalysisReport {
             false_path_arcs: value.false_path_arcs,
             setup_violations: value.setup_violations,
             hold_violations: value.hold_violations,
+            capture_window_violations: value.capture_window_violations,
             detour_feedback_applied: value.detour_feedback_applied,
             hold_fix_applied: value.hold_fix_applied,
+            closure: value.closure.into(),
             timing_arcs: value
                 .timing_arcs
                 .into_iter()
@@ -1092,6 +1603,15 @@ impl From<TimingAnalysisReport> for PyTimingAnalysisReport {
                     route_length_um: arc.route_length_um,
                     from_domain: arc.from_domain,
                     to_domain: arc.to_domain,
+                    launch_phase: arc.launch_phase,
+                    capture_phase: arc.capture_phase,
+                    launch_window_start_ps: arc.launch_window_start_ps,
+                    launch_window_end_ps: arc.launch_window_end_ps,
+                    capture_window_start_ps: arc.capture_window_start_ps,
+                    capture_window_end_ps: arc.capture_window_end_ps,
+                    arrival_phase_offset_ps: arc.arrival_phase_offset_ps,
+                    capture_window_slack_ps: arc.capture_window_slack_ps,
+                    capture_window_violation: arc.capture_window_violation,
                     arrival_ps: arc.arrival_ps,
                     required_ps: arc.required_ps,
                     setup_slack_ps: arc.setup_slack_ps,
@@ -1132,6 +1652,15 @@ impl From<StatisticalTimingAnalysisReport> for PyStatisticalTimingAnalysisReport
                     route_length_um: arc.route_length_um,
                     from_domain: arc.from_domain,
                     to_domain: arc.to_domain,
+                    launch_phase: arc.launch_phase,
+                    capture_phase: arc.capture_phase,
+                    launch_window_start_ps: arc.launch_window_start_ps,
+                    launch_window_end_ps: arc.launch_window_end_ps,
+                    capture_window_start_ps: arc.capture_window_start_ps,
+                    capture_window_end_ps: arc.capture_window_end_ps,
+                    arrival_phase_offset_ps: arc.arrival_phase_offset_ps,
+                    capture_window_slack_ps: arc.capture_window_slack_ps,
+                    capture_window_violation: arc.capture_window_violation,
                     mean_arrival_ps: arc.mean_arrival_ps,
                     mean_required_ps: arc.mean_required_ps,
                     setup_slack_ps: arc.setup_slack_ps,
@@ -1588,6 +2117,9 @@ fn to_flow_config(
     pin_timing_constraints: Option<Vec<PyPinTimingConstraint>>,
     clock_domains: Option<Vec<PyClockDomainConstraint>>,
     crossing_constraints: Option<Vec<PyCrossingConstraint>>,
+    min_hold_jtl_length_um: Option<f64>,
+    prefer_ptl_from_length_um: Option<f64>,
+    detour_margin_um: Option<f64>,
 ) -> PyResult<FlowConfig> {
     let synthesis_plan = if let Some(plan) = plan {
         CompilePlan {
@@ -1621,6 +2153,8 @@ fn to_flow_config(
         timing: TimingConfig {
             clock_period_ps: TimingConfig::default().clock_period_ps,
             input_arrival_ps: TimingConfig::default().input_arrival_ps,
+            sfq_phase_count: TimingConfig::default().sfq_phase_count,
+            sfq_pulse_window_ps: TimingConfig::default().sfq_pulse_window_ps,
             node_constraints: timing_constraints.iter().map(to_timing_constraint).collect(),
             pin_constraints: pin_timing_constraints.iter().map(to_pin_timing_constraint).collect(),
             clock_domains: clock_domains.iter().map(to_clock_domain_constraint).collect(),
@@ -1631,6 +2165,10 @@ fn to_flow_config(
         },
         routing: rflux_route::RoutingConfig {
             blocked_regions: blocked.iter().map(to_blocked_region).collect(),
+            prefer_ptl_from_length_um: prefer_ptl_from_length_um
+                .unwrap_or(rflux_route::RoutingConfig::default().prefer_ptl_from_length_um),
+            detour_margin_um: detour_margin_um
+                .unwrap_or(rflux_route::RoutingConfig::default().detour_margin_um),
             ..rflux_route::RoutingConfig::default()
         },
         placement: rflux_place::PlacementConfig {
@@ -1646,6 +2184,7 @@ fn to_flow_config(
                 .collect(),
             ..rflux_place::PlacementConfig::default()
         },
+        min_hold_jtl_length_um: min_hold_jtl_length_um.unwrap_or_default(),
         ..FlowConfig::default()
     })
 }
@@ -1689,6 +2228,33 @@ fn node_kind_name(kind: &NodeKind) -> &'static str {
         NodeKind::Jtl => "jtl",
         NodeKind::Ptl => "ptl",
         NodeKind::Port => "port",
+    }
+}
+
+fn parse_sf_cell_kind(kind: &str) -> PyResult<SfCellKind> {
+    match kind {
+        "generic_gate" | "GenericGate" | "cell" | "cell_instance" => Ok(SfCellKind::GenericGate),
+        "macro" | "Macro" | "macro_cell" => Ok(SfCellKind::Macro),
+        "splitter" | "Splitter" => Ok(SfCellKind::Splitter),
+        "dff" | "Dff" => Ok(SfCellKind::Dff),
+        "jtl" | "Jtl" => Ok(SfCellKind::Jtl),
+        "ptl" | "Ptl" => Ok(SfCellKind::Ptl),
+        "port" | "Port" => Ok(SfCellKind::Port),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown cell kind: {kind}"
+        ))),
+    }
+}
+
+fn sf_cell_kind_name(kind: SfCellKind) -> &'static str {
+    match kind {
+        SfCellKind::GenericGate => "generic_gate",
+        SfCellKind::Macro => "macro",
+        SfCellKind::Splitter => "splitter",
+        SfCellKind::Dff => "dff",
+        SfCellKind::Jtl => "jtl",
+        SfCellKind::Ptl => "ptl",
+        SfCellKind::Port => "port",
     }
 }
 
@@ -1902,7 +2468,7 @@ fn compile_netlist(
 }
 
 #[pyfunction]
-#[pyo3(signature = (circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, characterized_library_json=None, characterized_library_entries=None))]
+#[pyo3(signature = (circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, min_hold_jtl_length_um=None, prefer_ptl_from_length_um=None, detour_margin_um=None, characterized_library_json=None, characterized_library_entries=None))]
 fn compile_layout(
     mut circuit: PyRefMut<'_, Circuit>,
     plan: Option<&PyCompilePlan>,
@@ -1912,6 +2478,9 @@ fn compile_layout(
     pin_timing_constraints: Option<Vec<PyPinTimingConstraint>>,
     clock_domains: Option<Vec<PyClockDomainConstraint>>,
     crossing_constraints: Option<Vec<PyCrossingConstraint>>,
+    min_hold_jtl_length_um: Option<f64>,
+    prefer_ptl_from_length_um: Option<f64>,
+    detour_margin_um: Option<f64>,
     characterized_library_json: Option<String>,
     characterized_library_entries: Option<Vec<String>>,
 ) -> PyResult<PyLayoutReport> {
@@ -1929,6 +2498,9 @@ fn compile_layout(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        min_hold_jtl_length_um,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
     )?;
     let pdk = build_flow_pdk(
         "py-minimal-pdk",
@@ -1972,6 +2544,9 @@ fn analyze_timing(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = build_flow_pdk(
         "py-minimal-pdk",
@@ -2024,6 +2599,9 @@ fn analyze_timing_statistical(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = build_flow_pdk(
         "py-minimal-pdk",
@@ -2084,6 +2662,9 @@ fn analyze_ac_bias(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = Pdk::minimal("py-minimal-pdk");
 
@@ -2123,6 +2704,9 @@ fn optimize_ac_bias(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = build_flow_pdk(
         "py-minimal-pdk",
@@ -2171,6 +2755,9 @@ fn optimize_design_with_characterized_library(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let constraint_config = AdvancedConstraintConfig {
         max_estimated_thermal_load_uw,
@@ -2238,6 +2825,9 @@ fn optimize_ac_bias_with_characterized_library(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let constraint_config = AdvancedConstraintConfig {
         max_estimated_thermal_load_uw,
@@ -2289,6 +2879,9 @@ fn characterize_compound_cell(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = Pdk::minimal("py-minimal-pdk");
 
@@ -2340,6 +2933,9 @@ fn analyze_advanced_constraints(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = Pdk::minimal("py-minimal-pdk");
 
@@ -2390,6 +2986,9 @@ fn verify_layout(
         pin_timing_constraints,
         clock_domains,
         crossing_constraints,
+        None,
+        None,
+        None,
     )?;
     let pdk = Pdk::minimal("py-minimal-pdk");
 
@@ -2468,6 +3067,20 @@ fn check_single_step_sequential_equivalence(
     Ok(report.into())
 }
 
+#[pyfunction]
+#[pyo3(signature = (lhs, rhs, depth=2))]
+fn check_bounded_sequential_equivalence(
+    lhs: PyRef<'_, Circuit>,
+    rhs: PyRef<'_, Circuit>,
+    depth: usize,
+) -> PyResult<PyBoundedSequentialEquivalenceReport> {
+    let verifier = Verifier::new();
+    let report = verifier
+        .check_bounded_sequential_equivalence(&lhs.netlist, &rhs.netlist, depth)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(report.into())
+}
+
 #[pymodule]
 fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Circuit>()?;
@@ -2483,12 +3096,18 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCompileReport>()?;
     m.add_class::<PySynthesisReport>()?;
     m.add_class::<PyLayoutReport>()?;
+    m.add_class::<PyTimingClosureSummary>()?;
+    m.add_class::<PyTimingClosureAction>()?;
+    m.add_class::<PyTimingClosureLoopReport>()?;
     m.add_class::<PyTimingArcReport>()?;
     m.add_class::<PyTimingAnalysisReport>()?;
     m.add_class::<PyStatisticalTimingArcReport>()?;
     m.add_class::<PyStatisticalTimingAnalysisReport>()?;
     m.add_class::<PyAcBiasReport>()?;
     m.add_class::<PyPdk>()?;
+    m.add_class::<PyCellLibraryEntry>()?;
+    m.add_class::<PyCellLibraryMetadata>()?;
+    m.add_class::<PyCellLibrarySummary>()?;
     m.add_class::<PyAcBiasOptimizationReport>()?;
     m.add_class::<PyLibraryAwareAcBiasOptimizationReport>()?;
     m.add_class::<PyLibraryAwareDesignOptimizationReport>()?;
@@ -2503,6 +3122,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStateMismatchEntry>()?;
     m.add_class::<PyCombinationalEquivalenceReport>()?;
     m.add_class::<PySingleStepSequentialEquivalenceReport>()?;
+    m.add_class::<PyBoundedSequentialEquivalenceStepReport>()?;
+    m.add_class::<PyBoundedSequentialEquivalenceReport>()?;
     m.add_class::<PyVerificationReport>()?;
     m.add_class::<PyCompoundCellCharacterizationReport>()?;
     m.add_class::<PyAdvancedConstraintViolation>()?;
@@ -2524,6 +3145,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_file, m)?)?;
     m.add_function(wrap_pyfunction!(check_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(check_single_step_sequential_equivalence, m)?)?;
+    m.add_function(wrap_pyfunction!(check_bounded_sequential_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(read_bench_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_bench_text, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;

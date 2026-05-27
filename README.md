@@ -134,6 +134,15 @@ cargo run -p rflux-cli -- --help
 cargo run -p rflux-cli -- pdk-minimal --output target/minimal_pdk.json
 ```
 
+查看 PDK 的 cell library 索引：
+
+```bash
+cargo run -p rflux-cli -- pdk-cell-library --input target/minimal_pdk.json
+cargo run -p rflux-cli -- pdk-cell-library --input target/minimal_pdk.json --kind macro
+```
+
+`pdk-cell-library` 输出库名、库版本、来源、kind 索引、timing 覆盖状态和 remediation 建议，便于把 PDK cell 数据当作可审查的库清单接入脚本。
+
 对 IR JSON 运行综合、布局、时序或验证：
 
 ```bash
@@ -143,11 +152,105 @@ cargo run -p rflux-cli -- analyze-timing --input crates/synth/tests/fixtures/cla
 cargo run -p rflux-cli -- verify-layout --input crates/synth/tests/fixtures/classic_examples/classic_full_adder.json --mode event_only
 ```
 
+对最小 `.bench` 子集运行综合（当前 signal 名也接受 `a[0]` 这类 bit-level token，gate 也不要求在文件中预先按拓扑顺序排列，重复 `INPUT/OUTPUT` 声明和 gate 对 INPUT 名的重定义都会被显式拒绝，但 `INPUT(name)` 加 `OUTPUT(name)` 的 passthrough 形式仍然合法，并已支持最小顺序单元 `DFF(data, clock)` 与 `DFFE(data, enable, clock)`；顺序 `.bench` checked-in fixture 现已单独放在 `crates/synth/tests/fixtures/quaigh_alignment/bench_sequential/`，当前覆盖 `dff_basic.bench` 与 `dffe_basic.bench`）：
+
+```bash
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/dedup_and_pair.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi31.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai31.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi211.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai211.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi311.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai311.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi321.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai321.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi322.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai322.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi421.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai421.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi422.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai422.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi431.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai431.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi432.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai432.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi433.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai433.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi441.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai441.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi442.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai442.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi443.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai443.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi444.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai444.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi2221.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai2221.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi222.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai222.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi221.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai221.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi22.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai22.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/aoi21.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/oai21.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/majority3.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/iscas_c17.bench
+cargo run -p rflux-cli -- compile-netlist --input crates/synth/tests/fixtures/quaigh_alignment/bench/xnor_pair.bench
+```
+
 对两个 IR JSON 运行组合或单步顺序等价检查：
 
 ```bash
 cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/classic_examples/classic_full_adder.json --rhs crates/synth/tests/fixtures/classic_examples/classic_full_adder.json
 cargo run -p rflux-cli -- check-equivalence --kind single_step_sequential --lhs crates/synth/tests/fixtures/quaigh_alignment/dffe_feedback_wrapped.json --rhs crates/synth/tests/fixtures/quaigh_alignment/dffe_feedback_wrapped.json
+```
+
+对两个最小 `.bench` 组合逻辑文件运行组合等价检查：
+
+```bash
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/dedup_and_pair.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/dedup_and_pair.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi31.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi31.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai31.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai31.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi211.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi211.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai211.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai211.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi311.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi311.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai311.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai311.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi321.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi321.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai321.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai321.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi322.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi322.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai322.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai322.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi421.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi421.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai421.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai421.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi422.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi422.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai422.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai422.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi431.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi431.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai431.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai431.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi432.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi432.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai432.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai432.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi433.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi433.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai433.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai433.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi441.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi441.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai441.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai441.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi442.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi442.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai442.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai442.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi443.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi443.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai443.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai443.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi444.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi444.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai444.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai444.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi2221.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi2221.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai2221.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai2221.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi222.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi222.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai222.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai222.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi221.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi221.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai221.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai221.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi22.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi22.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai22.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai22.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi21.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/aoi21.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai21.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/oai21.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/majority3.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/majority3.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/iscas_c17.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/iscas_c17.bench
+cargo run -p rflux-cli -- check-equivalence --lhs crates/synth/tests/fixtures/quaigh_alignment/bench/xnor_pair.bench --rhs crates/synth/tests/fixtures/quaigh_alignment/bench/xnor_pair.bench
 ```
 
 对 SPICE/JoSIM 风格 deck 文件运行直接仿真：
@@ -159,6 +262,7 @@ cargo run -p rflux-cli -- simulate-file --input python/tests/benchmarks/phase6/t
 说明：
 
 - `--pdk <path>` 可加载自定义 PDK；未提供时默认使用 `Pdk::minimal("minimal-sfq")`。
+- `.bench` 输入当前仅覆盖最小 gate-level 子集：`INPUT`/`OUTPUT`/`AND`/`OR`/`XOR`/`XNOR`/`NOT`/`NAND`/`NOR`/`BUF`/`BUFF`/`MUX`/`MAJ`/`AOI21`/`OAI21`/`AOI22`/`OAI22`/`AOI31`/`OAI31`/`AOI211`/`OAI211`/`AOI311`/`OAI311`/`AOI321`/`OAI321`/`AOI221`/`OAI221`/`AOI222`/`OAI222`/`AOI322`/`OAI322`/`AOI421`/`OAI421`/`AOI422`/`OAI422`/`AOI431`/`OAI431`/`AOI432`/`OAI432`/`AOI433`/`OAI433`/`AOI441`/`OAI441`/`AOI442`/`OAI442`/`AOI443`/`OAI443`/`AOI444`/`OAI444`/`AOI2221`/`OAI2221`。
 - flow 相关命令当前使用内建默认 `FlowConfig`，聚焦于把现有 Rust API 变成可执行入口。
 - `--output <path>` 会把 JSON 报告写入文件；未提供时写到 stdout。
 
@@ -167,6 +271,18 @@ cargo run -p rflux-cli -- simulate-file --input python/tests/benchmarks/phase6/t
 ```bash
 uv run python -c "import rflux; print(rflux.__version__)"
 ```
+
+### 3.2 Build Candidate Release Artifacts
+
+If you need a candidate CLI binary plus Python wheel bundle for internal release review on the current machine, run:
+
+```bash
+uv run python python/scripts/prepare_release_artifacts.py --output-dir target/release-artifacts
+```
+
+This stages the current runner's `rflux` CLI binary, wheel artifact(s), build-input snapshots, and a `manifest.json` review record under `target/release-artifacts/`.
+
+For candidate go / no-go review, use [docs/release-artifact-readiness-checklist.md](./docs/release-artifact-readiness-checklist.md).
 
 ### 4. Internal vs External waveform quick compare
 
@@ -197,11 +313,12 @@ The command exits non-zero if any deck fails threshold checks or if result files
 
 `ci.yml` now includes a manual `workflow_dispatch` job named `waveform-compare-optional`.
 It is disabled by default and only runs when `run_external_waveform_compare=true` is selected.
+The job runs the manifest-based numeric compare path via `python/scripts/run_waveform_compare_manifest.py --validate-pass`, runs the adjacent unsupported-warning review path via `python/scripts/run_external_warning_manifest.py --validate-pass`, stages both review packets through `python/scripts/prepare_waveform_compare_artifacts.py` and `python/scripts/prepare_external_warning_artifacts.py`, then uploads both artifact bundles from `target/`.
 
 Inputs:
 
 - `run_external_waveform_compare`: enable/disable optional job
-- `josim_command`: command/path passed to waveform compare test via `RFLOW_JOSIM_COMMAND`
+- `josim_command`: command/path passed to both optional manifest runners
 
 This keeps normal push/PR CI unchanged while allowing on-demand external correlation checks on runners where JoSIM is installed.
 
@@ -211,7 +328,7 @@ Quick manual trigger checklist (GitHub UI):
 2. Click `Run workflow`.
 3. Set `run_external_waveform_compare` to `true`.
 4. Set `josim_command` if JoSIM is not available as plain `josim` on the runner PATH.
-5. Start the run and verify `waveform-compare-optional` job result.
+5. Start the run and verify `waveform-compare-optional` job result plus uploaded waveform-compare and external-warning artifacts.
 
 ## 快速上手
 

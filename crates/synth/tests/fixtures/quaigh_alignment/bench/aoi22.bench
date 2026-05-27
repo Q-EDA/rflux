@@ -1,0 +1,6 @@
+INPUT(a)
+INPUT(b)
+INPUT(c)
+INPUT(d)
+y = AOI22(a, b, c, d)
+OUTPUT(y)

@@ -1,0 +1,6 @@
+.title pwl-file-rc-smoke
+V1 in 0 PWL(file="pwl_source_profile.txt")
+R1 in out 10
+C1 out 0 1p
+.tran 0.5p 8p
+.end

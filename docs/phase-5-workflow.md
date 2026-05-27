@@ -11,7 +11,7 @@ uv run maturin develop
 
 ## 1. Characterize a compound cell
 
-Build a candidate macro netlist and run characterization. The generated JSON includes cell timing, metadata, `delay_details`, and per-arc `arc_delays` when simulation provides endpoint refs.
+Build a candidate macro netlist and run characterization. The generated JSON includes cell timing, metadata, `delay_details`, raw per-arc `arc_delays`, and a canonical wildcard output-arc fallback for characterized output ports.
 
 ```python
 import rflux
@@ -57,7 +57,7 @@ timing = rflux.analyze_timing(
 )
 ```
 
-STA uses name-indexed cell timing and per-pin `arc_delays` when present.
+STA uses name-indexed cell timing and per-pin `arc_delays` when present. When a generated artifact contains canonical output arcs with `sink_cell_name = "*"`, STA can reuse that characterized output-port delay across different consumer sink instance names.
 
 ## 4. Library-aware optimization
 
@@ -90,6 +90,10 @@ print(design_report.optimized_cell_delay_sigma_ratio)
 ```bash
 uv run python python/scripts/characterize_merge_optimize.py
 ```
+
+This script path now has an explicit CI smoke anchor instead of relying only on the full Python test suite:
+
+- `uv run pytest python/tests/test_basic.py -k "merge_characterized_library_round_trip or optimize_design_with_characterized_library_workflow" -q`
 
 Interactive walkthrough: [python/notebooks/phase5_characterize_merge_optimize.ipynb](../python/notebooks/phase5_characterize_merge_optimize.ipynb)
 

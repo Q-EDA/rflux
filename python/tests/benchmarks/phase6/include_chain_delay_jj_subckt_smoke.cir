@@ -1,0 +1,5 @@
+.title include-chain-delay-jj-subckt-smoke
+.include "include_chain_delay_jj_defs.inc"
+X1 0 delay_jj_stage params: stage_z0=50 stage_td=3p stage_r=10
+.tran 1p 8p
+.end

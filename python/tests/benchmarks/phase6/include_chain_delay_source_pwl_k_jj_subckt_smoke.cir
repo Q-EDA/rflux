@@ -1,0 +1,5 @@
+.title include-chain-delay-source-pwl-k-jj-subckt-smoke
+.include "include_chain_delay_source_pwl_k_jj_defs.inc"
+X1 0 tap delay_source_pwl_coupled_jj_stage params: stage_z0=50 stage_td=3p stage_k=0.9 stage_l=1p stage_r=10
+.tran 1p 8p
+.end

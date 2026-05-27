@@ -1,0 +1,6 @@
+.title sin-rc-smoke
+V1 in 0 SIN(0 1m 100g 0 90)
+R1 in out 10
+C1 out 0 1p
+.tran 0.5p 10p uic
+.end

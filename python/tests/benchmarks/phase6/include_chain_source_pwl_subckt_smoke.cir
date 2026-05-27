@@ -1,0 +1,5 @@
+.title include-chain-source-pwl-subckt-smoke
+.include "hier_chain_source_pwl/defs.inc"
+X1 out stage params: stage_r=10 stage_c=1p
+.tran 0.5p 10p
+.end

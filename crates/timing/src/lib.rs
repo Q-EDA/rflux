@@ -49,6 +49,8 @@ pub struct CrossingConstraint {
 pub struct TimingConfig {
     pub clock_period_ps: f64,
     pub input_arrival_ps: f64,
+    pub sfq_phase_count: usize,
+    pub sfq_pulse_window_ps: f64,
     pub node_constraints: Vec<NodeTimingConstraint>,
     pub pin_constraints: Vec<PinTimingConstraint>,
     pub clock_domains: Vec<ClockDomainConstraint>,
@@ -60,6 +62,8 @@ impl Default for TimingConfig {
         Self {
             clock_period_ps: 120.0,
             input_arrival_ps: 0.0,
+            sfq_phase_count: 1,
+            sfq_pulse_window_ps: 4.0,
             node_constraints: Vec::new(),
             pin_constraints: Vec::new(),
             clock_domains: Vec::new(),
@@ -78,6 +82,15 @@ pub struct TimingArcReport {
     pub route_length_um: f64,
     pub cell_delay_ps: f64,
     pub wire_delay_ps: f64,
+    pub launch_phase: usize,
+    pub capture_phase: usize,
+    pub launch_window_start_ps: f64,
+    pub launch_window_end_ps: f64,
+    pub capture_window_start_ps: f64,
+    pub capture_window_end_ps: f64,
+    pub arrival_phase_offset_ps: f64,
+    pub capture_window_slack_ps: f64,
+    pub capture_window_violation: bool,
     pub arrival_ps: f64,
     pub required_ps: f64,
     pub setup_slack_ps: f64,
@@ -92,6 +105,7 @@ pub struct TimingReport {
     pub critical_path_delay_ps: f64,
     pub setup_violations: usize,
     pub hold_violations: usize,
+    pub capture_window_violations: usize,
     pub analyzed_arcs: usize,
     pub false_path_arcs: usize,
 }
@@ -132,6 +146,15 @@ pub struct StatisticalTimingArcReport {
     pub is_false_path: bool,
     pub route_mode: RouteMode,
     pub route_length_um: f64,
+    pub launch_phase: usize,
+    pub capture_phase: usize,
+    pub launch_window_start_ps: f64,
+    pub launch_window_end_ps: f64,
+    pub capture_window_start_ps: f64,
+    pub capture_window_end_ps: f64,
+    pub arrival_phase_offset_ps: f64,
+    pub capture_window_slack_ps: f64,
+    pub capture_window_violation: bool,
     pub mean_arrival_ps: f64,
     pub mean_required_ps: f64,
     pub setup_slack_ps: f64,
@@ -272,6 +295,7 @@ impl StaticTimingAnalyzer {
         let mut worst_hold_slack_ps = f64::INFINITY;
         let mut setup_violations = 0usize;
         let mut hold_violations = 0usize;
+        let mut capture_window_violations = 0usize;
         let mut false_path_arcs = 0usize;
 
         for (from, to) in edges {
@@ -294,6 +318,17 @@ impl StaticTimingAnalyzer {
                 sink_arrival,
             );
             let hold_slack_ps = wire_delay_ps - hold_time_ps(netlist, pdk, to.node.0)?;
+            let launch_phase = sfq_phase_for_pin(config, from);
+            let capture_phase = sfq_phase_for_pin(config, to);
+            let (launch_window_start_ps, launch_window_end_ps) =
+                sfq_phase_window_ps(config, from, launch_phase);
+            let (capture_window_start_ps, capture_window_end_ps) =
+                sfq_phase_window_ps(config, to, capture_phase);
+            let arrival_phase_offset_ps = sfq_phase_offset_ps(config, to, sink_arrival);
+            let capture_window_slack_ps = capture_window_end_ps - arrival_phase_offset_ps;
+            let capture_window_violation = !is_false_path
+                && (arrival_phase_offset_ps < capture_window_start_ps
+                    || arrival_phase_offset_ps > capture_window_end_ps);
             if is_false_path {
                 false_path_arcs += 1;
             }
@@ -302,6 +337,9 @@ impl StaticTimingAnalyzer {
             }
             if hold_slack_ps < 0.0 {
                 hold_violations += 1;
+            }
+            if capture_window_violation {
+                capture_window_violations += 1;
             }
             worst_setup_slack_ps = worst_setup_slack_ps.min(setup_slack_ps);
             worst_hold_slack_ps = worst_hold_slack_ps.min(hold_slack_ps);
@@ -314,6 +352,15 @@ impl StaticTimingAnalyzer {
                 route_length_um: route_length_um(routing, from, to)?,
                 cell_delay_ps,
                 wire_delay_ps,
+                launch_phase,
+                capture_phase,
+                launch_window_start_ps,
+                launch_window_end_ps,
+                capture_window_start_ps,
+                capture_window_end_ps,
+                arrival_phase_offset_ps,
+                capture_window_slack_ps,
+                capture_window_violation,
                 arrival_ps: sink_arrival,
                 required_ps: arc_required_ps,
                 setup_slack_ps,
@@ -336,6 +383,7 @@ impl StaticTimingAnalyzer {
             critical_path_delay_ps: arrival.into_iter().fold(0.0, f64::max),
             setup_violations,
             hold_violations,
+            capture_window_violations,
             analyzed_arcs: netlist.edge_count(),
             false_path_arcs,
         })
@@ -471,6 +519,15 @@ impl StaticTimingAnalyzer {
                 is_false_path: arc.is_false_path,
                 route_mode: arc.route_mode,
                 route_length_um: arc.route_length_um,
+                launch_phase: arc.launch_phase,
+                capture_phase: arc.capture_phase,
+                launch_window_start_ps: arc.launch_window_start_ps,
+                launch_window_end_ps: arc.launch_window_end_ps,
+                capture_window_start_ps: arc.capture_window_start_ps,
+                capture_window_end_ps: arc.capture_window_end_ps,
+                arrival_phase_offset_ps: arc.arrival_phase_offset_ps,
+                capture_window_slack_ps: arc.capture_window_slack_ps,
+                capture_window_violation: arc.capture_window_violation,
                 mean_arrival_ps: arc.arrival_ps,
                 mean_required_ps: arc.required_ps,
                 setup_slack_ps: arc.setup_slack_ps,
@@ -816,6 +873,41 @@ fn domain_period_ps(config: &TimingConfig, domain_id: usize) -> Option<f64> {
         .map(|domain| domain.period_ps)
 }
 
+fn sfq_phase_for_pin(config: &TimingConfig, pin: PinRef) -> usize {
+    let phase_count = config.sfq_phase_count.max(1);
+    let Some(domain_id) = domain_of_pin(config, pin) else {
+        return 0;
+    };
+
+    config
+        .clock_domains
+        .iter()
+        .position(|domain| domain.id == domain_id)
+        .map(|index| index % phase_count)
+        .unwrap_or(0)
+}
+
+fn sfq_phase_window_ps(config: &TimingConfig, pin: PinRef, phase: usize) -> (f64, f64) {
+    let phase_count = config.sfq_phase_count.max(1);
+    let period_ps = domain_of_pin(config, pin)
+        .and_then(|domain_id| domain_period_ps(config, domain_id))
+        .unwrap_or(config.clock_period_ps);
+    let phase_spacing_ps = period_ps / phase_count as f64;
+    let start_ps = (phase % phase_count) as f64 * phase_spacing_ps;
+    let window_ps = config.sfq_pulse_window_ps.clamp(0.0, phase_spacing_ps);
+    (start_ps, start_ps + window_ps)
+}
+
+fn sfq_phase_offset_ps(config: &TimingConfig, pin: PinRef, arrival_ps: f64) -> f64 {
+    let period_ps = domain_of_pin(config, pin)
+        .and_then(|domain_id| domain_period_ps(config, domain_id))
+        .unwrap_or(config.clock_period_ps);
+    if period_ps <= 0.0 {
+        return arrival_ps;
+    }
+    arrival_ps.rem_euclid(period_ps)
+}
+
 fn apply_crossing_constraint(
     config: &TimingConfig,
     from: PinRef,
@@ -1152,6 +1244,8 @@ mod tests {
                 &TimingConfig {
                     clock_period_ps: 120.0,
                     input_arrival_ps: 0.0,
+                    sfq_phase_count: 1,
+                    sfq_pulse_window_ps: 4.0,
                     node_constraints: vec![NodeTimingConstraint {
                         node: sink,
                         input_arrival_ps: None,
@@ -1202,6 +1296,8 @@ mod tests {
                 &TimingConfig {
                     clock_period_ps: 120.0,
                     input_arrival_ps: 0.0,
+                    sfq_phase_count: 1,
+                    sfq_pulse_window_ps: 4.0,
                     node_constraints: vec![NodeTimingConstraint {
                         node: sink,
                         input_arrival_ps: None,
@@ -1217,6 +1313,76 @@ mod tests {
 
         assert_eq!(report.setup_violations, 1);
         assert!(report.worst_setup_slack_ps < 0.0);
+    }
+
+    #[test]
+    fn reports_sfq_phase_windows_for_clock_domains() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .expect("source to sink");
+
+        let routing = RoutingReport {
+            routes: vec![NetRoute {
+                from: PinRef { node: source, port: 0 },
+                to: PinRef { node: sink, port: 0 },
+                mode: RouteMode::Jtl,
+                segments: Vec::new(),
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            }],
+            total_length_um: 40.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 1,
+            ptl_routes: 0,
+        };
+
+        let report = StaticTimingAnalyzer::new()
+            .analyze(
+                &netlist,
+                &routing,
+                &Pdk::minimal("test"),
+                &TimingConfig {
+                    clock_period_ps: 12.0,
+                    input_arrival_ps: 0.0,
+                    sfq_phase_count: 3,
+                    sfq_pulse_window_ps: 1.5,
+                    node_constraints: vec![
+                        NodeTimingConstraint {
+                            node: source,
+                            input_arrival_ps: None,
+                            required_ps: None,
+                            clock_domain: Some(10),
+                        },
+                        NodeTimingConstraint {
+                            node: sink,
+                            input_arrival_ps: None,
+                            required_ps: None,
+                            clock_domain: Some(11),
+                        },
+                    ],
+                    pin_constraints: Vec::new(),
+                    clock_domains: vec![
+                        ClockDomainConstraint { id: 10, period_ps: 12.0 },
+                        ClockDomainConstraint { id: 11, period_ps: 12.0 },
+                    ],
+                    crossing_constraints: Vec::new(),
+                },
+            )
+            .expect("timing should succeed");
+
+        assert_eq!(report.arcs[0].launch_phase, 0);
+        assert_eq!(report.arcs[0].capture_phase, 1);
+        assert_eq!(report.arcs[0].launch_window_start_ps, 0.0);
+        assert_eq!(report.arcs[0].launch_window_end_ps, 1.5);
+        assert_eq!(report.arcs[0].capture_window_start_ps, 4.0);
+        assert_eq!(report.arcs[0].capture_window_end_ps, 5.5);
+        assert_eq!(report.arcs[0].arrival_phase_offset_ps, 6.0);
+        assert_eq!(report.arcs[0].capture_window_slack_ps, -0.5);
+        assert!(report.arcs[0].capture_window_violation);
     }
 
     #[test]
@@ -1252,6 +1418,8 @@ mod tests {
                 &TimingConfig {
                     clock_period_ps: 120.0,
                     input_arrival_ps: 0.0,
+                    sfq_phase_count: 1,
+                    sfq_pulse_window_ps: 4.0,
                     node_constraints: vec![NodeTimingConstraint {
                         node: sink,
                         input_arrival_ps: None,
@@ -1307,6 +1475,8 @@ mod tests {
                 &TimingConfig {
                     clock_period_ps: 10.0,
                     input_arrival_ps: 0.0,
+                    sfq_phase_count: 1,
+                    sfq_pulse_window_ps: 4.0,
                     node_constraints: vec![
                         NodeTimingConstraint {
                             node: source,
@@ -1376,6 +1546,8 @@ mod tests {
                 &TimingConfig {
                     clock_period_ps: 10.0,
                     input_arrival_ps: 0.0,
+                    sfq_phase_count: 1,
+                    sfq_pulse_window_ps: 4.0,
                     node_constraints: vec![
                         NodeTimingConstraint {
                             node: source,
@@ -1493,6 +1665,8 @@ mod tests {
                 &TimingConfig {
                     clock_period_ps: 10.0,
                     input_arrival_ps: 0.0,
+                    sfq_phase_count: 1,
+                    sfq_pulse_window_ps: 4.0,
                     node_constraints: vec![
                         NodeTimingConstraint {
                             node: source,
@@ -1801,6 +1975,8 @@ mod tests {
         let timing_config = TimingConfig {
             clock_period_ps: 10.0,
             input_arrival_ps: 0.0,
+            sfq_phase_count: 1,
+            sfq_pulse_window_ps: 4.0,
             node_constraints: vec![
                 NodeTimingConstraint {
                     node: source,
@@ -1897,6 +2073,8 @@ mod tests {
         let timing_config = TimingConfig {
             clock_period_ps: 10.0,
             input_arrival_ps: 0.0,
+            sfq_phase_count: 1,
+            sfq_pulse_window_ps: 4.0,
             node_constraints: vec![
                 NodeTimingConstraint {
                     node: source,
@@ -1960,6 +2138,15 @@ mod tests {
             route_length_um: 40.0,
             cell_delay_ps: 8.0,
             wire_delay_ps: 10.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: 0.0,
+            launch_window_end_ps: 4.0,
+            capture_window_start_ps: 0.0,
+            capture_window_end_ps: 4.0,
+            arrival_phase_offset_ps: 18.0,
+            capture_window_slack_ps: -14.0,
+            capture_window_violation: true,
             arrival_ps: 18.0,
             required_ps: 120.0,
             setup_slack_ps: 100.0,
@@ -2000,6 +2187,15 @@ mod tests {
             route_length_um: 20.0,
             cell_delay_ps: 10.0,
             wire_delay_ps: 0.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: 0.0,
+            launch_window_end_ps: 4.0,
+            capture_window_start_ps: 0.0,
+            capture_window_end_ps: 4.0,
+            arrival_phase_offset_ps: 10.0,
+            capture_window_slack_ps: -6.0,
+            capture_window_violation: true,
             arrival_ps: 10.0,
             required_ps: 120.0,
             setup_slack_ps: 100.0,
@@ -2038,6 +2234,15 @@ mod tests {
             route_length_um: 40.0,
             cell_delay_ps: 14.0,
             wire_delay_ps: 6.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: 0.0,
+            launch_window_end_ps: 4.0,
+            capture_window_start_ps: 0.0,
+            capture_window_end_ps: 4.0,
+            arrival_phase_offset_ps: 20.0,
+            capture_window_slack_ps: -16.0,
+            capture_window_violation: true,
             arrival_ps: 20.0,
             required_ps: 120.0,
             setup_slack_ps: 100.0,
@@ -2083,6 +2288,15 @@ mod tests {
             route_length_um: 40.0,
             cell_delay_ps: 20.0,
             wire_delay_ps: 6.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: 0.0,
+            launch_window_end_ps: 4.0,
+            capture_window_start_ps: 0.0,
+            capture_window_end_ps: 4.0,
+            arrival_phase_offset_ps: 26.0,
+            capture_window_slack_ps: -22.0,
+            capture_window_violation: true,
             arrival_ps: 26.0,
             required_ps: 120.0,
             setup_slack_ps: 94.0,

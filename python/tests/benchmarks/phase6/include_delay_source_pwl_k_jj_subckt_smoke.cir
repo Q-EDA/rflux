@@ -1,0 +1,5 @@
+.title include-delay-source-pwl-k-jj-subckt-smoke
+.include "include_delay_source_pwl_k_jj_defs.inc"
+X1 tap delay_source_pwl_coupled_jj_stage params: z0=50 td=3p coupling=0.9 lval=1p rval=10
+.tran 1p 8p
+.end

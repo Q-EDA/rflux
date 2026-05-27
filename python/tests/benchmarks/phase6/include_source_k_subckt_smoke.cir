@@ -1,0 +1,5 @@
+.title include-source-k-subckt-smoke
+.include "include_source_k_stage_defs.inc"
+X1 out tap source_coupled_stage params: coupling=0.9 lval=1p rval=1
+.tran 1p 8p
+.end

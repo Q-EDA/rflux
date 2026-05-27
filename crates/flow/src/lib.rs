@@ -75,9 +75,87 @@ pub struct TimingSummary {
     pub analyzed_arcs: usize,
     pub false_path_arcs: usize,
     pub setup_violations: usize,
+    pub capture_window_violations: usize,
     pub initial_hold_violations: usize,
     pub final_hold_violations: usize,
     pub hold_fix_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimingClosureSummary {
+    pub closed: bool,
+    pub status: String,
+    pub setup_closed: bool,
+    pub hold_closed: bool,
+    pub capture_window_closed: bool,
+    pub setup_violations: usize,
+    pub hold_violations: usize,
+    pub capture_window_violations: usize,
+    pub failing_checks: Vec<String>,
+    pub action_count: usize,
+    pub primary_action: Option<TimingClosureAction>,
+    pub reduce_route_delay_actions: usize,
+    pub relax_constraint_or_improve_library_timing_actions: usize,
+    pub add_hold_padding_actions: usize,
+    pub adjust_sfq_phase_or_pulse_window_actions: usize,
+    pub actions: Vec<TimingClosureAction>,
+    pub next_step: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimingClosureAction {
+    pub check: TimingClosureCheck,
+    pub priority: usize,
+    pub remediation_kind: TimingClosureRemediationKind,
+    pub from: PinRef,
+    pub to: PinRef,
+    pub slack_ps: f64,
+    pub route_mode: RouteMode,
+    pub route_length_um: f64,
+    pub from_domain: Option<usize>,
+    pub to_domain: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimingClosureLoopReport {
+    pub detour_feedback_attempted: bool,
+    pub detour_feedback_applied: bool,
+    pub initial_total_detour_overhead_um: f64,
+    pub final_total_detour_overhead_um: f64,
+    pub reduce_route_delay_candidate_available: bool,
+    pub recommended_prefer_ptl_from_length_um: Option<f64>,
+    pub recommended_detour_margin_um: Option<f64>,
+    pub recommended_route_mode: Option<RouteMode>,
+    pub estimated_route_length_um: Option<f64>,
+    pub estimated_slack_deficit_ps: Option<f64>,
+    pub reduce_route_delay_candidate_attempted: bool,
+    pub reduce_route_delay_candidate_improved: bool,
+    pub candidate_worst_setup_slack_ps: Option<f64>,
+    pub candidate_setup_violations: Option<usize>,
+    pub candidate_hold_violations: Option<usize>,
+    pub candidate_route_mode: Option<RouteMode>,
+    pub candidate_route_length_um: Option<f64>,
+    pub hold_fix_attempted: bool,
+    pub hold_fix_applied: bool,
+    pub initial_hold_violations: usize,
+    pub final_hold_violations: usize,
+    pub status: String,
+    pub next_step: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingClosureCheck {
+    Setup,
+    Hold,
+    CaptureWindow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingClosureRemediationKind {
+    ReduceRouteDelay,
+    RelaxConstraintOrImproveLibraryTiming,
+    AddHoldPadding,
+    AdjustSfqPhaseOrPulseWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,6 +167,15 @@ pub struct TimingArcSummary {
     pub route_length_um: f64,
     pub from_domain: Option<usize>,
     pub to_domain: Option<usize>,
+    pub launch_phase: usize,
+    pub capture_phase: usize,
+    pub launch_window_start_ps: f64,
+    pub launch_window_end_ps: f64,
+    pub capture_window_start_ps: f64,
+    pub capture_window_end_ps: f64,
+    pub arrival_phase_offset_ps: f64,
+    pub capture_window_slack_ps: f64,
+    pub capture_window_violation: bool,
     pub arrival_ps: f64,
     pub required_ps: f64,
     pub setup_slack_ps: f64,
@@ -104,8 +191,10 @@ pub struct TimingAnalysisReport {
     pub false_path_arcs: usize,
     pub setup_violations: usize,
     pub hold_violations: usize,
+    pub capture_window_violations: usize,
     pub detour_feedback_applied: bool,
     pub hold_fix_applied: bool,
+    pub closure: TimingClosureSummary,
     pub timing_arcs: Vec<TimingArcSummary>,
 }
 
@@ -118,6 +207,15 @@ pub struct StatisticalTimingArcSummary {
     pub route_length_um: f64,
     pub from_domain: Option<usize>,
     pub to_domain: Option<usize>,
+    pub launch_phase: usize,
+    pub capture_phase: usize,
+    pub launch_window_start_ps: f64,
+    pub launch_window_end_ps: f64,
+    pub capture_window_start_ps: f64,
+    pub capture_window_end_ps: f64,
+    pub arrival_phase_offset_ps: f64,
+    pub capture_window_slack_ps: f64,
+    pub capture_window_violation: bool,
     pub mean_arrival_ps: f64,
     pub mean_required_ps: f64,
     pub setup_slack_ps: f64,
@@ -261,6 +359,8 @@ pub struct LayoutReport {
     pub routing: RoutingSummary,
     pub clock: ClockSummary,
     pub timing: TimingSummary,
+    pub timing_closure: TimingClosureSummary,
+    pub timing_closure_loop: TimingClosureLoopReport,
     pub initial_total_detour_overhead_um: f64,
     pub detour_feedback_applied: bool,
 }
@@ -273,9 +373,10 @@ struct CompiledArtifacts {
     clock: ClockSummary,
     timing: TimingReport,
     initial_total_detour_overhead_um: f64,
+    initial_hold_violations: usize,
+    hold_fix_attempted: bool,
     detour_feedback_applied: bool,
     hold_fix_applied: bool,
-    initial_hold_violations: usize,
 }
 
 #[derive(Debug, Error)]
@@ -338,6 +439,15 @@ impl FlowRunner {
         config: &FlowConfig,
     ) -> Result<LayoutReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let timing_closure = timing_closure_summary(
+            artifacts.timing.setup_violations,
+            artifacts.timing.hold_violations,
+            &artifacts.timing,
+            &artifacts.routing,
+            &config.timing,
+        );
+        let timing_closure_loop =
+            self.timing_closure_loop_report(netlist, pdk, config, &artifacts, &timing_closure)?;
 
         Ok(LayoutReport {
             synthesis: artifacts.synthesis,
@@ -362,10 +472,13 @@ impl FlowRunner {
                 analyzed_arcs: artifacts.timing.analyzed_arcs,
                 false_path_arcs: artifacts.timing.false_path_arcs,
                 setup_violations: artifacts.timing.setup_violations,
+                capture_window_violations: artifacts.timing.capture_window_violations,
                 initial_hold_violations: artifacts.initial_hold_violations,
                 final_hold_violations: artifacts.timing.hold_violations,
                 hold_fix_applied: artifacts.hold_fix_applied,
             },
+            timing_closure,
+            timing_closure_loop,
             initial_total_detour_overhead_um: artifacts.initial_total_detour_overhead_um,
             detour_feedback_applied: artifacts.detour_feedback_applied,
         })
@@ -378,6 +491,13 @@ impl FlowRunner {
         config: &FlowConfig,
     ) -> Result<TimingAnalysisReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let closure = timing_closure_summary(
+            artifacts.timing.setup_violations,
+            artifacts.timing.hold_violations,
+            &artifacts.timing,
+            &artifacts.routing,
+            &config.timing,
+        );
         Ok(TimingAnalysisReport {
             worst_setup_slack_ps: artifacts.timing.worst_setup_slack_ps,
             worst_hold_slack_ps: artifacts.timing.worst_hold_slack_ps,
@@ -386,8 +506,10 @@ impl FlowRunner {
             false_path_arcs: artifacts.timing.false_path_arcs,
             setup_violations: artifacts.timing.setup_violations,
             hold_violations: artifacts.timing.hold_violations,
+            capture_window_violations: artifacts.timing.capture_window_violations,
             detour_feedback_applied: artifacts.detour_feedback_applied,
             hold_fix_applied: artifacts.hold_fix_applied,
+            closure,
             timing_arcs: artifacts
                 .timing
                 .arcs
@@ -401,6 +523,15 @@ impl FlowRunner {
                     route_length_um: arc.route_length_um,
                     from_domain: domain_of_pin_from_config(&config.timing, arc.from),
                     to_domain: domain_of_pin_from_config(&config.timing, arc.to),
+                    launch_phase: arc.launch_phase,
+                    capture_phase: arc.capture_phase,
+                    launch_window_start_ps: arc.launch_window_start_ps,
+                    launch_window_end_ps: arc.launch_window_end_ps,
+                    capture_window_start_ps: arc.capture_window_start_ps,
+                    capture_window_end_ps: arc.capture_window_end_ps,
+                    arrival_phase_offset_ps: arc.arrival_phase_offset_ps,
+                    capture_window_slack_ps: arc.capture_window_slack_ps,
+                    capture_window_violation: arc.capture_window_violation,
                     arrival_ps: arc.arrival_ps,
                     required_ps: arc.required_ps,
                     setup_slack_ps: arc.setup_slack_ps,
@@ -446,6 +577,15 @@ impl FlowRunner {
                     route_length_um: arc.route_length_um,
                     from_domain: domain_of_pin_from_config(&config.timing, arc.from),
                     to_domain: domain_of_pin_from_config(&config.timing, arc.to),
+                    launch_phase: arc.launch_phase,
+                    capture_phase: arc.capture_phase,
+                    launch_window_start_ps: arc.launch_window_start_ps,
+                    launch_window_end_ps: arc.launch_window_end_ps,
+                    capture_window_start_ps: arc.capture_window_start_ps,
+                    capture_window_end_ps: arc.capture_window_end_ps,
+                    arrival_phase_offset_ps: arc.arrival_phase_offset_ps,
+                    capture_window_slack_ps: arc.capture_window_slack_ps,
+                    capture_window_violation: arc.capture_window_violation,
                     mean_arrival_ps: arc.mean_arrival_ps,
                     mean_required_ps: arc.mean_required_ps,
                     setup_slack_ps: arc.setup_slack_ps,
@@ -948,6 +1088,7 @@ impl FlowRunner {
             self.apply_detour_feedback_if_helpful(netlist, pdk, config, placement, initial_routing, &routing_config)?;
         let initial_timing = self.timing.analyze(netlist, &routing, pdk, &config.timing)?;
         let initial_hold_violations = initial_timing.hold_violations;
+        let hold_fix_attempted = config.min_hold_jtl_length_um > 0.0 && initial_hold_violations > 0;
         let (routing, timing, hold_fix_applied) =
             self.apply_hold_fix_if_helpful(netlist, &placement, pdk, config, routing, initial_timing)?;
         let clock = build_clock_summary(netlist, &placement, config.clock_phase_count);
@@ -959,9 +1100,10 @@ impl FlowRunner {
             clock,
             timing,
             initial_total_detour_overhead_um,
+            initial_hold_violations,
+            hold_fix_attempted,
             detour_feedback_applied,
             hold_fix_applied,
-            initial_hold_violations,
         })
     }
 
@@ -1028,6 +1170,49 @@ impl FlowRunner {
         } else {
             Ok((initial_routing, initial_timing, false))
         }
+    }
+
+    fn timing_closure_loop_report(
+        &self,
+        netlist: &Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+        artifacts: &CompiledArtifacts,
+        closure: &TimingClosureSummary,
+    ) -> Result<TimingClosureLoopReport, FlowError> {
+        let mut report = timing_closure_loop_report(artifacts, closure);
+        let Some(action) = closure.actions.iter().find(|action| {
+            action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay
+        }) else {
+            return Ok(report);
+        };
+        let Some(threshold_um) = report.recommended_prefer_ptl_from_length_um else {
+            return Ok(report);
+        };
+
+        let mut candidate_config = routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        candidate_config.prefer_ptl_from_length_um = threshold_um;
+        if let Some(detour_margin_um) = report.recommended_detour_margin_um {
+            candidate_config.detour_margin_um = detour_margin_um;
+        }
+        let candidate_routing = self.router.route(netlist, &artifacts.placement, pdk, &candidate_config)?;
+        let candidate_timing = self.timing.analyze(netlist, &candidate_routing, pdk, &config.timing)?;
+        let candidate_route = candidate_routing
+            .routes
+            .iter()
+            .find(|route| route.from == action.from && route.to == action.to);
+
+        report.reduce_route_delay_candidate_attempted = true;
+        report.candidate_worst_setup_slack_ps = Some(candidate_timing.worst_setup_slack_ps);
+        report.candidate_setup_violations = Some(candidate_timing.setup_violations);
+        report.candidate_hold_violations = Some(candidate_timing.hold_violations);
+        report.candidate_route_mode = candidate_route.map(|route| route.mode);
+        report.candidate_route_length_um = candidate_route.map(|route| route.length_um);
+        report.reduce_route_delay_candidate_improved =
+            candidate_timing.setup_violations < artifacts.timing.setup_violations
+                || candidate_timing.worst_setup_slack_ps > artifacts.timing.worst_setup_slack_ps + 1e-9;
+
+        Ok(report)
     }
 }
 
@@ -1200,6 +1385,265 @@ fn timing_guardband_score(worst_setup_slack_ps: f64, worst_hold_slack_ps: f64) -
     (normalized_slack(worst_setup_slack_ps, 20.0) * 0.7
         + normalized_slack(worst_hold_slack_ps, 5.0) * 0.3)
         .clamp(0.0, 1.0)
+}
+
+fn timing_closure_summary(
+    setup_violations: usize,
+    hold_violations: usize,
+    timing: &TimingReport,
+    routing: &RoutingReport,
+    config: &TimingConfig,
+) -> TimingClosureSummary {
+    let setup_closed = setup_violations == 0;
+    let hold_closed = hold_violations == 0;
+    let capture_window_closure_enabled =
+        !config.clock_domains.is_empty() || config.sfq_phase_count > 1;
+    let closure_capture_window_violations = if capture_window_closure_enabled {
+        timing.capture_window_violations
+    } else {
+        0
+    };
+    let capture_window_closed = closure_capture_window_violations == 0;
+    let mut failing_checks = Vec::new();
+    if !setup_closed {
+        failing_checks.push("setup".to_string());
+    }
+    if !hold_closed {
+        failing_checks.push("hold".to_string());
+    }
+    if !capture_window_closed {
+        failing_checks.push("capture_window".to_string());
+    }
+    let mut actions = Vec::new();
+    if !setup_closed {
+        if let Some(arc) = timing
+            .arcs
+            .iter()
+            .filter(|arc| !arc.is_false_path && arc.setup_slack_ps < 0.0)
+            .min_by(|left, right| left.setup_slack_ps.total_cmp(&right.setup_slack_ps))
+        {
+            actions.push(timing_closure_action(
+                TimingClosureCheck::Setup,
+                1,
+                arc.from,
+                arc.to,
+                arc.setup_slack_ps,
+                arc.route_length_um,
+                routing,
+                config,
+            ));
+        }
+    }
+    if !hold_closed {
+        if let Some(arc) = timing
+            .arcs
+            .iter()
+            .filter(|arc| !arc.is_false_path && arc.hold_slack_ps < 0.0)
+            .min_by(|left, right| left.hold_slack_ps.total_cmp(&right.hold_slack_ps))
+        {
+            actions.push(timing_closure_action(
+                TimingClosureCheck::Hold,
+                2,
+                arc.from,
+                arc.to,
+                arc.hold_slack_ps,
+                arc.route_length_um,
+                routing,
+                config,
+            ));
+        }
+    }
+    if capture_window_closure_enabled && !capture_window_closed {
+        if let Some(arc) = timing
+            .arcs
+            .iter()
+            .filter(|arc| !arc.is_false_path && arc.capture_window_violation)
+            .min_by(|left, right| {
+                left.capture_window_slack_ps
+                    .total_cmp(&right.capture_window_slack_ps)
+            })
+        {
+            actions.push(timing_closure_action(
+                TimingClosureCheck::CaptureWindow,
+                3,
+                arc.from,
+                arc.to,
+                arc.capture_window_slack_ps,
+                arc.route_length_um,
+                routing,
+                config,
+            ));
+        }
+    }
+    let closed = setup_closed && hold_closed && capture_window_closed;
+    let action_count = actions.len();
+    let primary_action = actions.first().copied();
+    let reduce_route_delay_actions = actions
+        .iter()
+        .filter(|action| action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay)
+        .count();
+    let relax_constraint_or_improve_library_timing_actions = actions
+        .iter()
+        .filter(|action| {
+            action.remediation_kind
+                == TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming
+        })
+        .count();
+    let add_hold_padding_actions = actions
+        .iter()
+        .filter(|action| action.remediation_kind == TimingClosureRemediationKind::AddHoldPadding)
+        .count();
+    let adjust_sfq_phase_or_pulse_window_actions = actions
+        .iter()
+        .filter(|action| {
+            action.remediation_kind
+                == TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow
+        })
+        .count();
+    TimingClosureSummary {
+        closed,
+        status: if closed { "closed" } else { "open" }.to_string(),
+        setup_closed,
+        hold_closed,
+        capture_window_closed,
+        setup_violations,
+        hold_violations,
+        capture_window_violations: closure_capture_window_violations,
+        failing_checks,
+        action_count,
+        primary_action,
+        reduce_route_delay_actions,
+        relax_constraint_or_improve_library_timing_actions,
+        add_hold_padding_actions,
+        adjust_sfq_phase_or_pulse_window_actions,
+        actions,
+        next_step: if closed {
+            "Timing closure reached for setup, hold, and SFQ capture-window checks.".to_string()
+        } else {
+            "Inspect timing_arcs with setup, hold, or capture-window violations, adjust constraints, SFQ phases, pulse windows, or physical routing, then rerun timing analysis.".to_string()
+        },
+    }
+}
+
+fn timing_closure_action(
+    check: TimingClosureCheck,
+    priority: usize,
+    from: PinRef,
+    to: PinRef,
+    slack_ps: f64,
+    route_length_um: f64,
+    routing: &RoutingReport,
+    config: &TimingConfig,
+) -> TimingClosureAction {
+    let route_mode = route_mode_for_arc(routing, from, to).unwrap_or(RouteMode::Jtl);
+    TimingClosureAction {
+        check,
+        priority,
+        remediation_kind: timing_closure_remediation_kind(check, route_mode, route_length_um),
+        from,
+        to,
+        slack_ps,
+        route_mode,
+        route_length_um,
+        from_domain: domain_of_pin_from_config(config, from),
+        to_domain: domain_of_pin_from_config(config, to),
+    }
+}
+
+fn timing_closure_remediation_kind(
+    check: TimingClosureCheck,
+    route_mode: RouteMode,
+    route_length_um: f64,
+) -> TimingClosureRemediationKind {
+    match check {
+        TimingClosureCheck::Hold => TimingClosureRemediationKind::AddHoldPadding,
+        TimingClosureCheck::CaptureWindow => TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow,
+        TimingClosureCheck::Setup if matches!(route_mode, RouteMode::Ptl) || route_length_um > 80.0 => {
+            TimingClosureRemediationKind::ReduceRouteDelay
+        }
+        TimingClosureCheck::Setup => TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming,
+    }
+}
+
+fn timing_closure_loop_report(
+    artifacts: &CompiledArtifacts,
+    closure: &TimingClosureSummary,
+) -> TimingClosureLoopReport {
+    let detour_feedback_attempted = artifacts.initial_total_detour_overhead_um > 0.0;
+    let final_total_detour_overhead_um = artifacts.routing.total_detour_overhead_um;
+    let reduce_route_delay_action = closure.actions.iter().find(|action| {
+        action.remediation_kind == TimingClosureRemediationKind::ReduceRouteDelay
+    });
+    let reduce_route_delay_candidate_available = reduce_route_delay_action.is_some();
+    let recommended_prefer_ptl_from_length_um = reduce_route_delay_action.map(|action| {
+        if matches!(action.route_mode, RouteMode::Ptl) {
+            action.route_length_um + 1.0
+        } else {
+            action.route_length_um.max(20.0)
+        }
+    });
+    let recommended_detour_margin_um = reduce_route_delay_action.map(|_action| {
+        if artifacts.routing.detoured_routes > 0 {
+            (artifacts.routing.total_detour_overhead_um / artifacts.routing.detoured_routes as f64)
+                .max(6.0)
+        } else {
+            0.0
+        }
+    });
+    let recommended_route_mode = reduce_route_delay_action.map(|action| {
+        if matches!(action.route_mode, RouteMode::Ptl) {
+            RouteMode::Jtl
+        } else {
+            action.route_mode
+        }
+    });
+    let estimated_route_length_um = reduce_route_delay_action.map(|action| action.route_length_um);
+    let estimated_slack_deficit_ps =
+        reduce_route_delay_action.map(|action| (-action.slack_ps).max(0.0));
+    let status = if closure.closed {
+        "closed".to_string()
+    } else if artifacts.detour_feedback_applied || artifacts.hold_fix_applied {
+        "improved_open".to_string()
+    } else if detour_feedback_attempted || artifacts.hold_fix_attempted {
+        "attempted_open".to_string()
+    } else {
+        "not_attempted_open".to_string()
+    };
+    let next_step = if closure.closed {
+        "Timing closure loop converged; preserve the applied physical implementation settings.".to_string()
+    } else if closure.add_hold_padding_actions > 0 && !artifacts.hold_fix_attempted {
+        "Enable hold padding reroute with a positive min_hold_jtl_length_um and rerun compile_layout.".to_string()
+    } else if closure.reduce_route_delay_actions > 0 && !artifacts.detour_feedback_applied {
+        "Apply the recommended route-delay settings or update placement constraints, then rerun compile_layout.".to_string()
+    } else {
+        "Review closure.primary_action and rerun compile_layout after applying the selected remediation.".to_string()
+    };
+
+    TimingClosureLoopReport {
+        detour_feedback_attempted,
+        detour_feedback_applied: artifacts.detour_feedback_applied,
+        initial_total_detour_overhead_um: artifacts.initial_total_detour_overhead_um,
+        final_total_detour_overhead_um,
+        reduce_route_delay_candidate_available,
+        recommended_prefer_ptl_from_length_um,
+        recommended_detour_margin_um,
+        recommended_route_mode,
+        estimated_route_length_um,
+        estimated_slack_deficit_ps,
+        reduce_route_delay_candidate_attempted: false,
+        reduce_route_delay_candidate_improved: false,
+        candidate_worst_setup_slack_ps: None,
+        candidate_setup_violations: None,
+        candidate_hold_violations: None,
+        candidate_route_mode: None,
+        candidate_route_length_um: None,
+        hold_fix_attempted: artifacts.hold_fix_attempted,
+        hold_fix_applied: artifacts.hold_fix_applied,
+        initial_hold_violations: artifacts.initial_hold_violations,
+        final_hold_violations: artifacts.timing.hold_violations,
+        status,
+        next_step,
+    }
 }
 
 fn default_macro_area_um2() -> f64 {
@@ -1982,6 +2426,8 @@ mod tests {
         assert_eq!(report.clock.phase_count, 2);
         assert_eq!(report.timing.initial_hold_violations, report.timing.final_hold_violations);
         assert_eq!(report.timing.analyzed_arcs, 2);
+        assert!(report.timing_closure.closed);
+        assert_eq!(report.timing_closure.status, "closed");
     }
 
     #[test]
@@ -2012,6 +2458,8 @@ mod tests {
             rflux_timing::ClockDomainConstraint { id: 1, period_ps: 10.0 },
             rflux_timing::ClockDomainConstraint { id: 2, period_ps: 10.0 },
         ];
+        config.timing.sfq_phase_count = 2;
+        config.timing.sfq_pulse_window_ps = 2.5;
         config.timing.crossing_constraints = vec![rflux_timing::CrossingConstraint {
             from_domain: 1,
             to_domain: 2,
@@ -2029,7 +2477,127 @@ mod tests {
         assert_eq!(report.timing_arcs[0].route_length_um, 40.0);
         assert_eq!(report.timing_arcs[0].from_domain, Some(1));
         assert_eq!(report.timing_arcs[0].to_domain, Some(2));
+        assert_eq!(report.timing_arcs[0].launch_phase, 0);
+        assert_eq!(report.timing_arcs[0].capture_phase, 1);
+        assert_eq!(report.timing_arcs[0].launch_window_start_ps, 0.0);
+        assert_eq!(report.timing_arcs[0].launch_window_end_ps, 2.5);
+        assert_eq!(report.timing_arcs[0].capture_window_start_ps, 5.0);
+        assert_eq!(report.timing_arcs[0].capture_window_end_ps, 7.5);
+        assert_eq!(report.capture_window_violations, 0);
+        assert_eq!(report.timing_arcs[0].arrival_phase_offset_ps, 8.0);
+        assert_eq!(report.timing_arcs[0].capture_window_slack_ps, -0.5);
+        assert!(!report.timing_arcs[0].capture_window_violation);
         assert!(report.timing_arcs[0].is_false_path);
+        assert!(report.closure.closed);
+        assert_eq!(report.closure.status, "closed");
+    }
+
+    #[test]
+    fn analyze_timing_reports_open_closure_for_setup_violations() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .expect("source to sink");
+
+        let mut config = FlowConfig::default();
+        config.timing.node_constraints = vec![rflux_timing::NodeTimingConstraint {
+            node: sink,
+            input_arrival_ps: None,
+            required_ps: Some(20.0),
+            clock_domain: None,
+        }];
+
+        let report = FlowRunner::new()
+            .analyze_timing(&mut netlist, &Pdk::minimal("test"), &config)
+            .expect("timing should succeed");
+
+        assert_eq!(report.setup_violations, 1);
+        assert!(!report.closure.closed);
+        assert_eq!(report.closure.status, "open");
+        assert_eq!(report.closure.failing_checks, vec!["setup"]);
+        assert_eq!(report.closure.action_count, 1);
+        assert_eq!(report.closure.actions.len(), 1);
+        assert_eq!(report.closure.actions[0].check, TimingClosureCheck::Setup);
+        assert_eq!(report.closure.primary_action, Some(report.closure.actions[0]));
+        assert_eq!(report.closure.actions[0].priority, 1);
+        assert_eq!(
+            report.closure.actions[0].remediation_kind,
+            TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming
+        );
+        assert_eq!(report.closure.reduce_route_delay_actions, 0);
+        assert_eq!(
+            report
+                .closure
+                .relax_constraint_or_improve_library_timing_actions,
+            1
+        );
+        assert_eq!(report.closure.add_hold_padding_actions, 0);
+        assert_eq!(report.closure.actions[0].from, PinRef { node: source, port: 0 });
+        assert_eq!(report.closure.actions[0].to, PinRef { node: sink, port: 0 });
+        assert!(report.closure.actions[0].slack_ps < 0.0);
+        assert!(report
+            .closure
+            .next_step
+            .contains("Inspect timing_arcs with setup, hold, or capture-window violations"));
+    }
+
+    #[test]
+    fn analyze_timing_reports_open_closure_for_capture_window_violations() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(PinRef { node: source, port: 0 }, PinRef { node: sink, port: 0 })
+            .expect("source to sink");
+
+        let mut config = FlowConfig::default();
+        config.timing.node_constraints = vec![rflux_timing::NodeTimingConstraint {
+            node: sink,
+            input_arrival_ps: None,
+            required_ps: Some(120.0),
+            clock_domain: Some(1),
+        }];
+        config.timing.clock_domains = vec![rflux_timing::ClockDomainConstraint {
+            id: 1,
+            period_ps: 10.0,
+        }];
+
+        let report = FlowRunner::new()
+            .analyze_timing(&mut netlist, &Pdk::minimal("test"), &config)
+            .expect("timing should succeed");
+
+        assert_eq!(report.setup_violations, 0);
+        assert_eq!(report.hold_violations, 0);
+        assert_eq!(report.capture_window_violations, 1);
+        assert!(!report.timing_arcs[0].is_false_path);
+        assert!(report.timing_arcs[0].capture_window_violation);
+        assert_eq!(report.timing_arcs[0].capture_window_start_ps, 0.0);
+        assert_eq!(report.timing_arcs[0].capture_window_end_ps, 4.0);
+        assert_eq!(report.timing_arcs[0].arrival_phase_offset_ps, 8.0);
+        assert_eq!(report.timing_arcs[0].capture_window_slack_ps, -4.0);
+        assert!(!report.closure.closed);
+        assert_eq!(report.closure.status, "open");
+        assert!(report.closure.setup_closed);
+        assert!(report.closure.hold_closed);
+        assert!(!report.closure.capture_window_closed);
+        assert_eq!(report.closure.failing_checks, vec!["capture_window"]);
+        assert_eq!(report.closure.action_count, 1);
+        assert_eq!(report.closure.actions[0].check, TimingClosureCheck::CaptureWindow);
+        assert_eq!(
+            report.closure.actions[0].remediation_kind,
+            TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow
+        );
+        assert_eq!(report.closure.adjust_sfq_phase_or_pulse_window_actions, 1);
+        assert_eq!(report.closure.add_hold_padding_actions, 0);
+        assert_eq!(report.closure.reduce_route_delay_actions, 0);
+        assert_eq!(
+            report
+                .closure
+                .relax_constraint_or_improve_library_timing_actions,
+            0
+        );
     }
 
     #[test]
@@ -2539,13 +3107,15 @@ mod tests {
                 critical_path_delay_ps: 12.0,
                 setup_violations: 0,
                 hold_violations: 0,
+                capture_window_violations: 0,
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
             },
             initial_total_detour_overhead_um: 0.0,
+            initial_hold_violations: 0,
+            hold_fix_attempted: false,
             detour_feedback_applied: false,
             hold_fix_applied: false,
-            initial_hold_violations: 0,
         };
         let simulation = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
@@ -2656,13 +3226,15 @@ mod tests {
                 critical_path_delay_ps: 12.0,
                 setup_violations: 0,
                 hold_violations: 0,
+                capture_window_violations: 0,
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
             },
             initial_total_detour_overhead_um: 0.0,
+            initial_hold_violations: 0,
+            hold_fix_attempted: false,
             detour_feedback_applied: false,
             hold_fix_applied: false,
-            initial_hold_violations: 0,
         };
         let simulation = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
@@ -2780,13 +3352,15 @@ mod tests {
                 critical_path_delay_ps: 12.0,
                 setup_violations: 0,
                 hold_violations: 0,
+                capture_window_violations: 0,
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
             },
             initial_total_detour_overhead_um: 0.0,
+            initial_hold_violations: 0,
+            hold_fix_attempted: false,
             detour_feedback_applied: false,
             hold_fix_applied: false,
-            initial_hold_violations: 0,
         };
         let simulation = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
@@ -3264,6 +3838,17 @@ mod tests {
         assert!(report.timing.initial_hold_violations > 0);
         assert_eq!(report.timing.final_hold_violations, 0);
         assert!(report.timing.hold_fix_applied);
+        assert!(report.timing_closure.closed);
+        assert_eq!(report.timing_closure.status, "closed");
+        assert!(report.timing_closure.hold_closed);
+        assert_eq!(report.timing_closure.hold_violations, 0);
+        assert_eq!(report.timing_closure.action_count, 0);
+        assert_eq!(report.timing_closure.add_hold_padding_actions, 0);
+        assert!(report.timing_closure_loop.hold_fix_attempted);
+        assert!(report.timing_closure_loop.hold_fix_applied);
+        assert_eq!(report.timing_closure_loop.initial_hold_violations, 1);
+        assert_eq!(report.timing_closure_loop.final_hold_violations, 0);
+        assert_eq!(report.timing_closure_loop.status, "closed");
     }
 
     #[test]

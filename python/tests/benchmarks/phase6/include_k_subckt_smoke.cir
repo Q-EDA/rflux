@@ -1,0 +1,6 @@
+.title include-k-subckt-smoke
+.include "include_k_stage_defs.inc"
+V1 in 0 PULSE(0,1m,0,1p,1p,2p,8p)
+X1 in out tap coupled_stage params: coupling=0.9 lval=1p rval=1
+.tran 1p 8p
+.end

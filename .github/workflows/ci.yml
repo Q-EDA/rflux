@@ -15,10 +15,35 @@ on:
         required: false
         default: false
         type: boolean
+      run_release_artifacts:
+        description: "Build optional candidate CLI and Python release artifacts"
+        required: false
+        default: false
+        type: boolean
       josim_command:
         description: "JoSIM command/path for compare tests"
         required: false
         default: "josim"
+        type: string
+      previous_summary_json:
+        description: "Optional repo-relative approved baseline summary JSON for history diff generation"
+        required: false
+        default: ""
+        type: string
+      baseline_platform:
+        description: "Platform key used to auto-stage a repo-tracked approved baseline when previous_summary_json is empty"
+        required: false
+        default: "linux"
+        type: string
+      validate_no_regression:
+        description: "Fail when the current summary regresses relative to previous_summary_json"
+        required: false
+        default: false
+        type: boolean
+      regression_tolerance_v:
+        description: "Allowed positive worst_max_abs_v drift during no-regression validation"
+        required: false
+        default: "0.0"
         type: string
 
 jobs:
@@ -28,16 +53,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version-file: .python-version
-
-      - name: Sync Python dependencies
-        run: uv sync --all-groups
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
 
       - name: Rust tests
         run: |
@@ -49,9 +66,51 @@ jobs:
           export PYO3_PYTHON="$(uv python find)"
           cargo test -p rflux-sat --test dimacs_end_to_end -- --nocapture
           cargo test -p rflux-synth --test quaigh_alignment_fixtures -- --nocapture
+          cargo test -p rflux-synth --test end_to_end_classic_examples -- --nocapture
 
       - name: Python tests
         run: uv run pytest
+
+      - name: Diagnostics command smoke
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test -p rflux-cli run_collect_diagnostics_writes_manifest_and_copies_inputs -- --nocapture
+          cargo test -p rflux-cli run_with_diagnostics_ -- --nocapture
+
+      - name: PDK command smoke
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test -p rflux-cli run_pdk_validate_reports_ -- --nocapture
+
+      - name: Phase 5 workflow smoke
+        run: |
+          uv run pytest python/tests/test_basic.py -k "merge_characterized_library_round_trip or optimize_design_with_characterized_library_workflow" -q
+
+      - name: Waveform summary helper smoke
+        run: |
+          uv run pytest python/tests/test_waveform_compare_summary_utils.py -q
+
+      - name: Waveform manifest runner smoke
+        run: |
+          uv run pytest python/tests/test_waveform_compare_manifest_runner.py -q
+
+      - name: External warning helper smoke
+        run: |
+          uv run pytest python/tests/test_external_warning_manifest_runner.py -q
+          uv run pytest python/tests/test_external_warning_summary_utils.py -q
+          uv run pytest python/tests/test_prepare_external_warning_artifacts.py -q
+
+      - name: Quaigh converter smoke
+        run: |
+          uv run pytest python/tests/test_quaigh_bench_converter.py -q
+
+      - name: Security compliance exporter smoke
+        run: |
+          uv run pytest python/tests/test_security_compliance_utils.py -q
+
+      - name: Release artifact helper smoke
+        run: |
+          uv run pytest python/tests/test_prepare_release_artifacts.py -q
 
       - name: Upload SAT and synth metric artifacts
         uses: actions/upload-artifact@v4
@@ -69,24 +128,86 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version-file: .python-version
-
-      - name: Sync Python dependencies
-        run: uv sync --all-groups
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
 
       - name: Build Python extension
         run: uv run maturin develop -m crates/py/Cargo.toml
 
-      - name: Run optional external waveform compare tests
-        env:
-          RFLOW_JOSIM_COMMAND: ${{ inputs.josim_command }}
-        run: uv run pytest python/tests/test_waveform_compare.py -rs
+      - name: Run optional external waveform compare manifest
+        run: |
+          uv run python python/scripts/run_waveform_compare_manifest.py \
+            --josim-command "${{ inputs.josim_command }}" \
+            --result-dir target/waveform-compare/results \
+            --validate-pass
+
+      - name: Run optional external warning manifest
+        run: |
+          uv run python python/scripts/run_external_warning_manifest.py \
+            --josim-command "${{ inputs.josim_command }}" \
+            --result-dir target/external-warning-manifest \
+            --validate-pass
+
+      - name: Prepare waveform compare review artifacts
+        run: |
+          REGRESSION_ARGS=""
+          if [ "${{ inputs.validate_no_regression }}" = "true" ]; then
+            REGRESSION_ARGS="--validate-no-regression"
+          fi
+          uv run python python/scripts/prepare_waveform_compare_artifacts.py \
+            --thresholds python/tests/benchmarks/phase6/waveform_thresholds.json \
+            --benchmark-dir python/tests/benchmarks/phase6 \
+            --result-dir target/waveform-compare/results \
+            --artifact-dir target/waveform-compare \
+            --previous-summary-json "${{ inputs.previous_summary_json }}" \
+            --baseline-platform "${{ inputs.baseline_platform }}" \
+            --regression-tolerance-v "${{ inputs.regression_tolerance_v }}" \
+            --josim-command "${{ inputs.josim_command }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --github-job "waveform-compare-optional" \
+            --github-event-name "${{ github.event_name }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt "${{ github.run_attempt }}" \
+            --github-sha "${{ github.sha }}" \
+            --github-ref-name "${{ github.ref_name }}" \
+            ${REGRESSION_ARGS}
+
+      - name: Prepare external warning review artifacts
+        run: |
+          uv run python python/scripts/prepare_external_warning_artifacts.py \
+            --result-dir target/external-warning-manifest \
+            --artifact-dir target/external-warning-review \
+            --josim-command "${{ inputs.josim_command }}" \
+            --github-workflow "${{ github.workflow }}" \
+            --github-job "waveform-compare-optional" \
+            --github-event-name "${{ github.event_name }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt "${{ github.run_attempt }}" \
+            --github-sha "${{ github.sha }}" \
+            --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload waveform compare artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveform-compare-results
+          if-no-files-found: error
+          path: |
+            target/waveform-compare/results/*.compare.json
+            target/waveform-compare/waveform_compare_summary.current.md
+            target/waveform-compare/waveform_compare_summary.current.json
+            target/waveform-compare/waveform_compare_summary.approved-baseline.json
+            target/waveform-compare/waveform_compare_summary.candidate-baseline.md
+            target/waveform-compare/waveform_compare_summary.candidate-baseline.json
+            target/waveform-compare/waveform_compare_summary.validation.json
+            target/waveform-compare/manifest.json
+            target/waveform-compare/README.txt
+            target/external-warning-review/*.warning.json
+            target/external-warning-review/external_warning_summary.current.md
+            target/external-warning-review/external_warning_summary.current.json
+            target/external-warning-review/selected_external_warning_contracts.json
+            target/external-warning-review/manifest.json
+            target/external-warning-review/README.txt
+            python/tests/benchmarks/phase6/waveform_thresholds.json
 
   security-compliance-optional:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_security_compliance }}
@@ -95,16 +216,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version-file: .python-version
-
-      - name: Sync Python dependencies
-        run: uv sync --all-groups
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
 
       - name: Install compliance tools
         run: |
@@ -113,13 +226,15 @@ jobs:
 
       - name: Generate compliance artifacts
         run: |
-          mkdir -p target/compliance
-          cargo metadata --format-version 1 > target/compliance/rust-dependency-inventory.json
-          cargo license --json > target/compliance/rust-licenses.json
-          uv run python python/scripts/export_python_dependency_inventory.py --output target/compliance/python-dependency-inventory.json
-          uv run python python/scripts/export_python_license_inventory.py --output target/compliance/python-license-inventory.json
-          set -o pipefail
-          cargo audit | tee target/compliance/cargo-audit.txt
+          uv run python python/scripts/prepare_security_compliance_artifacts.py \
+            --output-dir target/compliance \
+            --github-workflow "${{ github.workflow }}" \
+            --github-job "security-compliance-optional" \
+            --github-event-name "${{ github.event_name }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt "${{ github.run_attempt }}" \
+            --github-sha "${{ github.sha }}" \
+            --github-ref-name "${{ github.ref_name }}"
 
       - name: Upload compliance artifacts
         uses: actions/upload-artifact@v4
@@ -132,5 +247,44 @@ jobs:
             target/compliance/python-dependency-inventory.json
             target/compliance/python-license-inventory.json
             target/compliance/cargo-audit.txt
-            pyproject.toml
-            uv.lock
+            target/compliance/pyproject.toml
+            target/compliance/uv.lock
+            target/compliance/manifest.json
+            target/compliance/README.txt
+
+  release-artifacts-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_release_artifacts }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Build candidate release artifacts
+        run: |
+          uv run python python/scripts/prepare_release_artifacts.py \
+            --output-dir target/release-artifacts \
+            --github-workflow "${{ github.workflow }}" \
+            --github-job "release-artifacts-optional" \
+            --github-event-name "${{ github.event_name }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt "${{ github.run_attempt }}" \
+            --github-sha "${{ github.sha }}" \
+            --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload release artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-artifacts
+          if-no-files-found: error
+          path: |
+            target/release-artifacts/bin/**
+            target/release-artifacts/wheels/**
+            target/release-artifacts/README.md
+            target/release-artifacts/Cargo.toml
+            target/release-artifacts/pyproject.toml
+            target/release-artifacts/uv.lock
+            target/release-artifacts/README.txt
+            target/release-artifacts/manifest.json

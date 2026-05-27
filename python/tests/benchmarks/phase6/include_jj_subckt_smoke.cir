@@ -1,0 +1,6 @@
+.title include-jj-subckt-smoke
+.include "include_jj_stage_defs.inc"
+V1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)
+X1 in 0 jj_stage params: rdrive=10
+.tran 1p 8p
+.end

@@ -1,0 +1,5 @@
+.title include-source-subckt-smoke
+.include "include_source_stage_defs.inc"
+X1 out driver params: rval=10 cval=1p
+.tran 0.5p 10p
+.end

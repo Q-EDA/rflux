@@ -532,7 +532,7 @@ fn run_generated_deck_with_base(
                         measurement_warnings: Vec::new(),
                         violation_details: Vec::new(),
                         external_status_code: None,
-                        external_result: None,
+                        external_result: Some("external_command_spawn_failed".to_string()),
                     };
                 }
             }
@@ -6722,6 +6722,28 @@ mod tests {
         assert_eq!(
             report.external_result.as_deref(),
             Some("external_command_not_allowed")
+        );
+    }
+
+    #[test]
+    fn external_mode_reports_spawn_failure_after_deck_write() {
+        let missing_command = std::env::temp_dir()
+            .join("rflux-missing-josim-command")
+            .join(if cfg!(windows) { "josim.exe" } else { "josim" });
+        let report = run_generated_deck(
+            ".tran 1p 10p\n.end\n",
+            5,
+            &SimulationConfig {
+                mode: SimulationMode::ExternalJosim,
+                external_command: Some(missing_command.display().to_string()),
+            },
+        );
+
+        assert_eq!(report.backend, SimulationBackend::ExternalUnavailable);
+        assert!(report.generated_deck_path.is_some());
+        assert_eq!(
+            report.external_result.as_deref(),
+            Some("external_command_spawn_failed")
         );
     }
 

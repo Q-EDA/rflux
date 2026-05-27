@@ -1,0 +1,5 @@
+INPUT(a)
+INPUT(b)
+INPUT(c)
+y = MAJ(a, b, c)
+OUTPUT(y)

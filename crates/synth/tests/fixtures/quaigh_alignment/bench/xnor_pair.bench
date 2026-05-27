@@ -1,0 +1,6 @@
+INPUT(a)
+INPUT(b)
+
+x0 = XNOR(a, b)
+
+OUTPUT(x0)

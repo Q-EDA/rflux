@@ -125,12 +125,15 @@
 - 变更有对应测试或文档说明。
 - 发布说明已生成。
 - 已知限制已更新。
+- 若发布涉及 PDK schema、PDK 默认行为或新接入 PDK，必须附带 `pdk-validate` 结果或等价结构校验记录。
+- 主 CI 与进入发布评审的可选 workflow 必须复用仓库内共享的环境 bootstrap 路径，避免 Rust/Python/uv 初始化在不同 job 之间发生未审查漂移。
 
 ### 5.2 Alpha 额外要求
 
 - 核心流程 smoke 全通过。
 - 支持矩阵与错误码文档已更新。
 - 至少一条标准安装路径经验证。
+- 自定义 PDK 若进入 Alpha 范围，必须至少通过当前最小 `pdk-validate` 校验。
 
 ### 5.3 Beta 额外要求
 
@@ -138,6 +141,7 @@
 - 关键对照矩阵持续通过。
 - CLI / Python 示例全部可运行。
 - 回滚流程经验证。
+- 进入 Beta 范围的 PDK 变更必须同时提供 `pdk-validate` 结果、benchmark 回归和已知限制更新。
 
 ### 5.4 GA 额外要求
 
@@ -145,6 +149,16 @@
 - schema 兼容测试稳定。
 - 发布产物可复现。
 - 有明确缺陷响应策略。
+- GA 范围内的 PDK 准入不能只依赖 `pdk-validate`；必须把它视为结构门，外加 benchmark、flow/timing 对照和发布审查记录。
+
+### 5.5 PDK 准入记录
+
+凡是把某套 PDK 提升到对外试用、Beta 或 GA 范围时，发布资料中至少应保留以下记录：
+
+- `pdk-validate` 输出报告或等价自动校验产物。
+- 对应 PDK 版本、来源、负责人和支持等级。
+- 关键 compile / layout / timing benchmark 回归结果。
+- 已知限制和不承诺项是否有变化。
 
 ## 6. 回滚策略
 
@@ -195,3 +209,12 @@
 2. 所有候选版本附带 release notes 草案。
 3. 所有公共契约变更必须更新文档。
 4. 不允许在无说明情况下改变默认行为。
+5. 如果候选版本包含 `sim`、JoSIM 对照脚本或 phase-6 阈值清单改动，必须附带 waveform compare 当前 summary、基线来源说明，以及在存在同平台 approved baseline 时的 no-regression 结论或豁免原因；若变更触及 unsupported-warning contract，也必须同时附带 external-warning review bundle（summary + manifest）。
+6. 上述仿真候选版本评审应按 [sim-release-readiness-checklist.md](./sim-release-readiness-checklist.md) 留存 go / no-go 记录。
+7. 文档、示例或发布门禁中出现的新命令，必须落到已有 CI smoke job 或新增受控 workflow step，不能只停留在说明文字里。
+8. 候选发布产物当前应通过手动触发的 `release-artifacts-optional` workflow job 生成，统一产出当前 runner 上的 CLI 候选二进制、Python wheel、构建输入副本和 manifest，而不是临时手工拼接命令。
+9. 候选发布产物评审应按 [release-artifact-readiness-checklist.md](./release-artifact-readiness-checklist.md) 留存 go / no-go 记录。
+
+当前候选发布构建也已有显式 CI smoke anchor：
+
+- `uv run pytest python/tests/test_prepare_release_artifacts.py -q`

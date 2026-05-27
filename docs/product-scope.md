@@ -21,6 +21,12 @@
 - Rust `rflux-hdl` builder DSL 作为内部建模与示例输入路径。
 - 受限 SPICE / JoSIM deck 作为仿真专用输入路径。
 
+当前收口说明：
+
+- 对外试用、benchmark 和支持工单默认应优先收敛到 `rflux-ir` JSON 复现。
+- Rust `rflux-hdl` builder DSL 目前只应视为内部建模与测试辅助入口，不应被表述为通用 HDL frontend。
+- 受限 SPICE / JoSIM deck 当前仅应被表述为仿真专用、受限支持输入，不应外推为通用 SPICE 兼容承诺。
+
 ### 3.2 核心流程
 
 - `compile-netlist`
@@ -49,6 +55,10 @@
 - 完整 JoSIM 语义兼容。
 - 多 PDK 商业化长期支持。
 - 未版本化的 schema 演进。
+
+补充说明：
+
+- 在输入层面，这意味着首发版本不应对“任意 HDL 输入可导入”或“任意 SPICE deck 可仿真”作出承诺。
 
 ## 5. 目标用户
 

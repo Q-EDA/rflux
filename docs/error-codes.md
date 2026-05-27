@@ -135,7 +135,13 @@ CLI 错误输出应至少包含：
 当前推进注记：
 
 - `rflux-cli` 已开始在 `rflux-io` 输入 / schema 错误路径上输出 `error[RFLOW-...]` 风格消息，并附带 `detail` 与 `next` 建议。
-- 其他错误域当前仍大量停留在普通字符串错误，后续需要继续把 `FLOW` / `SIM` / `VERIFY` 路径接到同一结构化出口。
+- `rflux-cli` 与 `run-with-diagnostics` 已不再使用未文档化的 `RFLOW-CLI-UNCLASSIFIED` 兜底码，普通未分类失败现统一回落到 `RFLOW-INTERNAL-001`。
+- `FLOW` 路径已开始接线到同一结构化出口：当前 `compile-netlist failed` 会映射到 `RFLOW-FLOW-001`，`analyze-timing failed` 会映射到 `RFLOW-FLOW-004`，并附带稳定建议动作。
+- `SIM` 路径也已开始接线到同一结构化出口：当前 `simulate-file` 缺失输入 deck 会映射到 `RFLOW-INPUT-001`，而已知不支持的 deck 语法失败已开始映射到 `RFLOW-SIM-002`。
+- `VERIFY` 路径也已开始接线到同一结构化出口：当前 `check-equivalence --kind combinational` 遇到顺序网表时，会稳定映射到 `RFLOW-VERIFY-002`，并建议切换到 `single_step_sequential` 或缩小到组合子集。
+- `VERIFY` 路径中的接口边界失败也已开始接线：当前 `check-equivalence` 遇到输入 / 输出 / 状态接口集合不一致时，会稳定映射到 `RFLOW-VERIFY-001`，并建议先对齐比较对象的命名接口。
+- `verify-layout` 的命令级失败也已开始接线：当前 `verify-layout failed` 会稳定映射到 `RFLOW-VERIFY-003`，并建议先查看 verification report 或诊断包中的结构/仿真校验细节。
+- 其他错误域当前仍需要继续把 `FLOW` / `SIM` / `VERIFY` 路径接到同一结构化出口，尤其是模块内仍直接暴露原始 I/O 或 anyhow 错误的路径。
 
 示例：
 

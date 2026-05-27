@@ -143,7 +143,7 @@ It is a repository that currently combines a Yosys-like synthesis and verificati
 | `rflux-sat` | `sat` backend / CNF solving support | strong | Provides CNF, DIMACS import/export, incremental solving, assumptions, metrics, and UNSAT core extraction. |
 | `rflux-cli` | Yosys command-line entrypoint | strong | Exposes `compile-netlist`, `check-equivalence`, and `solve-dimacs`, which are the most Yosys-like user-facing flows in the current repo. |
 | `rflux-hdl` | Alternative frontend / DSL input layer | partial | Currently a minimal Rust builder DSL, not a Verilog frontend or a general HDL lowering stack. |
-| `rflux-io` | Frontend/backend file I/O layer | partial | Currently strongest on IR JSON and LEF/DEF exchange; it is not yet equivalent to a mature `read_verilog`/`write_blif` style frontend/backend set. |
+| `rflux-io` | Frontend/backend file I/O layer | partial | Currently strongest on IR JSON, a minimal `.bench` gate-level subset, and LEF/DEF exchange; it is not yet equivalent to a mature `read_verilog`/`write_blif` style frontend/backend set. |
 | `rflux-tech` | Library and technology data used by mapping passes | partial | Supports technology-aware mapping and physical/timing consumers, but it is broader than a pure Yosys liberty/techmap role because it also feeds layout/timing phases. |
 | `rflux-flow` | Flow script or external orchestration around Yosys | weak | This is broader than Yosys itself because it coordinates synthesis, place, route, timing, verification, and simulation-facing hooks. |
 | `rflux-place` | none inside core Yosys | none | Physical placement is outside normal Yosys scope. |
@@ -244,7 +244,7 @@ Why it aligns:
 
 Difference from Yosys CLI today:
 
-- the input format is currently centered on `rflux` IR JSON rather than Verilog scripts
+- the input format is currently centered on `rflux` IR JSON plus a minimal `.bench` gate-level subset rather than Verilog scripts
 - the command set spans beyond synthesis into layout, timing, and simulation-oriented flows
 
 Reference anchors:
@@ -273,11 +273,12 @@ This crate is also only a partial frontend/backend analog today.
 Why it partially aligns:
 
 - it owns import/export responsibilities
-- it handles IR JSON and LEF/DEF conversion paths
+- it handles IR JSON, a minimal `.bench` gate-level subset, and LEF/DEF conversion paths
 
 Why it remains narrower than Yosys frontend/backend coverage:
 
-- current implemented strength is IR JSON plus LEF/DEF exchange
+- current implemented strength is IR JSON plus a minimal `.bench` subset and LEF/DEF exchange
+- the `.bench` path is limited to a small Quaigh-style subset (`AND`/`OR`/`XOR`/`XNOR`/`NOT`/`NAND`/`NOR`/`BUF`/`MUX`/`DFF`/`DFFE`/`MAJ`/`AOI21`/`OAI21`/`AOI22`/`OAI22`/`AOI31`/`OAI31`/`AOI211`/`OAI211`/`AOI311`/`OAI311`/`AOI321`/`OAI321`/`AOI221`/`OAI221`/`AOI222`/`OAI222`/`AOI322`/`OAI322`/`AOI421`/`OAI421`/`AOI422`/`OAI422`/`AOI431`/`OAI431`/`AOI432`/`OAI432`/`AOI433`/`OAI433`/`AOI441`/`OAI441`/`AOI442`/`OAI442`/`AOI443`/`OAI443`/`AOI444`/`OAI444`/`AOI2221`/`OAI2221` plus ports, with `XNOR`/`NAND`/`NOR`/`DFF`/`DFFE`/`MAJ`/`AOI21`/`OAI21`/`AOI22`/`OAI22`/`AOI31`/`OAI31`/`AOI211`/`OAI211`/`AOI311`/`OAI311`/`AOI321`/`OAI321`/`AOI221`/`OAI221`/`AOI222`/`OAI222`/`AOI322`/`OAI322`/`AOI421`/`OAI421`/`AOI422`/`OAI422`/`AOI431`/`OAI431`/`AOI432`/`OAI432`/`AOI433`/`OAI433`/`AOI441`/`OAI441`/`AOI442`/`OAI442`/`AOI443`/`OAI443`/`AOI444`/`OAI444`/`AOI2221`/`OAI2221` lowered into the existing IR, the current signal-token parser accepts bit-style names such as `a[0]`, duplicate `INPUT/OUTPUT` declarations and gate redefinitions of INPUT names are explicitly rejected, `INPUT(name)` plus `OUTPUT(name)` passthrough remains supported, acyclic gate definitions may appear before their consumers, checked-in sequential bench fixtures now live in a dedicated `bench_sequential/` lane with `dff_basic`, `dffe_basic`, and a checked-in `dff_dffe_mismatch` pair, and the CLI has explicit single-step sequential bench-equivalence regressions for matching cases, mismatching cases, and diagnostics-bundle mismatch reporting in that lane rather than mixing it into the combinational bench-equivalence fixture set) rather than a general frontend
 - the repo does not currently expose a mature Verilog frontend comparable to `read_verilog`
 
 ## Practical takeaway

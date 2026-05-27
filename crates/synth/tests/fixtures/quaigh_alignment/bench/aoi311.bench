@@ -1,0 +1,7 @@
+INPUT(a)
+INPUT(b)
+INPUT(c)
+INPUT(d)
+INPUT(e)
+y = AOI311(a, b, c, d, e)
+OUTPUT(y)

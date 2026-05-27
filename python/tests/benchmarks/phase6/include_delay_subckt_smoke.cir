@@ -1,0 +1,6 @@
+.title include-delay-subckt-smoke
+.include "include_delay_stage_defs.inc"
+V1 in 0 PULSE(0 1m 0 0.2p 0.2p 2p 6p)
+X1 in out delay_stage params: z0=50 td=3p rval=50
+.tran 0.5p 10p
+.end

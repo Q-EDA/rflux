@@ -500,7 +500,13 @@ CI 中至少保留：
 当前推进注记：
 
 - CLI 已新增 `collect-diagnostics` 最小诊断包导出能力，当前会生成 `manifest.json`、记录工作目录、最小环境摘要与 `RFLOW_*` / `JOSIM_*` 变量名快照，并收集问题复现用到的输入文件副本和输入契约快照；同时已补最小 `configuration` / `summary` 区块，用于回显路径与仿真配置，并汇总 legacy 兼容输入、契约检查失败项以及已存在 JSON report 的 kind/schema 摘要。诊断包目录还会产出最小结构化日志 `events.jsonl`，记录采集开始、输入复制、report 归档和 manifest 准备等事件，作为支持侧最小可归档上下文。
-- 当前诊断包已覆盖平台信息、CLI 版本、调用参数和最小环境摘要，但结构化日志、运行摘要、profile 开关和完整配置快照仍未完成。
+- CLI 已补统一执行入口 `run-with-diagnostics`，当前已接通 `simulate-file`、`verify-layout`、`compile-layout`、`analyze-timing`、`compile-netlist`、`solve-dimacs`、`check-equivalence` 和 `lint-input`：执行真实命令时会直接产出 bundle，把执行开始/完成/失败事件写入 `events.jsonl`，并在 manifest 中记录最终 report、错误码以及最小 stdout/stderr 摘要。
+- 当前诊断包已覆盖平台信息、CLI 版本、调用参数和最小环境摘要，并在 `simulate-file` / `verify-layout` / `compile-layout` / `analyze-timing` / `compile-netlist` / `solve-dimacs` / `check-equivalence` / `lint-input` 路径下具备最小运行摘要和执行结果归档；flow-oriented 路径的输入捕获、`command_started` 事件和公共 configuration 骨架也已在 CLI 内部完成共享化，说明这一轮“统一 diagnostics 执行骨架”的收敛工作已经基本收口。剩余 observability 缺口主要变为更多真实命令接入、profile 开关、完整配置快照和实时日志归档，而不是继续清理现有八条路径的重复实现。
+
+下一阶段入口：
+
+- 将错误码统一从 `rflux-io` 输入 / schema 错误继续推进到 `FLOW` / `VERIFY` / `SIM` 路径。
+- 保证 diagnostics bundle 与普通 CLI stderr 使用同一套稳定错误码与建议动作。
 
 #### 10.3.3 安装与分发体系
 
@@ -532,7 +538,7 @@ CI 中至少保留：
 
 - 仓库已补 `docs/security-compliance.md`，把当前许可证基线、Rust 依赖/许可证清单、基础安全扫描和外部命令边界先固定成文档化基线。
 - CI 已提供可手动触发的 `security-compliance` 基线作业，当前产出 Rust 依赖清单、Rust 许可证清单、`cargo audit` 扫描结果、Python 依赖清单及 Python 依赖审查输入。
-- 仿真路径中的 `external_command` 已补最小 allowlist、最小路径信任规则、最小环境隔离、最小副作用文件约束和策略文件，当前只允许裸 `josim` / `josim.exe`，并会移除 `RFLOW_*` / `JOSIM_*` 子进程环境变量，同时把单次运行输入收进独立 `rflux-ext-*` 临时目录；更完整的 sandbox、签名校验和环境/文件策略仍未完成。
+- 仿真路径中的 `external_command` 已补最小 allowlist、最小路径信任规则、最小环境隔离、最小副作用文件约束和策略文件，当前只允许 `josim` / `josim-cli` 及其受限 wrapper 后缀，并会移除 `RFLOW_*` / `JOSIM_*` 子进程环境变量，同时把单次运行输入收进独立 `rflux-ext-*` 临时目录；更完整的 sandbox、签名校验和环境/文件策略仍未完成。
 - Python 许可证清单已补自动化导出，当前通过 `uv.lock` 中的 wheel 元数据生成机器可读 inventory，优先读取本地 `uv` 缓存，并显式列出缺失项与抓取失败项；这些项仍需要例外处理。
 - 第三方组件风险审查清单、初始台账和补审模板已补，但正式的例外审批流程和长期跟踪机制仍未完成。
 - 正式 SBOM 仍属于未完成项，暂不能表述为已产品化。
@@ -658,6 +664,7 @@ CI 中至少保留：
 要求：
 
 - 文档中的所有命令都必须被 CI smoke 覆盖。
+- 文档里进入支持或发布门禁的命令，必须复用同一套 CI 环境初始化路径，不能在不同 workflow 中各自维护一份隐式 bootstrap 脚本。
 
 ### 12.7 支持与客户闭环工作流
 
@@ -806,3 +813,100 @@ CI 中至少保留：
 - 最后再扩大承诺范围。
 
 按这个顺序推进，才有可能真正达到商业化成熟工具的目标。
+
+## 20. 对标项目未来 12 周执行表
+
+本节把前文路线图进一步压缩为一个面向当前仓库状态的 12 周执行表。
+
+目标不是在 12 周内“达到商业成熟”，而是用 12 周把当前最值钱的差距快速压缩到可验证、可继续扩展的状态。
+
+本节默认对标以下几类项目：
+
+- JoSIM：原生瞬态仿真与 deck 兼容基线。
+- Yosys：前端、综合、SAT、等价检查与 CLI 契约基线。
+- Quaigh：布尔优化深度与等价证据基线。
+- OpenROAD / nextpnr：物理实现工程化基线。
+- OpenSTA：时序相关性与 signoff 边界基线。
+
+### 20.1 12 周总目标
+
+12 周结束时，至少应达到以下状态：
+
+- 有一条正式承诺的输入路径和一条受限支持路径。
+- `rflux-sim` 与 JoSIM 的相关性对照进入可重复执行的门禁。
+- PDK 接入不再只依赖手工约定，而是有最小 validate 入口。
+- CLI / diagnostics / Python 对外错误语义继续收敛，未分类错误比例下降。
+- P&R / timing 至少建立第一版 benchmark 和相关性基线。
+
+### 20.2 周次安排
+
+| 周次 | 主题 | 主要对标 | 主要交付 | 退出条件 |
+|------|------|----------|----------|----------|
+| 第 1 周 | 输入边界冻结 | Yosys / JoSIM | 冻结首批正式支持输入子集；补 `docs/support-matrix.md` 和输入支持表草案 | 仓库内已有“正式支持 / 受限支持 / 不支持”三档定义 |
+| 第 2 周 | 输入契约回归 | Yosys | 为 IR JSON、PDK JSON、受限 deck 路径补 schema / 兼容回归；清点隐式 fallback | 关键输入路径都有成功 / 非法 / 不支持回归 |
+| 第 3 周 | PDK validate 基线 | 商业产品 / OpenROAD | 增加最小 `pdk validate` 入口或等价 CLI；补 PDK onboarding 文档框架 | 自定义 PDK 不再只能靠人工试跑判断可用性 |
+| 第 4 周 | 错误码收敛第一轮 | Yosys / 商业产品 | 继续压缩 `RFLOW-INTERNAL-001`；优先覆盖 `FLOW` / `VERIFY` / `SIM` 稳定边界 | 常见输入 / verify / sim 失败均输出稳定 `RFLOW-*` |
+| 第 5 周 | JoSIM 相关性门禁起步 | JoSIM | 固化 compare 脚本输入、输出和阈值；挑 1 批关键 deck 进入手动或 nightly 门禁 | 至少一组 waveform / delay 对照结果可稳定复现 |
+| 第 6 周 | deck 子集扩展 | JoSIM | 扩一小批最常见 deck 语法和 source/device 子集；每补一种语法都带对照用例 | 受限 deck 支持表显著扩大，且有回归证据 |
+| 第 7 周 | 综合优化深化 | Quaigh / Yosys | 扩 XOR/MUX/DFFE 相关 pattern；补 fixture 和 SAT 等价证据 | 新增优化均有 fixture、QoR 变化和等价证明 |
+| 第 8 周 | 验证能力扩展 | Yosys / Quaigh | 扩 `check-equivalence` 的接口/语义失败分类与回放能力；补更多 export/replay regression | verify 失败更可解释，可直接指导用户修复输入 |
+| 第 9 周 | P&R benchmark 基线 | OpenROAD / nextpnr | 建立 placement / routing smoke benchmark、容量边界和失败模式记录 | 能回答“当前规模多大能跑、何种约束会失败” |
+| 第 10 周 | timing correlation 起步 | OpenSTA | 选择一批关键 timing 场景建立外部或人工对照；补误差记录脚本 | 至少一版 timing correlation 结果可被审阅 |
+| 第 11 周 | diagnostics 支持包升级 | 商业产品 | 在当前 bundle 之上补更完整配置快照、更多命令覆盖或 profile 开关 | 诊断包从“最小复现包”向“支持包”迈进一层 |
+| 第 12 周 | Alpha 准入复盘 | 全部 | 输出 12 周收敛报告、剩余 gap、下一阶段目标和停止宣称边界 | 有一份可给外部试用用户的能力与限制说明 |
+
+### 20.3 Top 10 任务映射到周次
+
+| 高价值任务 | 主落点周次 | 说明 |
+|------------|------------|------|
+| 正式支持输入子集 | 第 1-2 周 | 先缩边界，再写契约和回归 |
+| JoSIM 数值相关性门禁 | 第 5-6 周 | 先让 compare 可复现，再扩 deck 语法 |
+| PDK validate / onboarding | 第 3 周 | 先做最小 validate，再谈多 PDK 承诺 |
+| 错误码统一 | 第 4 周并持续 | 当前仓库已经起步，应继续压低未分类错误 |
+| diagnostics 产品化 | 第 11 周并持续 | 当前已有最小 bundle，适合逐步补强 |
+| timing correlation | 第 10 周 | 先有基线，再谈 signoff 语义 |
+| verify 能力扩展 | 第 8 周 | 先增强可解释失败，再扩大证明边界 |
+| HDL / frontend 提升 | 第 1-2 周 | 先写支持子集，不追求通用 HDL 一步到位 |
+| P&R 容量与 benchmark | 第 9 周 | 建容量边界和失败模式，比横向加功能更值钱 |
+| 分发 / 安装链路 | 第 12 周后续阶段 | 可在 Alpha 准入复盘后进入下一轮 |
+
+### 20.4 仓库模块对应关系
+
+| 目标方向 | 主要模块 / 文件 |
+|----------|------------------|
+| 输入契约与前端 | `crates/io`, `crates/hdl`, `crates/cli`, `docs/support-matrix.md`, `docs/interface-inventory.md` |
+| PDK validate | `crates/tech`, `crates/cli`, `docs/pdk-onboarding.md` |
+| 错误码统一 | `crates/cli/src/main.rs`, `docs/error-codes.md`, `docs/known-limitations.md` |
+| JoSIM 对照与内部仿真 | `crates/sim`, `python/scripts/compare_internal_external_waveforms.py`, `python/tests/test_waveform_compare.py`, `docs/josim-parity.md` |
+| 综合优化与 Quaigh 对齐 | `crates/synth`, `crates/synth/tests/quaigh_alignment_fixtures.rs`, `docs/quaigh-alignment.md` |
+| 等价检查与验证 | `crates/verify`, `crates/sat`, `crates/cli`, `python/scripts/example_equivalence_*` |
+| P&R benchmark | `crates/place`, `crates/route`, `crates/flow`, benchmark / fixture 目录 |
+| timing correlation | `crates/timing`, `crates/flow`, `docs/project-design.md`, 外部对照脚本/样例 |
+| diagnostics 产品化 | `crates/cli`, `docs/diagnostics.md`, 支持模板与已知限制文档 |
+
+### 20.5 不该在这 12 周内做错的事
+
+以下事情在 12 周内看起来很“有进展”，但实际上会稀释主线：
+
+- 横向增加大量新命令，却不补输入契约和错误语义。
+- 扩更多 deck 语法，却没有 JoSIM 数值对照阈值。
+- 扩更多 P&R 选项，却没有 benchmark、容量边界和失败模式记录。
+- 扩 Python facade 表面 API，却没有统一 CLI / Python / JSON 契约。
+- 持续依赖 `minimal-sfq`，却不建立自定义 PDK validate 流程。
+
+### 20.6 12 周后应如何判断是否继续同一主线
+
+12 周结束后，若以下问题仍无法回答“是”，则不应贸然扩大支持范围：
+
+- 输入路径是否已有一条正式承诺的稳定入口？
+- JoSIM 对照是否已有至少一批可复现、可阈值化的证据？
+- PDK 接入是否已有最小 validate 和文档？
+- 常见失败是否已有稳定错误码与建议动作？
+- 诊断包是否足以支撑外部试用期排障？
+
+若上述问题大多已回答“是”，下一阶段再扩大：
+
+- 更强 HDL frontend。
+- 更广 SPICE / JoSIM 子集。
+- 多 PDK 正式支持承诺。
+- 更强 P&R / timing 相关性和 signoff 边界。

@@ -1,0 +1,5 @@
+.title include-source-pwl-jj-subckt-smoke
+.include "include_source_pwl_jj_defs.inc"
+X1 0 source_pwl_jj_stage params: rdrive=10
+.tran 1p 8p
+.end

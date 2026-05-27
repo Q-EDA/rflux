@@ -17,7 +17,7 @@
 
 | 组件 | 类型 | 风险级别 | 当前用途 | 当前结论 | 例外状态 | 负责人角色 | 证据 |
 |------|------|----------|----------|----------|----------|------------|------|
-| `josim` / `josim.exe` | 外部命令工具 | R3 | 受限外部仿真路径 | 当前仅允许裸命令 token，通过 `rflux-sim` allowlist 调用；不通过 shell 拼接，会移除 `RFLOW_*` / `JOSIM_*` 子进程环境变量，并把单次运行输入写入独立 `rflux-ext-*` 临时目录 | 开放例外：尚无 sandbox、签名校验、完整环境隔离与副作用文件生命周期约束 | 核心内核负责人 + CLI / Python / 产品化负责人 | `docs/external-command-policy.md`、`docs/third-party-exception-tpr-001.md`、`crates/sim/src/lib.rs`、对应回归测试 |
+| `josim` / `josim-cli` 及受限 wrapper 后缀 | 外部命令工具 | R3 | 受限外部仿真路径 | 当前通过 `rflux-sim` allowlist 调用，只允许最终文件名在去掉 `.exe` / `.cmd` / `.bat` / `.sh` 后匹配 JoSIM 已知名称；不通过 shell 拼接，会移除 `RFLOW_*` / `JOSIM_*` 子进程环境变量，并把单次运行输入写入独立 `rflux-ext-*` 临时目录 | 开放例外：尚无 sandbox、签名校验、完整环境隔离与副作用文件生命周期约束 | 核心内核负责人 + CLI / Python / 产品化负责人 | `docs/external-command-policy.md`、`docs/third-party-exception-tpr-001.md`、`crates/sim/src/lib.rs`、对应回归测试 |
 | Python wheel 元数据许可证导出 | Python 依赖审查机制 | R2 | Python 许可证 inventory 自动化 | 当前优先读取本地 `uv` 缓存中的 wheel `METADATA`，缓存缺失时再回退到 wheel URL，并显式统计缺失项与抓取失败项 | 开放例外：缺少 wheel、缺少许可证元数据，或元数据抓取失败的包仍需人工补审 | CLI / Python / 产品化负责人 + QA / 基准负责人 | `python/scripts/export_python_license_inventory.py`、`python/tests/test_security_compliance_utils.py` |
 
 ## 4. 开放例外台账

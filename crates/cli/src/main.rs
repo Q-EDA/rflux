@@ -19,6 +19,9 @@ use rflux_verify::{SynthError, Verifier};
 use serde_json::{json, Value};
 
 const CLI_SCHEMA_VERSION: u64 = 1;
+const PDK_CELL_LIBRARY_ARTIFACT_KIND: &str = "rflux_cell_library";
+const PDK_CELL_LIBRARY_MANIFEST_SCHEMA: &str = "rflux_cell_library_manifest";
+const PDK_CELL_LIBRARY_MANIFEST_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Parser)]
 #[command(name = "rflux", about = "rflux CLI")]
@@ -31,6 +34,7 @@ struct Cli {
 enum Commands {
     PdkMinimal(PdkMinimalArgs),
     PdkValidate(PdkValidateArgs),
+    PdkCellLibrary(PdkCellLibraryArgs),
     LintInput(LintInputArgs),
     CollectDiagnostics(CollectDiagnosticsArgs),
     RunWithDiagnostics(RunWithDiagnosticsArgs),
@@ -57,6 +61,18 @@ struct PdkValidateArgs {
     input: PathBuf,
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PdkCellLibraryArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    cell: Option<String>,
+    #[arg(long)]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -115,6 +131,8 @@ struct RunWithDiagnosticsArgs {
     check_ref: Option<String>,
     #[arg(long, value_enum)]
     equivalence_kind: Option<CliEquivalenceKind>,
+    #[arg(long, default_value_t = 2)]
+    equivalence_depth: usize,
     #[arg(long)]
     dimacs_output: Option<PathBuf>,
     #[arg(long, value_enum)]
@@ -123,6 +141,12 @@ struct RunWithDiagnosticsArgs {
     input_format: CliNetlistInputFormat,
     #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
     rhs_format: CliNetlistInputFormat,
+    #[arg(long)]
+    min_hold_jtl_length_um: Option<f64>,
+    #[arg(long)]
+    prefer_ptl_from_length_um: Option<f64>,
+    #[arg(long)]
+    detour_margin_um: Option<f64>,
 }
 
 #[derive(Debug, Args)]
@@ -149,6 +173,12 @@ struct LayoutCommandArgs {
     pdk: Option<PathBuf>,
     #[arg(long)]
     output: Option<PathBuf>,
+    #[arg(long)]
+    min_hold_jtl_length_um: Option<f64>,
+    #[arg(long)]
+    prefer_ptl_from_length_um: Option<f64>,
+    #[arg(long)]
+    detour_margin_um: Option<f64>,
 }
 
 #[derive(Debug, Args)]
@@ -205,6 +235,8 @@ struct CheckEquivalenceArgs {
     rhs_format: CliNetlistInputFormat,
     #[arg(long, value_enum, default_value_t = CliEquivalenceKind::Combinational)]
     kind: CliEquivalenceKind,
+    #[arg(long, default_value_t = 2)]
+    depth: usize,
     #[arg(long)]
     dimacs_output: Option<PathBuf>,
     #[arg(long)]
@@ -229,6 +261,8 @@ enum CliEquivalenceKind {
     Combinational,
     #[value(name = "single_step_sequential", alias = "single-step-sequential")]
     SingleStepSequential,
+    #[value(name = "bounded_sequential", alias = "bounded-sequential")]
+    BoundedSequential,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -265,6 +299,8 @@ enum DiagnosticsCommandKind {
     LintInput,
     #[value(name = "pdk-validate")]
     PdkValidate,
+    #[value(name = "pdk-cell-library")]
+    PdkCellLibrary,
     #[value(name = "solve-dimacs")]
     SolveDimacs,
     #[value(name = "simulate-file")]
@@ -415,10 +451,29 @@ fn cli_error_detail(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+fn flow_config_with_cli_closure_options(
+    min_hold_jtl_length_um: Option<f64>,
+    prefer_ptl_from_length_um: Option<f64>,
+    detour_margin_um: Option<f64>,
+) -> FlowConfig {
+    let mut config = FlowConfig::default();
+    if let Some(length_um) = min_hold_jtl_length_um {
+        config.min_hold_jtl_length_um = length_um;
+    }
+    if let Some(threshold_um) = prefer_ptl_from_length_um {
+        config.routing.prefer_ptl_from_length_um = threshold_um;
+    }
+    if let Some(margin_um) = detour_margin_um {
+        config.routing.detour_margin_um = margin_um;
+    }
+    config
+}
+
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::PdkMinimal(args) => run_pdk_minimal(args),
         Commands::PdkValidate(args) => run_pdk_validate(args),
+        Commands::PdkCellLibrary(args) => run_pdk_cell_library(args),
         Commands::LintInput(args) => run_lint_input(args),
         Commands::CollectDiagnostics(args) => run_collect_diagnostics(args),
         Commands::RunWithDiagnostics(args) => run_with_diagnostics(args),
@@ -447,6 +502,11 @@ fn run_pdk_minimal(args: PdkMinimalArgs) -> Result<()> {
 
 fn run_pdk_validate(args: PdkValidateArgs) -> Result<()> {
     let report = build_pdk_validate_report(&args.input)?;
+    emit_json(&with_schema_version(report), args.output.as_deref())
+}
+
+fn run_pdk_cell_library(args: PdkCellLibraryArgs) -> Result<()> {
+    let report = build_pdk_cell_library_report(&args.input, args.cell.as_deref(), args.kind.as_deref())?;
     emit_json(&with_schema_version(report), args.output.as_deref())
 }
 
@@ -566,6 +626,7 @@ fn run_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
         DiagnosticsCommandKind::CompileLayout => run_compile_layout_with_diagnostics(args),
         DiagnosticsCommandKind::LintInput => run_lint_input_with_diagnostics(args),
         DiagnosticsCommandKind::PdkValidate => run_pdk_validate_with_diagnostics(args),
+        DiagnosticsCommandKind::PdkCellLibrary => run_pdk_cell_library_with_diagnostics(args),
         DiagnosticsCommandKind::SolveDimacs => run_solve_dimacs_with_diagnostics(args),
         DiagnosticsCommandKind::SimulateFile => run_simulate_file_with_diagnostics(args),
         DiagnosticsCommandKind::VerifyLayout => run_verify_layout_with_diagnostics(args),
@@ -830,6 +891,75 @@ fn run_pdk_validate_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()>
     )
 }
 
+fn run_pdk_cell_library_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
+    let (inputs_dir, reports_dir, event_log_path, mut event_log) =
+        prepare_diagnostics_bundle(&args.output_dir, args.kind)?;
+    let captured_input = capture_diagnostics_input_for_bundle(
+        &mut event_log,
+        &inputs_dir,
+        "pdk",
+        &args.input,
+    )?;
+
+    event_log.push(diagnostics_event(
+        "command_started",
+        json!({
+            "kind": diagnostics_command_kind_name(args.kind),
+            "input": args.input.display().to_string(),
+        }),
+    )?);
+
+    let run_result = build_pdk_cell_library_report(&args.input, None, None).map(with_schema_version);
+
+    let (captured_reports, execution, completion_event) = match run_result {
+        Ok(report_json) => diagnostics_success_outcome(
+            &reports_dir,
+            "pdk-cell-library-report.json",
+            &report_json,
+            json!({
+                "status": "succeeded",
+                "report_kind": report_json["kind"].clone(),
+                "cell_count": report_json["summary"]["cell_count"].clone(),
+                "matched_cell_count": report_json["summary"]["matched_cell_count"].clone(),
+            }),
+        )?,
+        Err(error) => diagnostics_failure_outcome(error)?,
+    };
+    event_log.push(completion_event);
+
+    let captured_inputs = vec![captured_input];
+    let summary = build_diagnostics_summary(
+        Some(diagnostics_command_kind_name(args.kind)),
+        &captured_inputs,
+        &captured_reports,
+    );
+    let configuration = json!({
+        "command": diagnostics_command_kind_name(args.kind),
+        "notes": args.notes,
+        "paths": {
+            "input": display_path(&args.input),
+            "output_dir": display_path(&args.output_dir),
+        },
+        "pdk_cell_library": {
+            "input_kind": "pdk",
+        },
+    });
+    write_diagnostics_bundle_manifest(
+        &args.output_dir,
+        diagnostics_command_kind_name(args.kind),
+        Value::Null,
+        Value::Null,
+        args.notes.as_deref(),
+        configuration,
+        summary,
+        execution,
+        captured_inputs,
+        captured_reports,
+        &event_log_path,
+        &mut event_log,
+    )
+}
+
 fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<()> {
     let rhs = args
         .rhs
@@ -860,6 +990,7 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
             "lhs": args.input.display().to_string(),
             "rhs": rhs.display().to_string(),
             "equivalence_kind": equivalence_kind_name(equivalence_kind),
+            "equivalence_depth": args.equivalence_depth,
             "dimacs_output": args.dimacs_output.as_ref().map(|path| path.display().to_string()),
             "lhs_format": cli_netlist_input_format_name(args.input_format),
             "rhs_format": cli_netlist_input_format_name(args.rhs_format),
@@ -912,6 +1043,24 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
                 attach_dimacs_export(&mut report_json, dimacs_export);
                 Ok(with_schema_version(report_json))
             }
+            CliEquivalenceKind::BoundedSequential => {
+                let report = verifier
+                    .check_bounded_sequential_equivalence(&lhs_netlist, &rhs_netlist, args.equivalence_depth)
+                    .context("bounded sequential equivalence check failed")?;
+                let mut report_json = bounded_sequential_equivalence_report_to_json(&report);
+                let dimacs_export = args
+                    .dimacs_output
+                    .as_deref()
+                    .map(|path| {
+                        verifier
+                            .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
+                            .context("bounded sequential equivalence DIMACS export failed")
+                            .and_then(|problem| write_equivalence_dimacs_bundle(path, &problem))
+                    })
+                    .transpose()?;
+                attach_dimacs_export(&mut report_json, dimacs_export);
+                Ok(with_schema_version(report_json))
+            }
         }
     })();
 
@@ -946,6 +1095,7 @@ fn run_check_equivalence_with_diagnostics(args: RunWithDiagnosticsArgs) -> Resul
         },
         "equivalence": {
             "kind": equivalence_kind_name(equivalence_kind),
+            "depth": args.equivalence_depth,
             "lhs_format": cli_netlist_input_format_name(args.input_format),
             "rhs_format": cli_netlist_input_format_name(args.rhs_format),
         },
@@ -1224,8 +1374,9 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.pdk.as_deref(),
     )?;
 
+    let flow_config = flow_config_with_cli_closure_options(None, None, None);
     let run_result = with_loaded_flow_inputs(&args.input, args.input_format, args.pdk.clone(), |flow, netlist, pdk| {
-        flow.analyze_timing(netlist, pdk, &FlowConfig::default())
+        flow.analyze_timing(netlist, pdk, &flow_config)
             .context("analyze-timing failed")
     });
 
@@ -1245,6 +1396,7 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
                     "report_kind": "timing_analysis",
                     "analyzed_arcs": report.analyzed_arcs,
                     "critical_path_delay_ps": report.critical_path_delay_ps,
+                    "timing_closure_status": report.closure.status,
                 }),
             )
         }
@@ -1304,8 +1456,13 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.pdk.as_deref(),
     )?;
 
+    let flow_config = flow_config_with_cli_closure_options(
+        args.min_hold_jtl_length_um,
+        args.prefer_ptl_from_length_um,
+        args.detour_margin_um,
+    );
     let run_result = with_loaded_flow_inputs(&args.input, args.input_format, args.pdk.clone(), |flow, netlist, pdk| {
-        flow.compile_layout(netlist, pdk, &FlowConfig::default())
+        flow.compile_layout(netlist, pdk, &flow_config)
             .context("compile-layout failed")
     });
 
@@ -1325,6 +1482,7 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
                     "report_kind": "compile_layout",
                     "placed_nodes": report.placement.placed_nodes,
                     "routed_nets": report.routing.routed_nets,
+                    "timing_closure_status": report.timing_closure.status,
                 }),
             )
         }
@@ -1345,7 +1503,12 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         &args.output_dir,
         json!({
             "flow": {
-                "uses_default_flow_config": true,
+                "uses_default_flow_config": args.min_hold_jtl_length_um.is_none()
+                    && args.prefer_ptl_from_length_um.is_none()
+                    && args.detour_margin_um.is_none(),
+                "min_hold_jtl_length_um": args.min_hold_jtl_length_um,
+                "prefer_ptl_from_length_um": args.prefer_ptl_from_length_um,
+                "detour_margin_um": args.detour_margin_um,
             },
             "input_format": cli_netlist_input_format_name(args.input_format),
         }),
@@ -1836,6 +1999,7 @@ fn diagnostics_command_kind_name(kind: DiagnosticsCommandKind) -> &'static str {
         DiagnosticsCommandKind::CompileLayout => "compile-layout",
         DiagnosticsCommandKind::LintInput => "lint-input",
         DiagnosticsCommandKind::PdkValidate => "pdk-validate",
+        DiagnosticsCommandKind::PdkCellLibrary => "pdk-cell-library",
         DiagnosticsCommandKind::SolveDimacs => "solve-dimacs",
         DiagnosticsCommandKind::SimulateFile => "simulate-file",
         DiagnosticsCommandKind::VerifyLayout => "verify-layout",
@@ -1846,6 +2010,7 @@ fn equivalence_kind_name(kind: CliEquivalenceKind) -> &'static str {
     match kind {
         CliEquivalenceKind::Combinational => "combinational",
         CliEquivalenceKind::SingleStepSequential => "single_step_sequential",
+        CliEquivalenceKind::BoundedSequential => "bounded_sequential",
     }
 }
 
@@ -2067,6 +2232,7 @@ fn diagnostics_report_snapshot(source: &Path) -> Value {
                 "violation_details",
                 "violation_detail_count",
             ),
+            "timing_closure_status": diagnostics_report_timing_closure_status(&json),
             "inspection_error": Value::Null,
         }),
         Err(error) => json!({
@@ -2075,6 +2241,18 @@ fn diagnostics_report_snapshot(source: &Path) -> Value {
             "inspection_error": error.to_string(),
         }),
     }
+}
+
+fn diagnostics_report_timing_closure_status(json: &Value) -> Value {
+    json.get("closure")
+        .and_then(|closure| closure.get("status"))
+        .or_else(|| {
+            json.get("timing")
+                .and_then(|timing| timing.get("closure"))
+                .and_then(|closure| closure.get("status"))
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn simulation_mode_name(mode: CliSimulationMode) -> &'static str {
@@ -2186,13 +2364,18 @@ fn run_compile_netlist(args: CompileNetlistArgs) -> Result<()> {
 }
 
 fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
+    let flow_config = flow_config_with_cli_closure_options(
+        args.min_hold_jtl_length_um,
+        args.prefer_ptl_from_length_um,
+        args.detour_margin_um,
+    );
     run_flow_json_command(
         &args.input,
         args.input_format,
         args.pdk,
         args.output.as_deref(),
         |flow, netlist, pdk| {
-            flow.compile_layout(netlist, pdk, &FlowConfig::default())
+            flow.compile_layout(netlist, pdk, &flow_config)
                 .context("compile-layout failed")
         },
         layout_report_to_json,
@@ -2319,6 +2502,21 @@ fn run_check_equivalence(args: CheckEquivalenceArgs) -> Result<()> {
                     verifier
                         .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
                         .context("single-step sequential equivalence DIMACS export failed")
+                },
+            )
+        }
+        CliEquivalenceKind::BoundedSequential => {
+            let report = verifier
+                .check_bounded_sequential_equivalence(&lhs_netlist, &rhs_netlist, args.depth)
+                .context("bounded sequential equivalence check failed")?;
+            emit_equivalence_report(
+                bounded_sequential_equivalence_report_to_json(&report),
+                args.dimacs_output.as_deref(),
+                args.output.as_deref(),
+                || {
+                    verifier
+                        .build_single_step_sequential_equivalence_problem(&lhs_netlist, &rhs_netlist)
+                        .context("bounded sequential equivalence DIMACS export failed")
                 },
             )
         }
@@ -2534,9 +2732,12 @@ fn layout_report_to_json(report: &rflux_flow::LayoutReport) -> Value {
             "analyzed_arcs": report.timing.analyzed_arcs,
             "false_path_arcs": report.timing.false_path_arcs,
             "setup_violations": report.timing.setup_violations,
+            "capture_window_violations": report.timing.capture_window_violations,
             "initial_hold_violations": report.timing.initial_hold_violations,
             "final_hold_violations": report.timing.final_hold_violations,
             "hold_fix_applied": report.timing.hold_fix_applied,
+            "closure": timing_closure_to_json(&report.timing_closure),
+            "closure_loop": timing_closure_loop_to_json(&report.timing_closure_loop),
         },
         "initial_total_detour_overhead_um": report.initial_total_detour_overhead_um,
         "detour_feedback_applied": report.detour_feedback_applied,
@@ -2552,8 +2753,10 @@ fn timing_analysis_to_json(report: &rflux_flow::TimingAnalysisReport) -> Value {
         "false_path_arcs": report.false_path_arcs,
         "setup_violations": report.setup_violations,
         "hold_violations": report.hold_violations,
+        "capture_window_violations": report.capture_window_violations,
         "detour_feedback_applied": report.detour_feedback_applied,
         "hold_fix_applied": report.hold_fix_applied,
+        "closure": timing_closure_to_json(&report.closure),
         "timing_arcs": report.timing_arcs.iter().map(|arc| json!({
             "from": pin_ref_to_json(arc.from),
             "to": pin_ref_to_json(arc.to),
@@ -2562,12 +2765,126 @@ fn timing_analysis_to_json(report: &rflux_flow::TimingAnalysisReport) -> Value {
             "route_length_um": arc.route_length_um,
             "from_domain": arc.from_domain,
             "to_domain": arc.to_domain,
+            "launch_phase": arc.launch_phase,
+            "capture_phase": arc.capture_phase,
+            "launch_window_start_ps": arc.launch_window_start_ps,
+            "launch_window_end_ps": arc.launch_window_end_ps,
+            "capture_window_start_ps": arc.capture_window_start_ps,
+            "capture_window_end_ps": arc.capture_window_end_ps,
+            "arrival_phase_offset_ps": arc.arrival_phase_offset_ps,
+            "capture_window_slack_ps": arc.capture_window_slack_ps,
+            "capture_window_violation": arc.capture_window_violation,
             "arrival_ps": arc.arrival_ps,
             "required_ps": arc.required_ps,
             "setup_slack_ps": arc.setup_slack_ps,
             "hold_slack_ps": arc.hold_slack_ps,
         })).collect::<Vec<_>>()
     })
+}
+
+fn timing_closure_to_json(closure: &rflux_flow::TimingClosureSummary) -> Value {
+    json!({
+        "closed": closure.closed,
+        "status": closure.status,
+        "setup_closed": closure.setup_closed,
+        "hold_closed": closure.hold_closed,
+        "capture_window_closed": closure.capture_window_closed,
+        "setup_violations": closure.setup_violations,
+        "hold_violations": closure.hold_violations,
+        "capture_window_violations": closure.capture_window_violations,
+        "failing_checks": closure.failing_checks,
+        "action_count": closure.action_count,
+        "primary_action": closure.primary_action.map(|action| timing_closure_action_to_json(&action)).unwrap_or(Value::Null),
+        "action_summary": {
+            "reduce_route_delay": closure.reduce_route_delay_actions,
+            "relax_constraint_or_improve_library_timing": closure.relax_constraint_or_improve_library_timing_actions,
+            "add_hold_padding": closure.add_hold_padding_actions,
+            "adjust_sfq_phase_or_pulse_window": closure.adjust_sfq_phase_or_pulse_window_actions,
+        },
+        "actions": closure.actions.iter().map(timing_closure_action_to_json).collect::<Vec<_>>(),
+        "next_step": closure.next_step,
+    })
+}
+
+fn timing_closure_loop_to_json(loop_report: &rflux_flow::TimingClosureLoopReport) -> Value {
+    json!({
+        "detour_feedback_attempted": loop_report.detour_feedback_attempted,
+        "detour_feedback_applied": loop_report.detour_feedback_applied,
+        "initial_total_detour_overhead_um": loop_report.initial_total_detour_overhead_um,
+        "final_total_detour_overhead_um": loop_report.final_total_detour_overhead_um,
+        "reduce_route_delay_candidate_available": loop_report.reduce_route_delay_candidate_available,
+        "recommended_prefer_ptl_from_length_um": loop_report.recommended_prefer_ptl_from_length_um,
+        "recommended_detour_margin_um": loop_report.recommended_detour_margin_um,
+        "recommended_route_mode": loop_report.recommended_route_mode.map(|mode| json!(format!("{:?}", mode))).unwrap_or(Value::Null),
+        "estimated_route_length_um": loop_report.estimated_route_length_um,
+        "estimated_slack_deficit_ps": loop_report.estimated_slack_deficit_ps,
+        "reduce_route_delay_candidate_attempted": loop_report.reduce_route_delay_candidate_attempted,
+        "reduce_route_delay_candidate_improved": loop_report.reduce_route_delay_candidate_improved,
+        "candidate_worst_setup_slack_ps": loop_report.candidate_worst_setup_slack_ps,
+        "candidate_setup_violations": loop_report.candidate_setup_violations,
+        "candidate_hold_violations": loop_report.candidate_hold_violations,
+        "candidate_route_mode": loop_report.candidate_route_mode.map(|mode| json!(format!("{:?}", mode))).unwrap_or(Value::Null),
+        "candidate_route_length_um": loop_report.candidate_route_length_um,
+        "hold_fix_attempted": loop_report.hold_fix_attempted,
+        "hold_fix_applied": loop_report.hold_fix_applied,
+        "initial_hold_violations": loop_report.initial_hold_violations,
+        "final_hold_violations": loop_report.final_hold_violations,
+        "status": loop_report.status,
+        "next_step": loop_report.next_step,
+    })
+}
+
+fn timing_closure_action_to_json(action: &rflux_flow::TimingClosureAction) -> Value {
+    json!({
+        "check": timing_closure_check_name(action.check),
+        "priority": action.priority,
+        "remediation_kind": timing_closure_remediation_kind_name(action.remediation_kind),
+        "from": pin_ref_to_json(action.from),
+        "to": pin_ref_to_json(action.to),
+        "slack_ps": action.slack_ps,
+        "route_mode": format!("{:?}", action.route_mode),
+        "route_length_um": action.route_length_um,
+        "from_domain": action.from_domain,
+        "to_domain": action.to_domain,
+        "next_step": timing_closure_action_next_step(action.check),
+    })
+}
+
+fn timing_closure_remediation_kind_name(
+    kind: rflux_flow::TimingClosureRemediationKind,
+) -> &'static str {
+    match kind {
+        rflux_flow::TimingClosureRemediationKind::ReduceRouteDelay => "reduce_route_delay",
+        rflux_flow::TimingClosureRemediationKind::RelaxConstraintOrImproveLibraryTiming => {
+            "relax_constraint_or_improve_library_timing"
+        }
+        rflux_flow::TimingClosureRemediationKind::AddHoldPadding => "add_hold_padding",
+        rflux_flow::TimingClosureRemediationKind::AdjustSfqPhaseOrPulseWindow => {
+            "adjust_sfq_phase_or_pulse_window"
+        }
+    }
+}
+
+fn timing_closure_check_name(check: rflux_flow::TimingClosureCheck) -> &'static str {
+    match check {
+        rflux_flow::TimingClosureCheck::Setup => "setup",
+        rflux_flow::TimingClosureCheck::Hold => "hold",
+        rflux_flow::TimingClosureCheck::CaptureWindow => "capture_window",
+    }
+}
+
+fn timing_closure_action_next_step(check: rflux_flow::TimingClosureCheck) -> &'static str {
+    match check {
+        rflux_flow::TimingClosureCheck::Setup => {
+            "Reduce arrival delay or relax required time for this arc; inspect placement distance and route mode first."
+        }
+        rflux_flow::TimingClosureCheck::Hold => {
+            "Increase minimum path delay or hold margin for this arc; inspect short JTL routes and hold-fix reroute settings first."
+        }
+        rflux_flow::TimingClosureCheck::CaptureWindow => {
+            "Adjust SFQ phase assignment or pulse capture window for this arc; inspect domain phase offsets before rerouting."
+        }
+    }
 }
 
 fn verification_report_to_json(report: &rflux_flow::VerificationReport) -> Value {
@@ -2873,6 +3190,27 @@ fn single_step_sequential_equivalence_report_to_json(
         "counterexample_present_states": report.counterexample_present_states,
         "counterexample_outputs": report.counterexample_outputs.as_ref().map(output_mismatch_map_to_json),
         "counterexample_states": report.counterexample_states.as_ref().map(state_mismatch_map_to_json),
+        "sat_stats": solve_stats_to_json(&report.sat_stats),
+        "sat_elapsed_ns": report.sat_elapsed_ns,
+    })
+}
+
+fn bounded_sequential_equivalence_report_to_json(
+    report: &rflux_verify::BoundedSequentialEquivalenceReport,
+) -> Value {
+    json!({
+        "kind": "bounded_sequential",
+        "equivalent": report.equivalent,
+        "depth": report.depth,
+        "checked_steps": report.checked_steps,
+        "unroll_mode": report.unroll_mode,
+        "checked_outputs": report.checked_outputs,
+        "checked_states": report.checked_states,
+        "first_failing_step": report.first_failing_step,
+        "steps": report.steps.iter().map(|step| json!({
+            "step": step.step,
+            "report": single_step_sequential_equivalence_report_to_json(&step.report),
+        })).collect::<Vec<_>>(),
         "sat_stats": solve_stats_to_json(&report.sat_stats),
         "sat_elapsed_ns": report.sat_elapsed_ns,
     })
@@ -3266,6 +3604,7 @@ mod tests {
             rhs: rhs_path.clone(),
             rhs_format: CliNetlistInputFormat::Auto,
             kind: CliEquivalenceKind::Combinational,
+            depth: 2,
             dimacs_output: Some(dimacs_path.clone()),
             output: Some(report_path.clone()),
         })
@@ -3321,6 +3660,7 @@ mod tests {
             rhs: rhs_path,
             rhs_format: CliNetlistInputFormat::Auto,
             kind: CliEquivalenceKind::Combinational,
+            depth: 2,
             dimacs_output: None,
             output: Some(report_path.clone()),
         })
@@ -3357,6 +3697,7 @@ mod tests {
             rhs: rhs_path,
             rhs_format: CliNetlistInputFormat::Bench,
             kind: CliEquivalenceKind::Combinational,
+            depth: 2,
             dimacs_output: None,
             output: Some(report_path.clone()),
         })
@@ -3392,6 +3733,7 @@ mod tests {
             rhs: rhs_path,
             rhs_format: CliNetlistInputFormat::Auto,
             kind: CliEquivalenceKind::Combinational,
+            depth: 2,
             dimacs_output: None,
             output: Some(report_path.clone()),
         })
@@ -3423,6 +3765,7 @@ mod tests {
                 rhs: fixture_path,
                 rhs_format: CliNetlistInputFormat::Auto,
                 kind: CliEquivalenceKind::Combinational,
+                depth: 2,
                 dimacs_output: None,
                 output: Some(report_path.clone()),
             })
@@ -3455,6 +3798,7 @@ mod tests {
                 rhs: fixture_path,
                 rhs_format: CliNetlistInputFormat::Auto,
                 kind: CliEquivalenceKind::SingleStepSequential,
+                depth: 2,
                 dimacs_output: None,
                 output: Some(report_path.clone()),
             })
@@ -3492,6 +3836,7 @@ mod tests {
             rhs: rhs_path,
             rhs_format: CliNetlistInputFormat::Auto,
             kind: CliEquivalenceKind::SingleStepSequential,
+            depth: 2,
             dimacs_output: None,
             output: Some(report_path.clone()),
         })
@@ -3504,6 +3849,48 @@ mod tests {
         assert_eq!(report["equivalent"], false);
         assert!(report["counterexample_inputs"].is_object());
         assert!(report["counterexample_states"].is_object());
+    }
+
+    #[test]
+    fn run_check_equivalence_reports_bounded_sequential_bench_inputs() {
+        let dir = unique_test_dir("equivalence-bounded-sequential-bench");
+        let lhs_path = dir.join("lhs.bench");
+        let rhs_path = dir.join("rhs.bench");
+        let report_path = dir.join("report.json");
+
+        fs::write(
+            &lhs_path,
+            "INPUT(d)\nINPUT(en)\nINPUT(clk)\nq = DFF(d, clk)\nOUTPUT(q)\n",
+        )
+        .expect("lhs bench should write");
+        fs::write(
+            &rhs_path,
+            "INPUT(d)\nINPUT(en)\nINPUT(clk)\nq = DFFE(d, en, clk)\nOUTPUT(q)\n",
+        )
+        .expect("rhs bench should write");
+
+        run_check_equivalence(CheckEquivalenceArgs {
+            lhs: lhs_path,
+            lhs_format: CliNetlistInputFormat::Auto,
+            rhs: rhs_path,
+            rhs_format: CliNetlistInputFormat::Auto,
+            kind: CliEquivalenceKind::BoundedSequential,
+            depth: 3,
+            dimacs_output: None,
+            output: Some(report_path.clone()),
+        })
+        .expect("bounded sequential bench check should run");
+
+        let report: Value = serde_json::from_str(&fs::read_to_string(&report_path).expect("report should exist"))
+            .expect("report should be valid json");
+        assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
+        assert_eq!(report["kind"], "bounded_sequential");
+        assert_eq!(report["depth"], 3);
+        assert_eq!(report["checked_steps"], 1);
+        assert_eq!(report["unroll_mode"], "state_unrolled");
+        assert_eq!(report["equivalent"], false);
+        assert_eq!(report["first_failing_step"], 0);
+        assert_eq!(report["steps"].as_array().expect("steps should be an array").len(), 1);
     }
 
     #[test]
@@ -3537,10 +3924,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: Some(CliEquivalenceKind::Combinational),
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics check-equivalence with bench should succeed");
 
@@ -3583,10 +3974,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: Some(CliEquivalenceKind::SingleStepSequential),
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics sequential bench mismatch should succeed");
 
@@ -3706,6 +4101,49 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "rflux",
+            "pdk-cell-library",
+            "--input",
+            "example.pdk.json",
+            "--kind",
+            "macro",
+        ])
+        .expect("pdk-cell-library args should parse");
+
+        match cli.command {
+            Commands::PdkCellLibrary(args) => {
+                assert_eq!(args.input, PathBuf::from("example.pdk.json"));
+                assert_eq!(args.kind.as_deref(), Some("macro"));
+                assert!(args.cell.is_none());
+            }
+            other => panic!("expected pdk-cell-library command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rflux",
+            "compile-layout",
+            "--input",
+            "example.ir.json",
+            "--min-hold-jtl-length-um",
+            "60",
+            "--prefer-ptl-from-length-um",
+            "65",
+            "--detour-margin-um",
+            "6",
+        ])
+        .expect("compile-layout closure options should parse");
+
+        match cli.command {
+            Commands::CompileLayout(args) => {
+                assert_eq!(args.input, PathBuf::from("example.ir.json"));
+                assert_eq!(args.min_hold_jtl_length_um, Some(60.0));
+                assert_eq!(args.prefer_ptl_from_length_um, Some(65.0));
+                assert_eq!(args.detour_margin_um, Some(6.0));
+            }
+            other => panic!("expected compile-layout command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rflux",
             "collect-diagnostics",
             "--output-dir",
             "bundle",
@@ -3785,6 +4223,26 @@ mod tests {
         match cli.command {
             Commands::RunWithDiagnostics(args) => {
                 assert_eq!(args.kind, DiagnosticsCommandKind::PdkValidate);
+                assert_eq!(args.input, PathBuf::from("example.pdk.json"));
+            }
+            other => panic!("expected run-with-diagnostics command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rflux",
+            "run-with-diagnostics",
+            "--output-dir",
+            "bundle",
+            "--kind",
+            "pdk-cell-library",
+            "--input",
+            "example.pdk.json",
+        ])
+        .expect("run-with-diagnostics pdk-cell-library args should parse");
+
+        match cli.command {
+            Commands::RunWithDiagnostics(args) => {
+                assert_eq!(args.kind, DiagnosticsCommandKind::PdkCellLibrary);
                 assert_eq!(args.input, PathBuf::from("example.pdk.json"));
             }
             other => panic!("expected run-with-diagnostics command, got {other:?}"),
@@ -3899,6 +4357,8 @@ mod tests {
             "example.ir.json",
             "--pdk",
             "example.pdk.json",
+            "--min-hold-jtl-length-um",
+            "60",
         ])
         .expect("run-with-diagnostics compile-layout args should parse");
 
@@ -3907,6 +4367,7 @@ mod tests {
                 assert_eq!(args.kind, DiagnosticsCommandKind::CompileLayout);
                 assert_eq!(args.input, PathBuf::from("example.ir.json"));
                 assert_eq!(args.pdk, Some(PathBuf::from("example.pdk.json")));
+                assert_eq!(args.min_hold_jtl_length_um, Some(60.0));
             }
             other => panic!("expected run-with-diagnostics command, got {other:?}"),
         }
@@ -3983,10 +4444,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should succeed");
 
@@ -4134,10 +4599,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on failure");
 
@@ -4186,10 +4655,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics verify-layout should succeed");
 
@@ -4253,10 +4726,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics compile-layout should succeed");
 
@@ -4276,6 +4753,25 @@ mod tests {
         assert_eq!(manifest["summary"]["report_kinds"], json!(["compile_layout"]));
         assert_eq!(manifest["structured_logs"]["event_count"], 6);
         assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "compile_layout");
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["timing_closure_status"],
+            "closed"
+        );
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("reports").join("compile-layout-report.json"))
+                .expect("compile layout report should exist"),
+        )
+        .expect("compile layout report should be json");
+        assert_eq!(
+            report["timing"]["closure"]["status"],
+            "closed"
+        );
+        assert_eq!(report["timing"]["closure"]["closed"], true);
+        assert_eq!(report["timing"]["closure"]["action_count"], 0);
+        assert!(report["timing"]["closure"]["primary_action"].is_null());
+        assert_eq!(report["timing"]["closure_loop"]["status"], "closed");
+        assert_eq!(report["timing"]["closure_loop"]["hold_fix_applied"], false);
+        assert_eq!(report["timing"]["closure_loop"]["final_hold_violations"], 0);
         assert!(output_dir.join("reports").join("compile-layout-report.json").exists());
 
         let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
@@ -4315,10 +4811,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics analyze-timing should succeed");
 
@@ -4338,6 +4838,28 @@ mod tests {
         assert_eq!(manifest["summary"]["report_kinds"], json!(["timing_analysis"]));
         assert_eq!(manifest["structured_logs"]["event_count"], 6);
         assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "timing_analysis");
+        assert_eq!(
+            manifest["captured_reports"][0]["report"]["timing_closure_status"],
+            "closed"
+        );
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("reports").join("analyze-timing-report.json"))
+                .expect("analyze timing report should exist"),
+        )
+        .expect("analyze timing report should be json");
+        assert_eq!(
+            report["closure"]["status"],
+            "closed"
+        );
+        assert_eq!(report["closure"]["closed"], true);
+        assert_eq!(report["closure"]["action_count"], 0);
+        assert!(report["closure"]["primary_action"].is_null());
+        assert_eq!(report["closure"]["action_summary"]["reduce_route_delay"], 0);
+        assert_eq!(
+            report["closure"]["action_summary"]["relax_constraint_or_improve_library_timing"],
+            0
+        );
+        assert_eq!(report["closure"]["action_summary"]["add_hold_padding"], 0);
         assert!(output_dir.join("reports").join("analyze-timing-report.json").exists());
 
         let started_event: Value = serde_json::from_str(event_lines[3]).expect("started event should be json");
@@ -4377,10 +4899,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics compile-netlist should succeed");
 
@@ -4437,10 +4963,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics compile-netlist from bench should succeed");
 
@@ -4481,10 +5011,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Bench,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics compile-netlist from explicit bench format should succeed");
 
@@ -4527,10 +5061,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics compile-netlist from NAND/NOR bench should succeed");
 
@@ -4575,10 +5113,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics compile-netlist from DFFE bench should succeed");
 
@@ -4622,10 +5164,14 @@ mod tests {
                 equivalence_metadata: None,
                 check_ref: None,
                 equivalence_kind: None,
+                equivalence_depth: 2,
                 dimacs_output: None,
                 input_kind: None,
-            input_format: CliNetlistInputFormat::Auto,
-            rhs_format: CliNetlistInputFormat::Auto,
+                input_format: CliNetlistInputFormat::Auto,
+                rhs_format: CliNetlistInputFormat::Auto,
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
             })
             .expect("run-with-diagnostics compile-netlist from checked-in bench fixture should succeed");
 
@@ -4673,10 +5219,14 @@ mod tests {
                 equivalence_metadata: None,
                 check_ref: None,
                 equivalence_kind: None,
+                equivalence_depth: 2,
                 dimacs_output: None,
                 input_kind: None,
-            input_format: CliNetlistInputFormat::Auto,
-            rhs_format: CliNetlistInputFormat::Auto,
+                input_format: CliNetlistInputFormat::Auto,
+                rhs_format: CliNetlistInputFormat::Auto,
+                min_hold_jtl_length_um: None,
+                prefer_ptl_from_length_um: None,
+                detour_margin_um: None,
             })
             .expect("run-with-diagnostics compile-netlist from checked-in sequential bench fixture should succeed");
 
@@ -4716,10 +5266,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics solve-dimacs should succeed");
 
@@ -4788,10 +5342,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: Some(CliEquivalenceKind::Combinational),
+            equivalence_depth: 2,
             dimacs_output: Some(dimacs_path.clone()),
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics check-equivalence should succeed");
 
@@ -4865,10 +5423,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: Some(CliEquivalenceKind::Combinational),
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on verify failure");
 
@@ -4920,10 +5482,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: Some(CliEquivalenceKind::Combinational),
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on verify interface failure");
 
@@ -4962,10 +5528,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics lint-input should succeed");
 
@@ -5016,10 +5586,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: Some(CliInputKind::Bench),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics bench lint-input should succeed");
 
@@ -5063,10 +5637,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics pdk-validate should succeed");
 
@@ -5088,11 +5666,82 @@ mod tests {
         assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_pdk");
         assert_eq!(manifest["captured_inputs"][0]["contract"]["schema_format"], "versioned_envelope");
         assert!(output_dir.join("reports").join("pdk-validate-report.json").exists());
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("reports").join("pdk-validate-report.json"))
+                .expect("pdk validate report should exist"),
+        )
+        .expect("pdk validate report should be valid json");
+        assert_eq!(report["checks"]["cell_library_index"]["ok"], true);
+        assert_eq!(report["checks"]["cell_library_index"]["missing_timing_count"], 0);
+        assert_eq!(report["summary"]["cell_library_kind_count"], 7);
 
         let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
         let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
         assert_eq!(started_event["event"], "command_started");
         assert_eq!(completed_event["event"], "command_completed");
+    }
+
+    #[test]
+    fn run_with_diagnostics_executes_pdk_cell_library_and_writes_bundle() {
+        let dir = unique_test_dir("run-with-diagnostics-pdk-cell-library");
+        let input_path = dir.join("input.pdk.json");
+        let output_dir = dir.join("bundle");
+        let pdk = Pdk::minimal("diag-library");
+        write_pdk_json(&input_path, &pdk).expect("pdk json should write");
+
+        run_with_diagnostics(RunWithDiagnosticsArgs {
+            output_dir: output_dir.clone(),
+            kind: DiagnosticsCommandKind::PdkCellLibrary,
+            input: input_path.clone(),
+            pdk: None,
+            rhs: None,
+            mode: CliSimulationMode::Auto,
+            external_command: None,
+            notes: Some("cell library and bundle".to_string()),
+            assumptions: None,
+            equivalence_metadata: None,
+            check_ref: None,
+            equivalence_kind: None,
+            equivalence_depth: 2,
+            dimacs_output: None,
+            input_kind: None,
+            input_format: CliNetlistInputFormat::Auto,
+            rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
+        })
+        .expect("run-with-diagnostics pdk-cell-library should succeed");
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
+        )
+        .expect("manifest should be valid json");
+        let event_log = fs::read_to_string(output_dir.join("events.jsonl"))
+            .expect("event log should exist");
+        let event_lines: Vec<&str> = event_log.lines().collect();
+
+        assert_eq!(manifest["invocation"]["command"], "pdk-cell-library");
+        assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["summary"]["captured_input_count"], 1);
+        assert_eq!(manifest["summary"]["captured_report_count"], 1);
+        assert_eq!(manifest["summary"]["report_kinds"], json!(["pdk_cell_library"]));
+        assert_eq!(manifest["captured_reports"][0]["report"]["kind"], "pdk_cell_library");
+        assert_eq!(manifest["captured_reports"][0]["report"]["schema_version"], 1);
+        assert_eq!(manifest["captured_inputs"][0]["contract"]["contract_kind"], "rflux_pdk");
+        assert!(output_dir.join("reports").join("pdk-cell-library-report.json").exists());
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("reports").join("pdk-cell-library-report.json"))
+                .expect("pdk cell library report should exist"),
+        )
+        .expect("pdk cell library report should be valid json");
+        assert_eq!(report["summary"]["cell_count"], 7);
+
+        let started_event: Value = serde_json::from_str(event_lines[2]).expect("started event should be json");
+        let completed_event: Value = serde_json::from_str(event_lines[3]).expect("completed event should be json");
+        assert_eq!(started_event["event"], "command_started");
+        assert_eq!(completed_event["event"], "command_completed");
+        assert_eq!(completed_event["fields"]["matched_cell_count"], 7);
     }
 
     #[test]
@@ -5123,10 +5772,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: None,
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on pdk-validate failure");
 
@@ -5183,10 +5836,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: Some(CliInputKind::Pdk),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on lint-input failure");
 
@@ -5241,10 +5898,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on lint-input kind mismatch");
 
@@ -5303,10 +5964,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on unsupported schema");
 
@@ -5355,10 +6020,14 @@ mod tests {
             equivalence_metadata: None,
             check_ref: None,
             equivalence_kind: None,
+            equivalence_depth: 2,
             dimacs_output: None,
             input_kind: Some(CliInputKind::Ir),
             input_format: CliNetlistInputFormat::Auto,
             rhs_format: CliNetlistInputFormat::Auto,
+            min_hold_jtl_length_um: None,
+            prefer_ptl_from_length_um: None,
+            detour_margin_um: None,
         })
         .expect("run-with-diagnostics should still write bundle on malformed json");
 
@@ -5905,9 +6574,64 @@ mod tests {
         assert_eq!(report["summary"]["cell_count"], 7);
         assert_eq!(report["summary"]["cell_timing_count"], 7);
         assert_eq!(report["summary"]["interconnect_timing_count"], 2);
+        assert_eq!(report["summary"]["cell_library_name"], "minimal-sfq");
+        assert_eq!(report["summary"]["cell_library_version"], "0.1.0");
+        assert_eq!(report["summary"]["cell_library_source"], "rflux-minimal");
+        assert_eq!(report["summary"]["cell_library_kind_count"], 7);
+        assert_eq!(report["summary"]["cell_library_kind_counts"]["generic_gate"], 1);
+        assert_eq!(report["summary"]["cell_library_kind_counts"]["macro"], 1);
+        assert_eq!(report["summary"]["cell_library_named_timing_count"], 0);
+        assert_eq!(report["summary"]["cell_library_kind_timing_count"], 7);
+        assert_eq!(report["summary"]["cell_library_missing_timing_count"], 0);
+        assert_eq!(report["summary"]["cell_library_characterized_cell_count"], 0);
+        assert_eq!(report["summary"]["cell_library_named_timing_cells"], json!([]));
+        assert_eq!(report["summary"]["cell_library_missing_timing_cells"], json!([]));
+        assert_eq!(report["summary"]["cell_library_characterized_cells"], json!([]));
         assert_eq!(report["checks"]["required_cell_kinds"]["ok"], true);
         assert_eq!(report["checks"]["required_cell_timing"]["ok"], true);
         assert_eq!(report["checks"]["required_interconnect_timing"]["ok"], true);
+        assert_eq!(report["checks"]["cell_library_metadata"]["ok"], true);
+        assert_eq!(report["checks"]["cell_library_metadata"]["level"], "present");
+        assert_eq!(report["checks"]["cell_library_metadata"]["name"], "minimal-sfq");
+        assert_eq!(report["checks"]["cell_library_metadata"]["version"], "0.1.0");
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["artifact_kind"],
+            PDK_CELL_LIBRARY_ARTIFACT_KIND
+        );
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["manifest_schema"]["name"],
+            PDK_CELL_LIBRARY_MANIFEST_SCHEMA
+        );
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["manifest_schema"]["version"],
+            PDK_CELL_LIBRARY_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(
+            report["checks"]["cell_library_metadata"]["source"],
+            "rflux-minimal"
+        );
+        assert_eq!(report["checks"]["cell_library_index"]["ok"], true);
+        assert_eq!(
+            report["checks"]["cell_library_index"]["cell_library_version"],
+            "0.1.0"
+        );
+        assert_eq!(
+            report["checks"]["cell_library_index"]["cell_library_source"],
+            "rflux-minimal"
+        );
+        assert_eq!(report["checks"]["cell_library_index"]["cell_count"], 7);
+        assert_eq!(report["checks"]["cell_library_index"]["kind_counts"]["macro"], 1);
+        assert_eq!(report["checks"]["cell_library_index"]["available_kinds"][0], "generic_gate");
+        assert_eq!(report["checks"]["cell_library_index"]["kind_timing_count"], 7);
+        assert_eq!(report["checks"]["cell_library_index"]["missing_timing_cells"], json!([]));
+        assert_eq!(
+            report["checks"]["cell_library_index"]["remediation"]["timing"]["status"],
+            "complete"
+        );
+        assert_eq!(
+            report["checks"]["cell_library_index"]["remediation"]["characterization"]["status"],
+            "advisory"
+        );
         assert_eq!(report["checks"]["characterized_arcs"]["level"], "advisory");
         assert!(report["errors"]
             .as_array()
@@ -5917,6 +6641,154 @@ mod tests {
             .as_array()
             .expect("warnings should be array")
             .is_empty());
+    }
+
+    #[test]
+    fn run_pdk_cell_library_reports_queryable_entries() {
+        let dir = unique_test_dir("pdk-cell-library");
+        let input_path = dir.join("input.pdk.json");
+        let output_path = dir.join("pdk-cell-library-report.json");
+        let pdk = Pdk::minimal("library-report");
+        write_pdk_json(&input_path, &pdk).expect("pdk json should write");
+
+        run_pdk_cell_library(PdkCellLibraryArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+            cell: None,
+            kind: Some("Macro".to_string()),
+        })
+        .expect("pdk-cell-library should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("pdk cell library report should exist"),
+        )
+        .expect("pdk cell library report should be valid json");
+
+        assert_eq!(report["schema_version"], CLI_SCHEMA_VERSION);
+        assert_eq!(report["kind"], "pdk_cell_library");
+        assert_eq!(report["pdk_name"], "library-report");
+        assert_eq!(report["cell_library_name"], "minimal-sfq");
+        assert_eq!(report["cell_library_version"], "0.1.0");
+        assert_eq!(report["cell_library_source"], "rflux-minimal");
+        assert_eq!(report["library"]["artifact_kind"], PDK_CELL_LIBRARY_ARTIFACT_KIND);
+        assert_eq!(report["library"]["name"], "minimal-sfq");
+        assert_eq!(report["library"]["version"], "0.1.0");
+        assert_eq!(report["library"]["source"], "rflux-minimal");
+        assert_eq!(report["library"]["schema"]["name"], PDK_CELL_LIBRARY_MANIFEST_SCHEMA);
+        assert_eq!(
+            report["library"]["schema"]["version"],
+            PDK_CELL_LIBRARY_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(report["library"]["capabilities"]["query_by_name"], true);
+        assert_eq!(report["library"]["capabilities"]["query_by_kind"], true);
+        assert_eq!(report["library"]["capabilities"]["reports_effective_timing"], true);
+        assert_eq!(
+            report["library"]["capabilities"]["reports_characterization_metadata"],
+            true
+        );
+        assert_eq!(report["library"]["capabilities"]["reports_remediation"], true);
+        assert_eq!(report["library"]["coverage"]["cell_count"], 7);
+        assert_eq!(report["library"]["coverage"]["kind_count"], 7);
+        assert_eq!(report["library"]["coverage"]["kind_timing_count"], 7);
+        assert_eq!(report["library"]["coverage"]["missing_timing_count"], 0);
+        assert_eq!(report["library"]["coverage"]["timing_complete"], true);
+        assert_eq!(report["available_kinds"][0], "generic_gate");
+        assert_eq!(report["filter"]["kind"], "Macro");
+        assert_eq!(report["summary"]["cell_count"], 7);
+        assert_eq!(report["summary"]["matched_cell_count"], 1);
+        assert_eq!(report["summary"]["kind_counts"]["macro"], 1);
+        assert_eq!(report["summary"]["kind_timing_count"], 7);
+        assert_eq!(report["summary"]["missing_timing_cells"], json!([]));
+        assert_eq!(report["summary"]["named_timing_cells"], json!([]));
+        assert_eq!(report["summary"]["characterized_cells"], json!([]));
+        assert_eq!(report["remediation"]["timing"]["status"], "complete");
+        assert_eq!(
+            report["remediation"]["characterization"]["next_step"],
+            "Optional: characterize high-value macro or compound cells to improve timing fidelity."
+        );
+        assert_eq!(report["entries"][0]["name"], "sfq_macro");
+        assert_eq!(report["entries"][0]["kind"], "macro");
+        assert_eq!(report["entries"][0]["timing_source"], "kind");
+    }
+
+    #[test]
+    fn run_pdk_cell_library_filters_by_cell_name() {
+        let dir = unique_test_dir("pdk-cell-library-cell-filter");
+        let input_path = dir.join("input.pdk.json");
+        let output_path = dir.join("pdk-cell-library-report.json");
+        let pdk = Pdk::minimal("library-report");
+        write_pdk_json(&input_path, &pdk).expect("pdk json should write");
+
+        run_pdk_cell_library(PdkCellLibraryArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+            cell: Some("sfq_gate".to_string()),
+            kind: None,
+        })
+        .expect("pdk-cell-library should filter by cell");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("pdk cell library report should exist"),
+        )
+        .expect("pdk cell library report should be valid json");
+
+        assert_eq!(report["filter"]["cell"], "sfq_gate");
+        assert_eq!(report["summary"]["cell_count"], 7);
+        assert_eq!(report["summary"]["matched_cell_count"], 1);
+        assert_eq!(report["entries"][0]["name"], "sfq_gate");
+        assert_eq!(report["entries"][0]["kind"], "generic_gate");
+    }
+
+    #[test]
+    fn run_pdk_cell_library_reports_missing_timing_remediation() {
+        let dir = unique_test_dir("pdk-cell-library-missing-timing");
+        let input_path = dir.join("input.pdk.json");
+        let output_path = dir.join("pdk-cell-library-report.json");
+        let mut pdk = Pdk::minimal("library-report");
+        pdk.cell_timing
+            .retain(|timing| timing.kind != rflux_tech::SfCellKind::Macro);
+        write_pdk_json(&input_path, &pdk).expect("pdk json should write");
+
+        run_pdk_cell_library(PdkCellLibraryArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+            cell: None,
+            kind: Some("macro".to_string()),
+        })
+        .expect("pdk-cell-library should report missing timing");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("pdk cell library report should exist"),
+        )
+        .expect("pdk cell library report should be valid json");
+
+        assert_eq!(report["summary"]["missing_timing_count"], 1);
+        assert_eq!(report["summary"]["missing_timing_cells"], json!(["sfq_macro"]));
+        assert_eq!(report["library"]["coverage"]["missing_timing_count"], 1);
+        assert_eq!(report["library"]["coverage"]["timing_complete"], false);
+        assert_eq!(report["remediation"]["timing"]["status"], "action_required");
+        assert_eq!(report["remediation"]["timing"]["cells"], json!(["sfq_macro"]));
+        assert_eq!(report["entries"][0]["timing_source"], "missing");
+    }
+
+    #[test]
+    fn run_pdk_cell_library_rejects_conflicting_filters() {
+        let dir = unique_test_dir("pdk-cell-library-conflict");
+        let input_path = dir.join("input.pdk.json");
+        let pdk = Pdk::minimal("library-report");
+        write_pdk_json(&input_path, &pdk).expect("pdk json should write");
+
+        let error = run_pdk_cell_library(PdkCellLibraryArgs {
+            input: input_path,
+            output: None,
+            cell: Some("sfq_gate".to_string()),
+            kind: Some("macro".to_string()),
+        })
+        .expect_err("conflicting filters should fail");
+
+        assert!(error
+            .to_string()
+            .contains("accepts either --cell or --kind, not both"));
     }
 
     #[test]
@@ -5954,6 +6826,51 @@ mod tests {
         assert!(errors.iter().any(|error| error
             .as_str()
             .is_some_and(|message| message.contains("inverted range [10, 5]"))));
+    }
+
+    #[test]
+    fn run_pdk_validate_reports_advisory_cell_library_metadata_warnings() {
+        let dir = unique_test_dir("pdk-validate-cell-library-metadata-warnings");
+        let input_path = dir.join("input.pdk.json");
+        let output_path = dir.join("pdk-validate-report.json");
+        let mut payload = serde_json::to_value(Pdk::minimal("validate-legacy-library"))
+            .expect("minimal pdk should serialize");
+        let cell_library = payload
+            .get_mut("cell_library")
+            .and_then(Value::as_object_mut)
+            .expect("minimal pdk should contain cell library object");
+        cell_library.remove("version");
+        cell_library.remove("source");
+        fs::write(
+            &input_path,
+            serde_json::to_string_pretty(&payload).expect("legacy pdk should serialize"),
+        )
+        .expect("legacy pdk json should write");
+
+        run_pdk_validate(PdkValidateArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+        })
+        .expect("pdk-validate should still emit a report for legacy library metadata");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("pdk validate report should exist"),
+        )
+        .expect("pdk validate report should be valid json");
+
+        assert_eq!(report["kind"], "pdk_validation");
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["error_count"], 0);
+        assert_eq!(report["warning_count"], 2);
+        assert!(report["summary"]["cell_library_version"].is_null());
+        assert!(report["summary"]["cell_library_source"].is_null());
+        assert_eq!(report["checks"]["cell_library_metadata"]["ok"], false);
+        assert_eq!(report["checks"]["cell_library_metadata"]["level"], "advisory");
+        assert!(report["checks"]["cell_library_metadata"]["version"].is_null());
+        assert!(report["checks"]["cell_library_metadata"]["source"].is_null());
+        let warnings = report["warnings"].as_array().expect("warnings should be array");
+        assert!(warnings.iter().any(|warning| warning == "pdk.cell_library.version is not set"));
+        assert!(warnings.iter().any(|warning| warning == "pdk.cell_library.source is not set"));
     }
 
     #[test]
@@ -6315,7 +7232,106 @@ fn build_pdk_validate_report(input: &Path) -> Result<Value> {
     }))
 }
 
+fn build_pdk_cell_library_report(
+    input: &Path,
+    cell_filter: Option<&str>,
+    kind_filter: Option<&str>,
+) -> Result<Value> {
+    if cell_filter.is_some() && kind_filter.is_some() {
+        bail!("pdk-cell-library accepts either --cell or --kind, not both");
+    }
+    let pdk = read_pdk_json(input)
+        .with_context(|| format!("failed to inspect PDK cell library from {}", input.display()))?;
+    let all_entries = pdk.cell_library_entries();
+    let summary = pdk.cell_library_summary();
+    let library = pdk.cell_library_metadata();
+    let entries = if let Some(cell_name) = cell_filter {
+        pdk.cell_library_entry(cell_name).into_iter().collect::<Vec<_>>()
+    } else if let Some(kind) = kind_filter {
+        let kind = parse_cli_sf_cell_kind(kind)?;
+        pdk.cell_library_entries_by_kind(kind)
+    } else {
+        all_entries.clone()
+    };
+    Ok(json!({
+        "kind": "pdk_cell_library",
+        "input": input.display().to_string(),
+        "pdk_name": pdk.name,
+        "cell_library_name": pdk.cell_library_name(),
+        "cell_library_version": pdk.cell_library_version(),
+        "cell_library_source": pdk.cell_library_source(),
+        "library": pdk_cell_library_manifest_to_json(library, &summary),
+        "available_kinds": pdk
+            .cell_library_kinds()
+            .into_iter()
+            .map(|kind| sf_cell_kind_cli_name(kind))
+            .collect::<Vec<_>>(),
+        "filter": {
+            "cell": cell_filter,
+            "kind": kind_filter,
+        },
+        "summary": {
+            "cell_count": summary.cell_count,
+            "matched_cell_count": entries.len(),
+            "kind_counts": pdk_cell_library_kind_counts_to_json(&summary),
+            "named_timing_count": summary.named_timing_count,
+            "kind_timing_count": summary.kind_timing_count,
+            "missing_timing_count": summary.missing_timing_count,
+            "characterized_cell_count": summary.characterized_cell_count,
+            "named_timing_cells": summary.named_timing_cells,
+            "missing_timing_cells": summary.missing_timing_cells,
+            "characterized_cells": summary.characterized_cells,
+        },
+        "remediation": pdk_cell_library_remediation(&summary),
+        "entries": entries
+            .into_iter()
+            .map(pdk_cell_library_entry_to_json)
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn pdk_cell_library_manifest_to_json(
+    library: rflux_tech::CellLibraryMetadata,
+    summary: &rflux_tech::CellLibrarySummary,
+) -> Value {
+    json!({
+        "name": library.name,
+        "version": library.version,
+        "source": library.source,
+        "artifact_kind": PDK_CELL_LIBRARY_ARTIFACT_KIND,
+        "schema": pdk_cell_library_manifest_schema_to_json(),
+        "capabilities": pdk_cell_library_manifest_capabilities_to_json(),
+        "coverage": {
+            "cell_count": summary.cell_count,
+            "kind_count": summary.kind_count,
+            "named_timing_count": summary.named_timing_count,
+            "kind_timing_count": summary.kind_timing_count,
+            "missing_timing_count": summary.missing_timing_count,
+            "characterized_cell_count": summary.characterized_cell_count,
+            "timing_complete": summary.missing_timing_count == 0,
+        },
+    })
+}
+
+fn pdk_cell_library_manifest_schema_to_json() -> Value {
+    json!({
+        "name": PDK_CELL_LIBRARY_MANIFEST_SCHEMA,
+        "version": PDK_CELL_LIBRARY_MANIFEST_SCHEMA_VERSION,
+    })
+}
+
+fn pdk_cell_library_manifest_capabilities_to_json() -> Value {
+    json!({
+        "query_by_name": true,
+        "query_by_kind": true,
+        "reports_effective_timing": true,
+        "reports_characterization_metadata": true,
+        "reports_remediation": true,
+    })
+}
+
 fn pdk_validate_summary(pdk: &Pdk, error_count: usize, warning_count: usize) -> Value {
+    let cell_library_summary = pdk.cell_library_summary();
     json!({
         "cell_count": pdk.cell_library.cells.len(),
         "cell_timing_count": pdk.cell_timing.len(),
@@ -6328,6 +7344,18 @@ fn pdk_validate_summary(pdk: &Pdk, error_count: usize, warning_count: usize) -> 
             .sum::<usize>(),
         "interconnect_timing_count": pdk.interconnect_timing.len(),
         "ptl_forbidden_range_count": pdk.ptl_forbidden_ranges.len(),
+        "cell_library_name": pdk.cell_library_name(),
+        "cell_library_version": pdk.cell_library_version(),
+        "cell_library_source": pdk.cell_library_source(),
+        "cell_library_kind_count": cell_library_summary.kind_count,
+        "cell_library_kind_counts": pdk_cell_library_kind_counts_to_json(&cell_library_summary),
+        "cell_library_named_timing_count": cell_library_summary.named_timing_count,
+        "cell_library_kind_timing_count": cell_library_summary.kind_timing_count,
+        "cell_library_missing_timing_count": cell_library_summary.missing_timing_count,
+        "cell_library_characterized_cell_count": cell_library_summary.characterized_cell_count,
+        "cell_library_named_timing_cells": cell_library_summary.named_timing_cells,
+        "cell_library_missing_timing_cells": cell_library_summary.missing_timing_cells,
+        "cell_library_characterized_cells": cell_library_summary.characterized_cells,
         "error_count": error_count,
         "warning_count": warning_count,
     })
@@ -6336,6 +7364,7 @@ fn pdk_validate_summary(pdk: &Pdk, error_count: usize, warning_count: usize) -> 
 fn pdk_validate_checks(pdk: &Pdk, validation: &rflux_tech::PdkValidationReport) -> Value {
     let required_cell_kinds = ["GenericGate", "Macro", "Splitter", "Dff", "Jtl", "Ptl", "Port"];
     let required_interconnect_kinds = ["Jtl", "Ptl"];
+    let cell_library_summary = pdk.cell_library_summary();
     let has_required_cell_kinds = required_cell_kinds.iter().all(|kind| {
         pdk.cell_library
             .cells
@@ -6375,6 +7404,40 @@ fn pdk_validate_checks(pdk: &Pdk, validation: &rflux_tech::PdkValidationReport) 
             "count": pdk.named_cell_timing.len(),
             "level": if pdk.named_cell_timing.is_empty() { "advisory" } else { "present" },
         },
+        "cell_library_metadata": {
+            "ok": pdk.cell_library_version().is_some() && pdk.cell_library_source().is_some(),
+            "name": pdk.cell_library_name(),
+            "version": pdk.cell_library_version(),
+            "source": pdk.cell_library_source(),
+            "artifact_kind": PDK_CELL_LIBRARY_ARTIFACT_KIND,
+            "manifest_schema": pdk_cell_library_manifest_schema_to_json(),
+            "level": if pdk.cell_library_version().is_some() && pdk.cell_library_source().is_some() {
+                "present"
+            } else {
+                "advisory"
+            },
+        },
+        "cell_library_index": {
+            "ok": cell_library_summary.missing_timing_count == 0,
+            "cell_library_name": pdk.cell_library_name(),
+            "cell_library_version": pdk.cell_library_version(),
+            "cell_library_source": pdk.cell_library_source(),
+            "cell_count": cell_library_summary.cell_count,
+            "kind_counts": pdk_cell_library_kind_counts_to_json(&cell_library_summary),
+            "available_kinds": pdk
+                .cell_library_kinds()
+                .into_iter()
+                .map(sf_cell_kind_cli_name)
+                .collect::<Vec<_>>(),
+            "named_timing_count": cell_library_summary.named_timing_count,
+            "kind_timing_count": cell_library_summary.kind_timing_count,
+            "missing_timing_count": cell_library_summary.missing_timing_count,
+            "characterized_cell_count": cell_library_summary.characterized_cell_count,
+            "named_timing_cells": cell_library_summary.named_timing_cells,
+            "missing_timing_cells": cell_library_summary.missing_timing_cells,
+            "characterized_cells": cell_library_summary.characterized_cells,
+            "remediation": pdk_cell_library_remediation(&cell_library_summary),
+        },
         "characterized_arcs": {
             "ok": pdk
                 .characterized_cell_metadata
@@ -6393,5 +7456,87 @@ fn pdk_validate_checks(pdk: &Pdk, validation: &rflux_tech::PdkValidationReport) 
             "count": pdk.ptl_forbidden_ranges.len(),
             "level": "advisory",
         },
+    })
+}
+
+fn parse_cli_sf_cell_kind(kind: &str) -> Result<rflux_tech::SfCellKind> {
+    match kind {
+        "generic_gate" | "GenericGate" | "cell" | "cell_instance" => Ok(rflux_tech::SfCellKind::GenericGate),
+        "macro" | "Macro" | "macro_cell" => Ok(rflux_tech::SfCellKind::Macro),
+        "splitter" | "Splitter" => Ok(rflux_tech::SfCellKind::Splitter),
+        "dff" | "Dff" => Ok(rflux_tech::SfCellKind::Dff),
+        "jtl" | "Jtl" => Ok(rflux_tech::SfCellKind::Jtl),
+        "ptl" | "Ptl" => Ok(rflux_tech::SfCellKind::Ptl),
+        "port" | "Port" => Ok(rflux_tech::SfCellKind::Port),
+        _ => bail!("unknown cell kind: {kind}"),
+    }
+}
+
+fn sf_cell_kind_cli_name(kind: rflux_tech::SfCellKind) -> &'static str {
+    match kind {
+        rflux_tech::SfCellKind::GenericGate => "generic_gate",
+        rflux_tech::SfCellKind::Macro => "macro",
+        rflux_tech::SfCellKind::Splitter => "splitter",
+        rflux_tech::SfCellKind::Dff => "dff",
+        rflux_tech::SfCellKind::Jtl => "jtl",
+        rflux_tech::SfCellKind::Ptl => "ptl",
+        rflux_tech::SfCellKind::Port => "port",
+    }
+}
+
+fn pdk_cell_library_remediation(summary: &rflux_tech::CellLibrarySummary) -> Value {
+    let timing_status = if summary.missing_timing_count == 0 {
+        "complete"
+    } else {
+        "action_required"
+    };
+    let timing_next_step = if summary.missing_timing_count == 0 {
+        "No timing remediation required for listed cells."
+    } else {
+        "Add named_cell_timing entries for missing_timing_cells or add kind-level cell_timing coverage for their SfCellKind values."
+    };
+    let characterization_status = if summary.characterized_cell_count == 0 {
+        "advisory"
+    } else {
+        "present"
+    };
+    let characterization_next_step = if summary.characterized_cell_count == 0 {
+        "Optional: characterize high-value macro or compound cells to improve timing fidelity."
+    } else {
+        "Review characterized_cells and ensure metadata includes arc_delays for timing-critical macro boundaries."
+    };
+    json!({
+        "timing": {
+            "status": timing_status,
+            "next_step": timing_next_step,
+            "cells": summary.missing_timing_cells,
+        },
+        "characterization": {
+            "status": characterization_status,
+            "next_step": characterization_next_step,
+            "cells": summary.characterized_cells,
+        },
+    })
+}
+
+fn pdk_cell_library_kind_counts_to_json(summary: &rflux_tech::CellLibrarySummary) -> Value {
+    let mut object = serde_json::Map::new();
+    for (kind, count) in &summary.kind_counts {
+        object.insert(sf_cell_kind_cli_name(*kind).to_string(), json!(count));
+    }
+    Value::Object(object)
+}
+
+fn pdk_cell_library_entry_to_json(entry: rflux_tech::CellLibraryEntry) -> Value {
+    json!({
+        "name": entry.name,
+        "kind": sf_cell_kind_cli_name(entry.kind),
+        "area_um2": entry.area_um2,
+        "pipeline_stages": entry.pipeline_stages,
+        "intrinsic_delay_ps": entry.intrinsic_delay_ps,
+        "setup_ps": entry.setup_ps,
+        "hold_ps": entry.hold_ps,
+        "timing_source": entry.timing_source,
+        "has_characterization_metadata": entry.has_characterization_metadata,
     })
 }

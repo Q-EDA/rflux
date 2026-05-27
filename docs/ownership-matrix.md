@@ -49,6 +49,7 @@
 要求：
 
 - 对工艺数据质量和接入流程负责。
+- 对 `pdk-validate` 规则、结果解释和 PDK 准入记录负责。
 
 ### 2.4 QA / 基准负责人
 
@@ -60,10 +61,13 @@
 - fuzz
 - benchmark
 - correlation
+- 共享 CI bootstrap / smoke workflow 维护
 
 要求：
 
 - 对质量门是否阻断发布负责。
+- 对 approved baseline、history diff、no-regression gate 的采用与豁免记录负责。
+- 对文档命令进入 CI smoke 的覆盖状态，以及共享 bootstrap 改动带来的环境漂移风险负责。
 
 ### 2.5 文档与支持负责人
 
@@ -87,6 +91,10 @@
 | IR / PDK schema 变更 | 核心内核或 PDK 负责人 | QA、产品化、文档 |
 | 算法或 QoR 变化 | 核心内核负责人 | QA |
 | PDK 新接入 | PDK 负责人 | QA、产品化 |
+| `pdk-validate` 规则调整 | PDK 负责人 | QA、产品化、文档 |
+| waveform threshold manifest / approved baseline 更新 | QA / 基准负责人 | 核心内核、产品化、文档 |
+| waveform no-regression gate 默认策略变更 | QA / 基准负责人 | 核心内核、产品化、文档 |
+| 仿真相关候选版本放行 | CLI / Python / 产品化负责人 | QA、核心内核、文档 |
 | 发布 | 产品化负责人 | QA、文档、相关模块 DRI |
 | 已知限制收缩或扩张 | 文档与支持负责人 | 相关 DRI |
 

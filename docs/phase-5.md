@@ -51,3 +51,7 @@ uv run maturin develop
 uv run pytest
 uv run python python/scripts/characterize_merge_optimize.py
 ```
+
+The Phase 5 workflow script also has an explicit CI smoke anchor for its characterize/merge/optimize path:
+
+- `uv run pytest python/tests/test_basic.py -k "merge_characterized_library_round_trip or optimize_design_with_characterized_library_workflow" -q`

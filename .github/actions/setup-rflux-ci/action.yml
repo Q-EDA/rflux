@@ -1,0 +1,28 @@
+name: Setup rflux CI
+description: Shared Rust and uv bootstrap for repository CI jobs after checkout.
+
+inputs:
+  python-version:
+    description: Python version to expose to uv via UV_PYTHON.
+    required: false
+    default: "3.12"
+  sync-python:
+    description: Whether to run uv sync --all-groups after toolchain setup.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Setup uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Sync Python dependencies
+      if: ${{ inputs.sync-python == 'true' }}
+      shell: bash
+      run: uv sync --all-groups

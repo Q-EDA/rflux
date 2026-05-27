@@ -21,6 +21,7 @@ dev = [
 manifest-path = "crates/py/Cargo.toml"
 python-source = "python"
 module-name = "rflux._core"
+include = ["python/rflux/py.typed"]
 
 [tool.uv]
 package = false

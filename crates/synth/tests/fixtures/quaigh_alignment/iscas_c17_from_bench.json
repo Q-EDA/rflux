@@ -1,0 +1,313 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "Port",
+      "name": "x1"
+    },
+    {
+      "id": 1,
+      "kind": "Port",
+      "name": "x2"
+    },
+    {
+      "id": 2,
+      "kind": "Port",
+      "name": "x3"
+    },
+    {
+      "id": 3,
+      "kind": "Port",
+      "name": "x6"
+    },
+    {
+      "id": 4,
+      "kind": "Port",
+      "name": "x7"
+    },
+    {
+      "id": 5,
+      "kind": "CellInstance",
+      "name": "n10__bench_nand_inner",
+      "logic_op": "And"
+    },
+    {
+      "id": 6,
+      "kind": "CellInstance",
+      "name": "n10",
+      "logic_op": "Not"
+    },
+    {
+      "id": 7,
+      "kind": "CellInstance",
+      "name": "n11__bench_nand_inner",
+      "logic_op": "And"
+    },
+    {
+      "id": 8,
+      "kind": "CellInstance",
+      "name": "n11",
+      "logic_op": "Not"
+    },
+    {
+      "id": 9,
+      "kind": "CellInstance",
+      "name": "n16__bench_nand_inner",
+      "logic_op": "And"
+    },
+    {
+      "id": 10,
+      "kind": "CellInstance",
+      "name": "n16",
+      "logic_op": "Not"
+    },
+    {
+      "id": 11,
+      "kind": "CellInstance",
+      "name": "n19__bench_nand_inner",
+      "logic_op": "And"
+    },
+    {
+      "id": 12,
+      "kind": "CellInstance",
+      "name": "n19",
+      "logic_op": "Not"
+    },
+    {
+      "id": 13,
+      "kind": "CellInstance",
+      "name": "n22__bench_nand_inner",
+      "logic_op": "And"
+    },
+    {
+      "id": 14,
+      "kind": "CellInstance",
+      "name": "n22",
+      "logic_op": "Not"
+    },
+    {
+      "id": 15,
+      "kind": "CellInstance",
+      "name": "n23__bench_nand_inner",
+      "logic_op": "And"
+    },
+    {
+      "id": 16,
+      "kind": "CellInstance",
+      "name": "n23",
+      "logic_op": "Not"
+    },
+    {
+      "id": 17,
+      "kind": "Port",
+      "name": "n22"
+    },
+    {
+      "id": 18,
+      "kind": "Port",
+      "name": "n23"
+    }
+  ],
+  "edges": [
+    [
+      {
+        "node": 0,
+        "port": 0
+      },
+      {
+        "node": 5,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 2,
+        "port": 0
+      },
+      {
+        "node": 5,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 5,
+        "port": 0
+      },
+      {
+        "node": 6,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 2,
+        "port": 1
+      },
+      {
+        "node": 7,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 3,
+        "port": 0
+      },
+      {
+        "node": 7,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 7,
+        "port": 0
+      },
+      {
+        "node": 8,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 1,
+        "port": 0
+      },
+      {
+        "node": 9,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 8,
+        "port": 0
+      },
+      {
+        "node": 9,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 9,
+        "port": 0
+      },
+      {
+        "node": 10,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 8,
+        "port": 1
+      },
+      {
+        "node": 11,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 4,
+        "port": 0
+      },
+      {
+        "node": 11,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 11,
+        "port": 0
+      },
+      {
+        "node": 12,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 6,
+        "port": 0
+      },
+      {
+        "node": 13,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 10,
+        "port": 0
+      },
+      {
+        "node": 13,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 13,
+        "port": 0
+      },
+      {
+        "node": 14,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 10,
+        "port": 1
+      },
+      {
+        "node": 15,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 12,
+        "port": 0
+      },
+      {
+        "node": 15,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 15,
+        "port": 0
+      },
+      {
+        "node": 16,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 14,
+        "port": 0
+      },
+      {
+        "node": 17,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 16,
+        "port": 0
+      },
+      {
+        "node": 18,
+        "port": 0
+      }
+    ]
+  ]
+}

@@ -1,0 +1,6 @@
+.title pulse-rc-smoke
+V1 in 0 PULSE(0 1m 1p 0.2p 0.2p 2p 4p)
+R1 in out 10
+C1 out 0 1p
+.tran 0.5p 10p
+.end

@@ -1,0 +1,6 @@
+INPUT(a)
+INPUT(b)
+n0 = NAND(a, b)
+n1 = NOR(a, b)
+OUTPUT(n0)
+OUTPUT(n1)

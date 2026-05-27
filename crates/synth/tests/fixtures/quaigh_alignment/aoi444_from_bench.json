@@ -1,0 +1,383 @@
+{
+  "nodes": [
+    {
+      "id": 0,
+      "kind": "Port",
+      "name": "a"
+    },
+    {
+      "id": 1,
+      "kind": "Port",
+      "name": "b"
+    },
+    {
+      "id": 2,
+      "kind": "Port",
+      "name": "c"
+    },
+    {
+      "id": 3,
+      "kind": "Port",
+      "name": "d"
+    },
+    {
+      "id": 4,
+      "kind": "Port",
+      "name": "e"
+    },
+    {
+      "id": 5,
+      "kind": "Port",
+      "name": "f"
+    },
+    {
+      "id": 6,
+      "kind": "Port",
+      "name": "g"
+    },
+    {
+      "id": 7,
+      "kind": "Port",
+      "name": "h"
+    },
+    {
+      "id": 8,
+      "kind": "Port",
+      "name": "i"
+    },
+    {
+      "id": 9,
+      "kind": "Port",
+      "name": "j"
+    },
+    {
+      "id": 10,
+      "kind": "Port",
+      "name": "k"
+    },
+    {
+      "id": 11,
+      "kind": "Port",
+      "name": "l"
+    },
+    {
+      "id": 12,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and0",
+      "logic_op": "And"
+    },
+    {
+      "id": 13,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and1",
+      "logic_op": "And"
+    },
+    {
+      "id": 14,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and2",
+      "logic_op": "And"
+    },
+    {
+      "id": 15,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and3",
+      "logic_op": "And"
+    },
+    {
+      "id": 16,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and4",
+      "logic_op": "And"
+    },
+    {
+      "id": 17,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and5",
+      "logic_op": "And"
+    },
+    {
+      "id": 18,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and6",
+      "logic_op": "And"
+    },
+    {
+      "id": 19,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and7",
+      "logic_op": "And"
+    },
+    {
+      "id": 20,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_and8",
+      "logic_op": "And"
+    },
+    {
+      "id": 21,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_or0",
+      "logic_op": "Or"
+    },
+    {
+      "id": 22,
+      "kind": "CellInstance",
+      "name": "y__bench_aoi444_or1",
+      "logic_op": "Or"
+    },
+    {
+      "id": 23,
+      "kind": "CellInstance",
+      "name": "y",
+      "logic_op": "Not"
+    },
+    {
+      "id": 24,
+      "kind": "Port",
+      "name": "y"
+    }
+  ],
+  "edges": [
+    [
+      {
+        "node": 0,
+        "port": 0
+      },
+      {
+        "node": 12,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 1,
+        "port": 0
+      },
+      {
+        "node": 12,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 12,
+        "port": 0
+      },
+      {
+        "node": 13,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 2,
+        "port": 0
+      },
+      {
+        "node": 13,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 13,
+        "port": 0
+      },
+      {
+        "node": 14,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 3,
+        "port": 0
+      },
+      {
+        "node": 14,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 4,
+        "port": 0
+      },
+      {
+        "node": 15,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 5,
+        "port": 0
+      },
+      {
+        "node": 15,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 15,
+        "port": 0
+      },
+      {
+        "node": 16,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 6,
+        "port": 0
+      },
+      {
+        "node": 16,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 16,
+        "port": 0
+      },
+      {
+        "node": 17,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 7,
+        "port": 0
+      },
+      {
+        "node": 17,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 8,
+        "port": 0
+      },
+      {
+        "node": 18,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 9,
+        "port": 0
+      },
+      {
+        "node": 18,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 18,
+        "port": 0
+      },
+      {
+        "node": 19,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 10,
+        "port": 0
+      },
+      {
+        "node": 19,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 19,
+        "port": 0
+      },
+      {
+        "node": 20,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 11,
+        "port": 0
+      },
+      {
+        "node": 20,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 14,
+        "port": 0
+      },
+      {
+        "node": 21,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 17,
+        "port": 0
+      },
+      {
+        "node": 21,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 21,
+        "port": 0
+      },
+      {
+        "node": 22,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 20,
+        "port": 0
+      },
+      {
+        "node": 22,
+        "port": 1
+      }
+    ],
+    [
+      {
+        "node": 22,
+        "port": 0
+      },
+      {
+        "node": 23,
+        "port": 0
+      }
+    ],
+    [
+      {
+        "node": 23,
+        "port": 0
+      },
+      {
+        "node": 24,
+        "port": 0
+      }
+    ]
+  ]
+}
