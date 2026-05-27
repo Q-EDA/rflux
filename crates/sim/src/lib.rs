@@ -536,6 +536,7 @@ fn run_generated_deck_with_base(
                         Some(waveform_source_path),
                         std::process::id(),
                         timestamp_millis,
+                        true,
                     );
                     return SimulationReport {
                         backend,
@@ -1853,6 +1854,7 @@ fn stage_external_run_artifacts(
     waveform_source_path: Option<&Path>,
     process_id: u32,
     timestamp_millis: u128,
+    cleanup_run_dir: bool,
 ) -> (Option<String>, Option<String>) {
     let staged_deck_path = std::env::temp_dir().join(format!(
         "rflux-ext-{}-{}-input.sp",
@@ -1867,7 +1869,7 @@ fn stage_external_run_artifacts(
         .filter(|path| path.is_file())
         .map(|source_path| fs::copy(source_path, &staged_waveform_path).is_ok())
         .unwrap_or(false);
-    if deck_copied && waveform_copied {
+    if cleanup_run_dir && deck_copied && waveform_copied {
         let _ = fs::remove_dir_all(run_dir);
     }
     let generated_deck_path = Some(if deck_copied {
@@ -7336,6 +7338,7 @@ mod tests {
             Some(&waveform_path),
             1234,
             5678,
+            true,
         );
 
         let staged_deck_path = Path::new(generated_deck_path.as_deref().unwrap());
@@ -7350,6 +7353,37 @@ mod tests {
                 .to_string_lossy()
                 .contains("rflux-ext-1234-5678-external_output.csv")
         );
+
+        let _ = fs::remove_dir_all(&base_dir);
+        let _ = fs::remove_file(staged_deck_path);
+        let _ = fs::remove_file(staged_waveform_path);
+    }
+
+    #[test]
+    fn stage_external_run_artifacts_can_retain_run_dir_for_failure_review() {
+        let base_dir = unique_test_dir("external-stage-retain");
+        let run_dir = base_dir.join("rflux-ext-1234-5678");
+        fs::create_dir_all(&run_dir).unwrap();
+        let deck_path = run_dir.join("input.sp");
+        let waveform_path = run_dir.join("external_output.csv");
+        fs::write(&deck_path, ".tran 1p 1p\n.end\n").unwrap();
+        fs::write(&waveform_path, "time,voltage\n0,0\n").unwrap();
+
+        let (generated_deck_path, staged_waveform_path) = super::stage_external_run_artifacts(
+            &run_dir,
+            &deck_path,
+            Some(&waveform_path),
+            1234,
+            5678,
+            false,
+        );
+
+        let staged_deck_path = Path::new(generated_deck_path.as_deref().unwrap());
+        let staged_waveform_path = Path::new(staged_waveform_path.as_deref().unwrap());
+
+        assert!(staged_deck_path.is_file());
+        assert!(staged_waveform_path.is_file());
+        assert!(run_dir.exists());
 
         let _ = fs::remove_dir_all(&base_dir);
         let _ = fs::remove_file(staged_deck_path);
