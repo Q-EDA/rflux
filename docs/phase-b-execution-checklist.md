@@ -12,6 +12,10 @@ Close J-04 by turning Linux waveform path from "optional bootstrap" into stable 
 
 ## 3. Execution steps
 
+Before running steps, create a run record from:
+
+- `docs/phase-b-run-record-template.md`
+
 1. Run Linux waveform gate for candidate generation
 
 ```md
@@ -70,6 +74,13 @@ Inputs:
 Update:
   docs/alignment-scorecard-weekly-2026-05-28.md (or latest weekly report)
   J-04 status: FAIL -> PASS
+```
+
+7. Archive run record
+
+```md
+Store completed run record in docs/ with date suffix, for example:
+  docs/phase-b-run-record-2026-05-28.md
 ```
 
 ## 4. Exit criteria

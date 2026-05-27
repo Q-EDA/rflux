@@ -5,6 +5,7 @@
 - Phase A: completed (2026-05-28)
 - Phase B: in progress (J-04 closure)
 - Phase B execution checklist: `docs/phase-b-execution-checklist.md`
+- Phase B run record template: `docs/phase-b-run-record-template.md`
 
 ## 1. Purpose
 
