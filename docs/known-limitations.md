@@ -79,7 +79,7 @@
 - 当前与 JoSIM 的对齐仍是 partial，而非完整语义兼容；虽然 native `.model ... jj(... cpr={...})` 与实例侧 `J... cpr={...}` 的五系数子集现已进入支持面，但更高阶 CPR 和更完整模型语义仍未完成。
 - 当前噪声、JJ、传输线等支持路径虽然已有进展，但仍不应表述为 JoSIM 级完整能力。
 - 当前外部仿真调用已收口为最小 allowlist 和最小路径信任规则，仅接受 `josim` / `josim-cli` 及其受限 wrapper 后缀（`.exe` / `.cmd` / `.bat` / `.sh`）；尚未提供更通用的外部仿真器配置策略。
-- 当前已具备手动触发的 manifest-based JoSIM 数值对齐 CI 路径；现有 phase-6 基准中的 pure second-harmonic JJ、pure third-harmonic JJ、pure fourth-harmonic JJ 与 pure fifth-harmonic JJ 都已进入数值对齐资产。warning-contract review bundle 仍保留为流程能力，但当前基准合同可以为空。Ubuntu 默认 runner 仍缺 same-platform Linux approved baseline，因此严格 no-regression gate 还不能默认开启。
+- 当前已具备默认启用的 Windows manifest-based JoSIM 数值对齐 CI 路径（`waveform-compare-gate`）；现有 phase-6 基准中的 pure second-harmonic JJ、pure third-harmonic JJ、pure fourth-harmonic JJ 与 pure fifth-harmonic JJ 都已进入数值对齐资产。warning-contract review bundle 仍保留为流程能力，但当前基准合同可以为空。Ubuntu runner 仍缺 same-platform Linux approved baseline，因此严格 no-regression gate 还不能在 Linux 默认开启。
 
 建议：
 
@@ -110,9 +110,9 @@
 
 ## 10. 平台与分发限制
 
-- 当前 CI 主要覆盖 Ubuntu。
-- Windows 与其他平台缺乏正式自动化支持矩阵。
-- 仓库尚未提供正式预编译 wheel 和 CLI 二进制发布承诺；当前仅新增了手动 candidate artifact workflow，用于生成内部评审用的当前 runner wheel / CLI bundle，而不是对外发布渠道。
+- 当前默认 CI 已覆盖 Ubuntu 主检查、Windows 核心 smoke，以及 Windows waveform parity gate；但仍缺 macOS 与 Linux waveform same-platform baseline 的完整矩阵闭环。
+- 平台验证仍以最小核心链路为主，尚未形成 Ubuntu/Windows/macOS 对称的全流程质量门。
+- 仓库尚未提供正式预编译 wheel 和 CLI 二进制对外发布承诺；当前 `release-artifacts-optional` 仍用于内部评审用的当前 runner wheel / CLI bundle，而不是正式发布渠道。
 
 建议：
 

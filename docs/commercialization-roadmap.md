@@ -44,6 +44,24 @@
 5. 发布、升级、回退、支持、兼容性承诺尚未产品化。
 6. 缺少商业交付所需的文档、SLA、缺陷分级和客户成功流程。
 
+### 2.1 对标复核结论（2026-05-28）
+
+基于当前仓库代码与 CI（`checks`、`core-smoke-windows`、`waveform-compare-gate`）复核后，当前“对标软件功能对齐”应表述为：
+
+- 与 Yosys 家族重叠的 IR/综合/SAT/等价/CLI 核心链路：`高对齐（局部强对齐）`。
+- 与 Quaigh 对齐的布尔优化行为与夹具回归：`高对齐（仍有边界）`。
+- 与 JoSIM 的仿真语义与工程成熟度：`部分对齐（partial），非同级替代`。
+
+因此，当前可对外表述为“具备可执行且工程化程度较高的 SFQ EDA 原型工具链”，但不应表述为“已与成熟对标软件全面功能对齐”。
+
+复核依据建议与以下文档联读：
+
+- [docs/yosys-alignment.md](docs/yosys-alignment.md)
+- [docs/quaigh-alignment.md](docs/quaigh-alignment.md)
+- [docs/josim-parity.md](docs/josim-parity.md)
+- [docs/support-matrix.md](docs/support-matrix.md)
+- [docs/known-limitations.md](docs/known-limitations.md)
+
 ## 3. 商业化目标定义
 
 只有当以下八个维度全部达标时，才可宣称 `rflux` 达到商业化成熟工具水平。
