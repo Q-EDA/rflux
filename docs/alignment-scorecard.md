@@ -67,3 +67,7 @@ Interpretation:
 Weekly report template:
 
 - `docs/alignment-scorecard-weekly-template.md`
+
+Latest weekly report:
+
+- `docs/alignment-scorecard-weekly-2026-05-28.md`

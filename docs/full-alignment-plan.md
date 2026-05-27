@@ -49,6 +49,7 @@
 - 评分卡文档已创建：`docs/alignment-scorecard.md`。
 - PR 模板已接入评分卡条目引用：`.github/PULL_REQUEST_TEMPLATE.md`。
 - 周报模板已创建：`docs/alignment-scorecard-weekly-template.md`。
+- 首期周报样例已创建：`docs/alignment-scorecard-weekly-2026-05-28.md`。
 
 退出条件：
 
