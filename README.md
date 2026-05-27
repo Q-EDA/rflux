@@ -284,6 +284,19 @@ This stages the current runner's `rflux` CLI binary, wheel artifact(s), build-in
 
 For candidate go / no-go review, use [docs/release-artifact-readiness-checklist.md](./docs/release-artifact-readiness-checklist.md).
 
+For release-note drafting and final decision recording, also use
+[docs/release-notes-template.md](./docs/release-notes-template.md)
+and
+[docs/release-review-record-template.md](./docs/release-review-record-template.md).
+
+When release scope touches Week 3 timing/verify/sim baseline inputs, thresholds, or summary logic, run:
+
+```bash
+uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0
+```
+
+Then attach outputs under `target/week3-quality-pipeline/review/` as release evidence.
+
 ### 4. Internal vs External waveform quick compare
 
 Use the helper script to compare internal transient CSV traces against an external simulator run on the same deck:
