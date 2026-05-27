@@ -118,6 +118,10 @@ jobs:
         run: |
           uv run pytest python/tests/test_promote_waveform_approved_baseline.py -q
 
+      - name: Waveform baseline readiness helper smoke
+        run: |
+          uv run pytest python/tests/test_check_waveform_baseline_status.py -q
+
       - name: External warning helper smoke
         run: |
           uv run pytest python/tests/test_external_warning_manifest_runner.py -q

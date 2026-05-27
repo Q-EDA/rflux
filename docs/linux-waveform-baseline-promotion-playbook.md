@@ -58,6 +58,12 @@ Expected behavior:
 - Gate runs strict no-regression against the promoted Linux baseline.
 - No auto-downgrade notice appears.
 
+Optional machine-check command for baseline readiness:
+
+```bash
+uv run python python/scripts/check_waveform_baseline_status.py --platform linux --require-ready --json-output target/waveform-compare-linux/linux-baseline-status.json
+```
+
 ## 6. Review checklist linkage
 
 - Record baseline decision in `docs/sim-release-readiness-checklist.md`.
