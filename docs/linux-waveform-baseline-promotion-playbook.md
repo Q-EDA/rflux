@@ -34,6 +34,16 @@ Expected artifact from the run:
 After a reviewed green run, download/extract artifacts so the candidate files are available locally, then run:
 
 ```bash
+uv run python python/scripts/check_phase_b_artifact_bundle.py \
+  --artifact-dir target/waveform-compare-linux \
+  --linux-status-json target/waveform-baseline-status/linux.local.json \
+  --json-output target/waveform-compare-linux/phase-b-artifact-check.json \
+  --require-ready
+```
+
+If the checker reports `phase_b_promotion_ready=true`, run:
+
+```bash
 uv run python python/scripts/promote_waveform_approved_baseline.py \
   --platform linux \
   --candidate-json target/waveform-compare-linux/waveform_compare_summary.candidate-baseline.json \

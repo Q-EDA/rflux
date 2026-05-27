@@ -122,6 +122,10 @@ jobs:
         run: |
           uv run pytest python/tests/test_check_waveform_baseline_status.py -q
 
+      - name: Phase B artifact bundle helper smoke
+        run: |
+          uv run pytest python/tests/test_check_phase_b_artifact_bundle.py -q
+
       - name: Snapshot waveform baseline readiness status
         run: |
           uv run python python/scripts/check_waveform_baseline_status.py --platform windows --json-output target/waveform-baseline-status/windows.json
