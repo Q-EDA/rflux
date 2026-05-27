@@ -74,6 +74,7 @@
 - 已在仿真发布评审清单中加入基线提升命令锚点。
 - 已新增可手动触发的 Linux waveform gate：`waveform-compare-gate-linux-optional`（workflow_dispatch）。
 - Linux gate 已默认启用 no-regression（无基线时自动降级为 validate-pass 并提示），便于从 bootstrap 平滑切换到严格门。
+- 已新增 Linux 基线提升操作手册：`docs/linux-waveform-baseline-promotion-playbook.md`。
 
 退出条件：
 

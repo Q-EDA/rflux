@@ -6,7 +6,7 @@
 Week window: 2026-05-25 to 2026-05-31
 Report date: 2026-05-28
 Owner: Core maintainers
-Git SHA (optional): f5becaf
+Git SHA (optional): 2038f73
 ```
 
 ## 2. Domain score snapshot
@@ -15,7 +15,7 @@ Git SHA (optional): f5becaf
 |---|---:|---:|---:|---|
 | Yosys-aligned core flow | 25 | 22 | +22 | Core chain and SAT anchors are in CI; CLI surface gate remains stable. |
 | Quaigh-aligned optimization | 20 | 20 | +20 | Fixture and classic example anchors are active in CI. |
-| JoSIM-aligned simulation and correlation | 30 | 25 | +25 | Windows waveform and warning manifests are gated; Linux same-platform baseline remains open. |
+| JoSIM-aligned simulation and correlation | 30 | 25 | +25 | Windows waveform and warning manifests are gated; Linux optional gate and strict-default fallback path are in place, but Linux approved baseline is still missing. |
 | Productization and release governance | 25 | 25 | +25 | Contract gates and Week3 one-command baseline gate are active. |
 | Total | 100 | 92 | +92 | Must-item gate is currently pass. |
 
@@ -42,7 +42,7 @@ Rule: any failed MUST item means alignment gate is not satisfied.
 |---|---|---|---|---|---|
 | Y-03 | PASS | CLI command surface contract gate | `.github/workflows/ci.yml` | Core maintainers | n/a |
 | Q-03 | PASS | Quaigh converter smoke | `.github/workflows/ci.yml` | Synthesis maintainers | n/a |
-| J-04 | FAIL | Linux waveform same-platform baseline + default no-regression gate | `.github/workflows/ci.yml` | Simulation maintainers | 2026-07-15 |
+| J-04 | FAIL | Linux waveform same-platform baseline + default no-regression gate | `.github/workflows/ci.yml`, `docs/linux-waveform-baseline-promotion-playbook.md` | Simulation maintainers | 2026-06-15 |
 | P-04 | PASS | release artifact helper smoke | `.github/workflows/ci.yml` | Release/QA maintainers | n/a |
 
 ## 5. Gate decision
@@ -57,7 +57,7 @@ Waivers approved by: none
 
 ```md
 Risk 1: Linux waveform baseline missing keeps JoSIM domain below full score.
-Action 1: Capture and promote linux-approved baseline and add default no-regression gate.
+Action 1: Execute docs/linux-waveform-baseline-promotion-playbook.md and promote linux-approved baseline.
 
 Risk 2: Cross-platform numeric drift may cause unstable thresholds.
 Action 2: Keep strict same-platform baseline policy and publish drift rationale in parity docs.
