@@ -38,6 +38,26 @@ def _no_regression_path(manifest: dict[str, object] | None) -> str:
     return "pending"
 
 
+def _readiness_fields(linux_status: dict[str, object] | None) -> tuple[str, str]:
+    if not isinstance(linux_status, dict):
+        return ("pending", "pending")
+
+    ready_raw = linux_status.get("baseline_ready")
+    if ready_raw is None:
+        ready_raw = linux_status.get("ready")
+
+    if ready_raw is None:
+        readiness_result = "pending"
+    else:
+        readiness_result = "pass" if bool(ready_raw) else "fail"
+
+    reason = str(linux_status.get("baseline_reason", "") or linux_status.get("reason", "")).strip()
+    if not reason:
+        reason = "unknown" if readiness_result != "pending" else "pending"
+
+    return (readiness_result, reason)
+
+
 def build_phase_b_run_record(
     *,
     record_date: str,
@@ -45,6 +65,7 @@ def build_phase_b_run_record(
     branch_commit: str,
     workflow_run_url: str,
     artifact_dir: Path,
+    linux_status_json: Path,
     output_path: Path,
 ) -> str:
     manifest_path = artifact_dir / "manifest.json"
@@ -52,7 +73,7 @@ def build_phase_b_run_record(
     candidate_json_path = artifact_dir / "waveform_compare_summary.candidate-baseline.json"
     candidate_md_path = artifact_dir / "waveform_compare_summary.candidate-baseline.md"
     validation_json_path = artifact_dir / "waveform_compare_summary.validation.json"
-    linux_status_path = artifact_dir / "linux-baseline-status.json"
+    linux_status_path = linux_status_json
 
     manifest = _load_json_if_exists(manifest_path)
     current_payload = _load_json_if_exists(current_json_path)
@@ -74,12 +95,7 @@ def build_phase_b_run_record(
     no_regression_path = _no_regression_path(manifest)
     fallback_notice = "yes" if no_regression_path == "fallback" else ("no" if no_regression_path == "strict" else "pending")
 
-    readiness_result = "pending"
-    readiness_reason = "pending"
-    if isinstance(linux_status, dict):
-        ready = bool(linux_status.get("baseline_ready", False))
-        readiness_result = "pass" if ready else "fail"
-        readiness_reason = str(linux_status.get("baseline_reason", "")) or "unknown"
+    readiness_result, readiness_reason = _readiness_fields(linux_status)
 
     j04_status = "PASS" if gate_result == "pass" and readiness_result == "pass" else "FAIL"
 
@@ -190,6 +206,12 @@ def main() -> None:
         help="Directory containing Linux waveform artifact files.",
     )
     parser.add_argument(
+        "--linux-status-json",
+        type=Path,
+        default=Path("target/waveform-baseline-status/linux.local.json"),
+        help="Path to Linux baseline status JSON used for readiness fields.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -199,6 +221,9 @@ def main() -> None:
 
     repo_root = Path(__file__).resolve().parents[2]
     artifact_dir = args.artifact_dir if args.artifact_dir.is_absolute() else (repo_root / args.artifact_dir)
+    linux_status_json = (
+        args.linux_status_json if args.linux_status_json.is_absolute() else (repo_root / args.linux_status_json)
+    )
     output_path = args.output
     if output_path is None:
         output_path = repo_root / "docs" / f"phase-b-run-record-{args.date}.md"
@@ -211,6 +236,7 @@ def main() -> None:
         branch_commit=args.branch_commit,
         workflow_run_url=args.workflow_run_url,
         artifact_dir=artifact_dir,
+        linux_status_json=linux_status_json,
         output_path=output_path,
     )
 

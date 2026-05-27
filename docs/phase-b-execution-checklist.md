@@ -21,7 +21,8 @@ Optional automation (recommended):
 ```bash
 uv run python python/scripts/generate_phase_b_run_record.py \
   --date 2026-05-28 \
-  --artifact-dir target/waveform-compare-linux \
+  --artifact-dir target/waveform-compare \
+  --linux-status-json target/waveform-baseline-status/linux.local.json \
   --output docs/phase-b-run-record-2026-05-28.md
 ```
 
