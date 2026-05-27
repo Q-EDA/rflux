@@ -56,6 +56,11 @@
 - scorecard 合入仓库并在 PR 模板中可引用。
 - 每个 `must` 项都能定位到至少一条自动化检查。
 
+阶段结论（2026-05-28）：
+
+- `已完成`。Phase A 交付（scorecard、PR 模板引用、周报模板、首期周报、J-04 机器证据锚点）已全部落地。
+- `M1` 可按“完成”状态管理；后续维护动作转入周报节奏，不再作为阻塞后续阶段启动项。
+
 ## 4.2 阶段 B：仿真对齐短板补齐（3-6 周）
 
 目标：把当前“partial”的 JoSIM 对齐推进到“声明范围内 fully aligned”。
@@ -75,6 +80,11 @@
 - 已新增可手动触发的 Linux waveform gate：`waveform-compare-gate-linux-optional`（workflow_dispatch）。
 - Linux gate 已默认启用 no-regression（无基线时自动降级为 validate-pass 并提示），便于从 bootstrap 平滑切换到严格门。
 - 已新增 Linux 基线提升操作手册：`docs/linux-waveform-baseline-promotion-playbook.md`。
+
+当前阶段状态（2026-05-28）：
+
+- `进行中`。已完成工具链与证据链准备，当前主阻塞为 Linux approved baseline 尚未提升。
+- 下一阶段执行入口：`docs/phase-b-execution-checklist.md`。
 
 退出条件：
 

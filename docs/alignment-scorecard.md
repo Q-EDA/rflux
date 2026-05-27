@@ -1,5 +1,11 @@
 # rflux Alignment Scorecard (Phase A v1)
 
+## 0. Stage status
+
+- Phase A: completed (2026-05-28)
+- Phase B: in progress (J-04 closure)
+- Phase B execution checklist: `docs/phase-b-execution-checklist.md`
+
 ## 1. Purpose
 
 This scorecard turns alignment progress into machine-checkable items.
