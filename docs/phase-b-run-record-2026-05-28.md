@@ -7,7 +7,7 @@ Use this record to track Linux waveform gate execution and J-04 closure evidence
 ```md
 Date: 2026-05-28
 Operator: Core maintainers
-Branch/commit: main@8358c04
+Branch/commit: main@a450c03
 Workflow run URL: pending
 ```
 
@@ -35,7 +35,7 @@ linux baseline status json: C:/Users/lilu/works/rflux/target/waveform-baseline-s
 ## 4. Gate outcome
 
 ```md
-Workflow job result: fail
+Workflow job result: pending
 No-regression path used: pending
 Fallback notice observed: pending
 Failure reason (if any):
@@ -61,6 +61,12 @@ uv run python python/scripts/check_waveform_baseline_status.py --platform linux 
 Result: fail
 Reason: missing baseline json
 status json path: C:/Users/lilu/works/rflux/target/waveform-baseline-status/linux.local.json
+
+Comparison precheck:
+- command: uv run python python/scripts/check_waveform_baseline_status.py --platform windows --json-output target/waveform-baseline-status/windows.local.json
+- result: pass
+- reason: baseline ready
+- status json path: C:/Users/lilu/works/rflux/target/waveform-baseline-status/windows.local.json
 ```
 
 ## 7. Scorecard update
@@ -82,6 +88,10 @@ Owner: Simulation maintainers
 ETA: pending
 
 Action 2: Promote linux-approved baseline and rerun strict no-regression verification.
+Owner: Simulation maintainers
+ETA: pending
+
+Action 3: Run `waveform-compare-gate-linux-optional` and archive `waveform_compare_summary.candidate-baseline.{json,md}` for promotion input.
 Owner: Simulation maintainers
 ETA: pending
 ```

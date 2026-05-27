@@ -10,6 +10,18 @@ Close J-04 by turning Linux waveform path from "optional bootstrap" into stable 
 - Linux gate path: implemented (`waveform-compare-gate-linux-optional`).
 - Linux baseline readiness: currently not ready (missing approved baseline files).
 
+Precheck commands (run before dispatching Linux gate):
+
+```bash
+uv run python python/scripts/check_waveform_baseline_status.py --platform windows --json-output target/waveform-baseline-status/windows.local.json
+uv run python python/scripts/check_waveform_baseline_status.py --platform linux --json-output target/waveform-baseline-status/linux.local.json
+```
+
+Expected precheck state before J-04 closure:
+
+- Windows: `baseline_ready=True`
+- Linux: `baseline_ready=True` (if `False`, complete step 1-5 first)
+
 ## 3. Execution steps
 
 Before running steps, create a run record from:

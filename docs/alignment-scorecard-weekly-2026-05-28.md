@@ -6,7 +6,7 @@
 Week window: 2026-05-25 to 2026-05-31
 Report date: 2026-05-28
 Owner: Core maintainers
-Git SHA (optional): 2038f73
+Git SHA (optional): a450c03
 ```
 
 ## 2. Domain score snapshot
@@ -42,7 +42,7 @@ Rule: any failed MUST item means alignment gate is not satisfied.
 |---|---|---|---|---|---|
 | Y-03 | PASS | CLI command surface contract gate | `.github/workflows/ci.yml` | Core maintainers | n/a |
 | Q-03 | PASS | Quaigh converter smoke | `.github/workflows/ci.yml` | Synthesis maintainers | n/a |
-| J-04 | FAIL | Linux waveform same-platform baseline + default no-regression gate | `.github/workflows/ci.yml`, `docs/linux-waveform-baseline-promotion-playbook.md` | Simulation maintainers | 2026-06-15 |
+| J-04 | FAIL | Linux waveform same-platform baseline + default no-regression gate; local precheck shows linux baseline missing while windows baseline ready (`uv run python python/scripts/check_waveform_baseline_status.py --platform linux --json-output target/waveform-baseline-status/linux.local.json`, `uv run python python/scripts/check_waveform_baseline_status.py --platform windows --json-output target/waveform-baseline-status/windows.local.json`) | `.github/workflows/ci.yml`, `docs/linux-waveform-baseline-promotion-playbook.md`, `target/waveform-baseline-status/linux.local.json`, `target/waveform-baseline-status/windows.local.json` | Simulation maintainers | 2026-06-15 |
 | P-04 | PASS | release artifact helper smoke | `.github/workflows/ci.yml` | Release/QA maintainers | n/a |
 
 ## 5. Gate decision
