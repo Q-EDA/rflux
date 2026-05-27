@@ -99,11 +99,20 @@
 - 已新增 `python/scripts/summarize_quality_baseline_results.py`，用于按阈值清单汇总 timing / verify / sim 指标并输出 JSON + Markdown 评审摘要。
 - 已新增阈值清单 `python/tests/benchmarks/week3/quality_thresholds.json`、黄金样例 `python/tests/benchmarks/week3/quality_results.golden.json`，以及单测 `python/tests/test_quality_baseline_summary_utils.py` / `python/tests/test_quality_baseline_summary_runner.py`。
 - 已新增 `python/tests/benchmarks/week3/quality_summary.approved-baseline.json`，用于 `--previous-summary-json` no-regression 校验。
+- 已新增 `python/scripts/prepare_quality_baseline_artifacts.py`，用于把 Week 3 质量基线评审输入与摘要统一打包为 review bundle（current / approved-baseline / candidate-baseline / validation / manifest）。
+- 已新增 `python/scripts/collect_quality_baseline_results.py`，用于从 timing / verify / sim 输入报告标准化生成 `quality-baseline-results`（当前提供 week3 golden 输入样例）。
+- 已新增 `python/scripts/generate_week3_golden_results.py`，用于一键串联 `collect + summarize + prepare_artifacts`，生成 Week 3 评审输出与 review bundle。
 - 主 CI 已新增显式 smoke anchor：
   - `uv run pytest python/tests/test_quality_baseline_summary_utils.py -q`
   - `uv run pytest python/tests/test_quality_baseline_summary_runner.py -q`
   - `uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.json --summary-md target/week3-quality/quality_summary.current.md --validate-pass`
   - `uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.with-history.json --summary-md target/week3-quality/quality_summary.current.with-history.md --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0`
+  - `uv run pytest python/tests/test_prepare_quality_baseline_artifacts.py -q`
+  - `uv run pytest python/tests/test_quality_baseline_result_collector.py -q`
+  - `uv run pytest python/tests/test_generate_week3_golden_results.py -q`
+  - `uv run python python/scripts/collect_quality_baseline_results.py --timing-report python/tests/benchmarks/week3/inputs/timing_report.golden.json --verify-report python/tests/benchmarks/week3/inputs/verify_report.golden.json --sim-summary python/tests/benchmarks/week3/inputs/sim_summary.golden.json --output target/week3-quality/quality_results.generated.json --check-against python/tests/benchmarks/week3/quality_results.golden.json`
+  - `uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0`
+  - `uv run python python/scripts/prepare_quality_baseline_artifacts.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --artifact-dir target/week3-quality-review --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0`
 
 ### Week 4：诊断与支持闭环（P2）
 

@@ -29,6 +29,7 @@ Change scope:
 - [ ] Run CLI command surface contract check (`export_cli_command_surface.py --check`) when the candidate touches `crates/cli` command/arg surface.
 - [ ] Run Python API public contract check (`export_python_api_surface.py --check`) when the candidate touches `python/rflux` public symbols.
 - [ ] Run report schema surface contract check (`export_report_schema_surface.py --check`) when the candidate touches CLI report JSON or artifact manifest schemas.
+- [ ] Run Week 3 quality baseline one-command check (`generate_week3_golden_results.py --validate-pass --validate-no-regression`) when the candidate touches week3 timing/verify/sim baseline inputs, thresholds, or summary logic.
 - [ ] Preserve the exact build command lines used for the candidate bundle.
 
 Recommended commands:
@@ -40,6 +41,7 @@ uv run python python/scripts/prepare_release_artifacts.py --output-dir target/re
 uv run python python/scripts/export_cli_command_surface.py --check
 uv run python python/scripts/export_python_api_surface.py --check
 uv run python python/scripts/export_report_schema_surface.py --check
+uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0
 ```
 
 The candidate artifact helper also has an explicit CI smoke anchor:
@@ -48,6 +50,8 @@ The candidate artifact helper also has an explicit CI smoke anchor:
 - `uv run pytest python/tests/test_cli_command_surface_contract.py -q`
 - `uv run pytest python/tests/test_python_api_surface_contract.py -q`
 - `uv run pytest python/tests/test_report_schema_surface_contract.py -q`
+- `uv run pytest python/tests/test_generate_week3_golden_results.py -q`
+- `uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0`
 
 ## 3. Evidence package
 
@@ -59,6 +63,7 @@ The candidate artifact helper also has an explicit CI smoke anchor:
 - [ ] When `crates/cli` command/arg surface changed, attach or archive `python/tests/contracts/cli_command_surface.json` and record contract diff summary.
 - [ ] When `python/rflux` public surface changed, attach or archive `python/tests/contracts/python_api_surface.json` and record contract diff summary.
 - [ ] When report JSON/manifest kind-schema surface changed, attach or archive `python/tests/contracts/report_schema_surface.json` and record contract diff summary.
+- [ ] When Week 3 baseline workflow changed, attach或归档 `target/week3-quality-pipeline/review/manifest.json`、`target/week3-quality-pipeline/review/quality_summary.validation.json` 与 `target/week3-quality-pipeline/review/quality_summary.current.md`.
 
 Minimum evidence record:
 
@@ -75,6 +80,9 @@ Python API surface baseline path:
 Python API diff summary:
 Report schema surface baseline path:
 Report schema surface diff summary:
+Week3 pipeline manifest path:
+Week3 pipeline validation path:
+Week3 pipeline summary markdown path:
 ```
 
 ## 4. Compatibility and installability review

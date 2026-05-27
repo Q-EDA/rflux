@@ -220,6 +220,7 @@
 10. 触及 Python facade 公共接口的候选版本，评审前必须运行 `uv run python python/scripts/export_python_api_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 11. 触及 CLI 命令/参数面的候选版本，评审前必须运行 `uv run python python/scripts/export_cli_command_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 12. 触及 JSON report kind/schema surface 的候选版本，评审前必须运行 `uv run python python/scripts/export_report_schema_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
+13. 若候选版本触及 Week 3 质量基线输入（timing/verify/sim）或阈值/汇总逻辑，评审前必须运行 `uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0`，并附带生成的 review bundle 作为评审证据。
 
 当前候选发布构建也已有显式 CI smoke anchor：
 
@@ -227,6 +228,8 @@
 - `uv run pytest python/tests/test_python_api_surface_contract.py -q`
 - `uv run pytest python/tests/test_cli_command_surface_contract.py -q`
 - `uv run pytest python/tests/test_report_schema_surface_contract.py -q`
+- `uv run pytest python/tests/test_generate_week3_golden_results.py -q`
+- `uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0`
 
 当前跨平台最小质量门也已有显式 CI smoke anchor：
 

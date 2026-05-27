@@ -141,6 +141,50 @@ jobs:
           uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.json --summary-md target/week3-quality/quality_summary.current.md --validate-pass
           uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.with-history.json --summary-md target/week3-quality/quality_summary.current.with-history.md --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0
 
+      - name: Quality baseline artifact prep smoke
+        run: |
+          uv run pytest python/tests/test_prepare_quality_baseline_artifacts.py -q
+          uv run pytest python/tests/test_quality_baseline_result_collector.py -q
+          uv run pytest python/tests/test_generate_week3_golden_results.py -q
+          uv run python python/scripts/collect_quality_baseline_results.py --timing-report python/tests/benchmarks/week3/inputs/timing_report.golden.json --verify-report python/tests/benchmarks/week3/inputs/verify_report.golden.json --sim-summary python/tests/benchmarks/week3/inputs/sim_summary.golden.json --output target/week3-quality/quality_results.generated.json --check-against python/tests/benchmarks/week3/quality_results.golden.json
+          uv run python python/scripts/prepare_quality_baseline_artifacts.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --artifact-dir target/week3-quality-review --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0 --github-workflow "${{ github.workflow }}" --github-job "checks" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+          uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0 --github-workflow "${{ github.workflow }}" --github-job "checks" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload Week 3 quality artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: week3-quality-baseline
+          if-no-files-found: error
+          path: |
+            target/week3-quality/quality_summary.current.json
+            target/week3-quality/quality_summary.current.md
+            target/week3-quality/quality_summary.current.with-history.json
+            target/week3-quality/quality_summary.current.with-history.md
+            target/week3-quality/quality_results.generated.json
+            target/week3-quality-review/quality_summary.current.json
+            target/week3-quality-review/quality_summary.current.md
+            target/week3-quality-review/quality_summary.approved-baseline.json
+            target/week3-quality-review/quality_summary.candidate-baseline.json
+            target/week3-quality-review/quality_summary.validation.json
+            target/week3-quality-review/manifest.json
+            target/week3-quality-review/README.txt
+            target/week3-quality-pipeline/quality_results.generated.json
+            target/week3-quality-pipeline/quality_summary.current.json
+            target/week3-quality-pipeline/quality_summary.current.md
+            target/week3-quality-pipeline/review/quality_summary.current.json
+            target/week3-quality-pipeline/review/quality_summary.current.md
+            target/week3-quality-pipeline/review/quality_summary.approved-baseline.json
+            target/week3-quality-pipeline/review/quality_summary.candidate-baseline.json
+            target/week3-quality-pipeline/review/quality_summary.validation.json
+            target/week3-quality-pipeline/review/manifest.json
+            target/week3-quality-pipeline/review/README.txt
+            python/tests/benchmarks/week3/quality_thresholds.json
+            python/tests/benchmarks/week3/quality_results.golden.json
+            python/tests/benchmarks/week3/quality_summary.approved-baseline.json
+            python/tests/benchmarks/week3/inputs/timing_report.golden.json
+            python/tests/benchmarks/week3/inputs/verify_report.golden.json
+            python/tests/benchmarks/week3/inputs/sim_summary.golden.json
+
       - name: Upload SAT and synth metric artifacts
         uses: actions/upload-artifact@v4
         with:

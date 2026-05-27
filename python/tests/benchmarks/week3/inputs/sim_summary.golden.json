@@ -1,0 +1,11 @@
+{
+  "failures": 0,
+  "decks": [
+    {
+      "deck": "week3_smoke.cir",
+      "summary": "PASS",
+      "worst_max_abs_v": 0.0011,
+      "failing_nodes": []
+    }
+  ]
+}
