@@ -163,8 +163,8 @@
 | `uv run pytest` | 正式验证 | 默认 CI 覆盖。 |
 | Windows 核心 smoke（CLI） | 正式验证 | `core-smoke-windows` 直接锚定 `lint-input / compile-netlist / check-equivalence` 三条命令链路。 |
 | Windows 核心 smoke（Python） | 正式验证 | `core-smoke-windows` 运行 `python/tests/test_basic.py` 的最小子集（包版本、结构化 API 重导出、simulate_file 路径）。 |
-| 外部 waveform compare | 受限支持 | 手动触发工作流，可选执行。 |
-| 多平台矩阵 | 受限支持 | 当前具备 Ubuntu 默认检查 + Windows 核心 smoke；尚未扩展到 macOS 或完整对称矩阵。 |
+| 外部 waveform compare | 受限支持 | Windows `waveform-compare-gate` 已默认执行；Linux `waveform-compare-gate-linux-optional` 已可手动触发并支持严格 no-regression（无 Linux baseline 时自动降级为 validate-pass）。 |
+| 多平台矩阵 | 受限支持 | 当前具备 Ubuntu 默认检查 + Windows 核心 smoke + Windows 默认 waveform gate + Linux 可选 waveform gate；尚未扩展到 macOS 或形成完整对称矩阵。 |
 | nightly fuzz / benchmark / compatibility suite | 实验性 | 当前未建立。 |
 
 ## 11. 当前不承诺事项

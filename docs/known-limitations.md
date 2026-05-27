@@ -110,7 +110,7 @@
 
 ## 10. 平台与分发限制
 
-- 当前默认 CI 已覆盖 Ubuntu 主检查、Windows 核心 smoke，以及 Windows waveform parity gate；但仍缺 macOS 与 Linux waveform same-platform baseline 的完整矩阵闭环。
+- 当前默认 CI 已覆盖 Ubuntu 主检查、Windows 核心 smoke，以及 Windows waveform parity gate；Linux waveform gate 目前已可手动触发，并默认尝试 no-regression（当缺少 Linux same-platform baseline 时会自动降级为 validate-pass）。
 - 平台验证仍以最小核心链路为主，尚未形成 Ubuntu/Windows/macOS 对称的全流程质量门。
 - 仓库尚未提供正式预编译 wheel 和 CLI 二进制对外发布承诺；当前 `release-artifacts-optional` 仍用于内部评审用的当前 runner wheel / CLI bundle，而不是正式发布渠道。
 
