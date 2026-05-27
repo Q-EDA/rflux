@@ -18,6 +18,7 @@
 ## 3. 当前证据
 
 - 自动化输出：`rflux-sim` 已有针对 allowlist、环境变量隔离、独立临时运行目录，以及成功后输出副本与运行目录清理、失败保留的回归测试。
+- 自动化输出：`python/scripts/cleanup_external_run_artifacts.py` 可对保留的失败目录执行 dry-run 或最终删除；默认保留期为 7 天，便于复审后再清理。
 - 人工核对来源：`docs/external-command-policy.md`、`docs/security-compliance.md`、`docs/third-party-risk-register.md`。
 - 当前已知限制：外部仿真路径仍属于受信任操作者接口；不应作为不受控用户输入面。
 
@@ -48,6 +49,6 @@
 
 - 关闭条件：形成外部执行策略配置、签名或来源验证方案，以及更明确的输出文件生命周期约束
 - 跟踪动作：
-  - 继续补外部输出保留策略的最终归档规则（例如失败目录何时手动清理）
+  - 复审后使用 `python/scripts/cleanup_external_run_artifacts.py` 清理过期失败目录
   - 若引入新外部工具，必须新增独立风险记录
 - 相关文档更新：`docs/external-command-policy.md`、`docs/security-compliance.md`、`docs/third-party-risk-register.md`

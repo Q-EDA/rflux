@@ -54,6 +54,8 @@
 - 更明确的外部输出文件 allowlist / retain policy（当前策略：成功清理，失败保留）
 - 面向多外部仿真器的策略扩展机制
 
+对于当前失败保留目录，默认建议是：保留 7 天用于复审；复审完成后使用 `python/scripts/cleanup_external_run_artifacts.py --base-temp-dir <tempdir> --delete` 做最终清理。默认无 `--delete` 时只做 dry-run 报告。
+
 ## 5. 变更规则
 
 任何新增或放宽外部命令策略的改动，至少必须同时满足：
