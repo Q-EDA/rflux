@@ -4,6 +4,8 @@ Use this checklist for any candidate change that intends to produce or review CL
 
 The goal is to turn candidate artifact generation into a release decision record rather than an ad-hoc build snapshot.
 
+For release note content and final go/no-go consolidation, pair this checklist with [release-notes-template.md](./release-notes-template.md) and [release-review-record-template.md](./release-review-record-template.md).
+
 ## 1. Candidate identity
 
 - [ ] Record candidate commit, branch, date, and operator.
@@ -63,7 +65,7 @@ The candidate artifact helper also has an explicit CI smoke anchor:
 - [ ] When `crates/cli` command/arg surface changed, attach or archive `python/tests/contracts/cli_command_surface.json` and record contract diff summary.
 - [ ] When `python/rflux` public surface changed, attach or archive `python/tests/contracts/python_api_surface.json` and record contract diff summary.
 - [ ] When report JSON/manifest kind-schema surface changed, attach or archive `python/tests/contracts/report_schema_surface.json` and record contract diff summary.
-- [ ] When Week 3 baseline workflow changed, attach或归档 `target/week3-quality-pipeline/review/manifest.json`、`target/week3-quality-pipeline/review/quality_summary.validation.json` 与 `target/week3-quality-pipeline/review/quality_summary.current.md`.
+- [ ] When Week 3 baseline workflow changed, attach or archive `target/week3-quality-pipeline/review/manifest.json`, `target/week3-quality-pipeline/review/quality_summary.validation.json`, and `target/week3-quality-pipeline/review/quality_summary.current.md`.
 
 Minimum evidence record:
 

@@ -209,7 +209,7 @@
 在正式建立发布流水线前，先按以下最小机制执行：
 
 1. 每月生成 1 个内部候选版本。
-2. 所有候选版本附带 release notes 草案。
+2. 所有候选版本附带 release notes 草案，建议使用 [release-notes-template.md](./release-notes-template.md)。
 3. 所有公共契约变更必须更新文档。
 4. 不允许在无说明情况下改变默认行为。
 5. 如果候选版本包含 `sim`、JoSIM 对照脚本或 phase-6 阈值清单改动，必须附带 waveform compare 当前 summary、基线来源说明，以及在存在同平台 approved baseline 时的 no-regression 结论或豁免原因；若变更触及 unsupported-warning contract，也必须同时附带 external-warning review bundle（summary + manifest）。
@@ -217,6 +217,7 @@
 7. 文档、示例或发布门禁中出现的新命令，必须落到已有 CI smoke job 或新增受控 workflow step，不能只停留在说明文字里。
 8. 候选发布产物当前应通过手动触发的 `release-artifacts-optional` workflow job 生成，统一产出当前 runner 上的 CLI 候选二进制、Python wheel、构建输入副本和 manifest，而不是临时手工拼接命令。
 9. 候选发布产物评审应按 [release-artifact-readiness-checklist.md](./release-artifact-readiness-checklist.md) 留存 go / no-go 记录。
+9.1 评审记录建议使用 [release-review-record-template.md](./release-review-record-template.md) 汇总命令、证据、签署人与最终结论。
 10. 触及 Python facade 公共接口的候选版本，评审前必须运行 `uv run python python/scripts/export_python_api_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 11. 触及 CLI 命令/参数面的候选版本，评审前必须运行 `uv run python python/scripts/export_cli_command_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 12. 触及 JSON report kind/schema surface 的候选版本，评审前必须运行 `uv run python python/scripts/export_report_schema_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
