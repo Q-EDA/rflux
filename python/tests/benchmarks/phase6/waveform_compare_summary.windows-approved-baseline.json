@@ -1563,6 +1563,27 @@
       ]
     },
     {
+      "deck": "pulse_alias_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Pulse-driven passive RC smoke deck used to keep alias-style `PULSE(low=... high=... delay=... rise=... fall=... width=... period=... cycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.00030860669992418383
+        },
+        {
+          "node": "out",
+          "max_abs_v": 3.239974998755189e-05,
+          "rms_v": 1.9651729936937183e-05
+        }
+      ]
+    },
+    {
       "deck": "pulse_keyword_comma_source_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -2004,7 +2025,7 @@
     },
     {
       "category": "source-waveform",
-      "deck_count": 24,
+      "deck_count": 25,
       "failures": 0,
       "worst_max_abs_v": 0.0015877853,
       "worst_deck": "sin_space_before_paren_source_smoke.cir",
@@ -2063,7 +2084,7 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "pulse_keyword_comma_source_smoke.cir",
+        "deck": "pulse_alias_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
         "current_worst_max_abs_v": 0.001,

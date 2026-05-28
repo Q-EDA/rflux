@@ -1,0 +1,6 @@
+.title pulse alias source smoke
+V1 in 0 PULSE(low=0 high=1m delay=1p rise=0.2p fall=0.2p width=2p period=4p cycles=2)
+R1 in out 10
+C1 out 0 1p
+.tran 0.5p 10p
+.end
