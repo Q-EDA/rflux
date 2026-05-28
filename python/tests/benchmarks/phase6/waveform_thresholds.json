@@ -364,6 +364,11 @@
     "category": "source-waveform",
     "rationale": "Exponential passive RC smoke deck used to keep comma-separated keyword-style `EXP(v1=..., v2=..., td1=..., tau1=..., td2=..., tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
   },
+  "exp_keyword_mixed_case_comma_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Exponential passive RC smoke deck used to keep mixed-case comma-separated keyword-style `eXp(v1=..., v2=..., td1=..., tau1=..., td2=..., tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
   "sin_keyword_source_smoke.cir": {
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",
