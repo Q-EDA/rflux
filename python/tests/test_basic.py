@@ -1816,6 +1816,40 @@ def test_simulate_text_internal_transient_supports_exp_source():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_supports_keyword_exp_source():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 EXP(v1=0 v2=1m td1=1p tau1=0.5p td2=4p tau2=0.5p)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 6
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_supports_keyword_pulse_source():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PULSE(v1 = 0 v2 = 1m td = 1p tr = 0.2p tf = 0.2p pw = 2p per = 4p ncycles = 2)\n"
+        "R1 in out 10\n"
+        "C1 out 0 1p\n"
+        ".tran 0.5p 10p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 20
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_supports_inductor():
     report = rflux.simulate_text(
         ".title demo\n"
@@ -2078,6 +2112,23 @@ def test_simulate_text_internal_transient_supports_sin_damping_and_phase():
     report = rflux.simulate_text(
         ".title demo\n"
         "V1 in 0 SIN(0,1m,100g,0,300g,90)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_supports_keyword_sin_source():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 SIN(vo=0 va=1m freq=100g td=0 theta=300g phi=90)\n"
         "R1 in out 1\n"
         "C1 out 0 1p\n"
         ".tran 1p 5p\n"

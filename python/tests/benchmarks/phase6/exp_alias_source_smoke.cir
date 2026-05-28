@@ -1,0 +1,6 @@
+.title exp alias source smoke
+V1 in 0 EXP(low=0 high=1m delay1=1p tau_rise=0.5p delay2=4p tau_fall=0.5p)
+R1 in out 1
+C1 out 0 1p
+.tran 1p 6p
+.end

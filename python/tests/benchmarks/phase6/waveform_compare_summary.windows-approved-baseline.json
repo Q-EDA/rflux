@@ -2,6 +2,48 @@
   "failures": 0,
   "decks": [
     {
+      "deck": "exp_alias_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Exponential passive RC smoke deck used to keep alias-style `EXP(low=... high=... delay1=... tau_rise=... delay2=... tau_fall=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.00036928551908405673,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 0.00036928551908405673,
+          "rms_v": 0.00014811408802589067
+        },
+        {
+          "node": "in",
+          "max_abs_v": 0.0001167295610410281,
+          "rms_v": 4.41196270234779e-05
+        }
+      ]
+    },
+    {
+      "deck": "exp_keyword_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Exponential passive RC smoke deck used to keep keyword-style `EXP(v1=... v2=... td1=... tau1=... td2=... tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.00036928551908405673,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 0.00036928551908405673,
+          "rms_v": 0.00014811408802589067
+        },
+        {
+          "node": "in",
+          "max_abs_v": 0.0001167295610410281,
+          "rms_v": 4.41196270234779e-05
+        }
+      ]
+    },
+    {
       "deck": "exp_rc_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -1416,6 +1458,27 @@
       ]
     },
     {
+      "deck": "pulse_keyword_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Pulse-driven passive RC smoke deck used to keep keyword-style `PULSE(v1=... v2=... td=... tr=... tf=... pw=... per=... ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.00030860669992418383
+        },
+        {
+          "node": "out",
+          "max_abs_v": 3.239974998755189e-05,
+          "rms_v": 1.9651729936937183e-05
+        }
+      ]
+    },
+    {
       "deck": "pulse_rc_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -1458,6 +1521,69 @@
       ]
     },
     {
+      "deck": "sin_alias_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sinusoidal passive RC smoke deck used to keep alias-style `SIN(offset=... amplitude=... f=... td=... damping=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.0004083344083628409
+        },
+        {
+          "node": "out",
+          "max_abs_v": 0.0004,
+          "rms_v": 0.00017990521421489255
+        }
+      ]
+    },
+    {
+      "deck": "sin_keyword_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sinusoidal passive RC smoke deck used to keep keyword-style `SIN(vo=... va=... freq=... td=... theta=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.0004083344083628409
+        },
+        {
+          "node": "out",
+          "max_abs_v": 0.0004,
+          "rms_v": 0.00017990521421489255
+        }
+      ]
+    },
+    {
+      "deck": "sin_mixed_case_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sinusoidal passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `sIn(...)` spelling in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.0015877853,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.0015877853,
+          "rms_v": 0.001042517962201193
+        },
+        {
+          "node": "out",
+          "max_abs_v": 0.0014590299146210602,
+          "rms_v": 0.0007971533474089004
+        }
+      ]
+    },
+    {
       "deck": "sin_rc_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -1475,6 +1601,27 @@
           "node": "out",
           "max_abs_v": 0.0003299732441949661,
           "rms_v": 0.0001841984202613427
+        }
+      ]
+    },
+    {
+      "deck": "sin_space_before_paren_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sinusoidal passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `SIN (...)` in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.0015877853,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.0015877853,
+          "rms_v": 0.001042517962201193
+        },
+        {
+          "node": "out",
+          "max_abs_v": 0.0014590299146210602,
+          "rms_v": 0.0007971533474089004
         }
       ]
     },
@@ -1584,28 +1731,28 @@
     },
     {
       "category": "source-waveform",
-      "deck_count": 4,
+      "deck_count": 11,
       "failures": 0,
-      "worst_max_abs_v": 0.0013968022943749473,
-      "worst_deck": "sin_rc_smoke.cir",
+      "worst_max_abs_v": 0.0015877853,
+      "worst_deck": "sin_space_before_paren_source_smoke.cir",
       "top_hotspots": [
         {
-          "deck": "sin_rc_smoke.cir",
+          "deck": "sin_mixed_case_source_smoke.cir",
           "node": "in",
-          "max_abs_v": 0.0013968022943749473,
-          "rms_v": 0.000993155760501279
+          "max_abs_v": 0.0015877853,
+          "rms_v": 0.001042517962201193
         },
         {
-          "deck": "sin_rc_smoke.cir",
-          "node": "out",
-          "max_abs_v": 0.0003299732441949661,
-          "rms_v": 0.0001841984202613427
+          "deck": "sin_space_before_paren_source_smoke.cir",
+          "node": "in",
+          "max_abs_v": 0.0015877853,
+          "rms_v": 0.001042517962201193
         },
         {
-          "deck": "pulse_rc_smoke.cir",
+          "deck": "sin_mixed_case_source_smoke.cir",
           "node": "out",
-          "max_abs_v": 6.47467391730817e-05,
-          "rms_v": 2.4403172724961046e-05
+          "max_abs_v": 0.0014590299146210602,
+          "rms_v": 0.0007971533474089004
         }
       ]
     },
@@ -1643,22 +1790,31 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "lib_sec_header_equals_attached_value_smoke.cir",
+        "deck": "sin_mixed_case_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
-        "current_worst_max_abs_v": 2.7894667572484692e-06,
+        "current_worst_max_abs_v": 0.0015877853,
         "previous_worst_max_abs_v": null,
         "worst_max_abs_v_delta": null
       },
       {
-        "deck": "lib_section_header_equals_spaced_value_smoke.cir",
+        "deck": "sin_space_before_paren_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
-        "current_worst_max_abs_v": 2.7894667572484692e-06,
+        "current_worst_max_abs_v": 0.0015877853,
         "previous_worst_max_abs_v": null,
         "worst_max_abs_v_delta": null
       }
     ],
-    "category_changes": []
+    "category_changes": [
+      {
+        "category": "source-waveform",
+        "current_failures": 0,
+        "previous_failures": 0,
+        "current_worst_max_abs_v": 0.0015877853,
+        "previous_worst_max_abs_v": 0.0013968022943749473,
+        "worst_max_abs_v_delta": 0.00019098300562505276
+      }
+    ]
   }
 }

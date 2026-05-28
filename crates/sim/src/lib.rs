@@ -745,6 +745,7 @@ fn prepare_external_simulator_deck(deck: &str, include_base_dir: Option<&Path>) 
             let rewritten = strip_external_tran_uic(&rewrite_external_mutual_coupling_arguments(
                 &josephson_line,
             ));
+            let rewritten = rewrite_external_source_keyword_calls(&rewritten);
             prepared.push_str(&inline_external_waveform_file_source(
                 &rewritten,
                 include_base_dir,
@@ -1815,6 +1816,254 @@ fn rewrite_external_mutual_coupling_arguments(line: &str) -> String {
         }
     }
     line.to_string()
+}
+
+fn rewrite_external_source_keyword_calls(line: &str) -> String {
+    let trimmed = strip_comment(line).trim();
+    if trimmed.is_empty() {
+        return line.to_string();
+    }
+
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 4 {
+        return line.to_string();
+    }
+    let Some(prefix) = tokens[0].chars().next() else {
+        return line.to_string();
+    };
+    if !matches!(prefix, 'V' | 'v' | 'I' | 'i') {
+        return line.to_string();
+    }
+
+    let descriptor = tokens[3..].join(" ");
+    let Some(rewritten_descriptor) = rewrite_external_source_descriptor(&descriptor) else {
+        return line.to_string();
+    };
+    format!(
+        "{} {} {} {}",
+        tokens[0], tokens[1], tokens[2], rewritten_descriptor
+    )
+}
+
+fn rewrite_external_source_descriptor(descriptor: &str) -> Option<String> {
+    if let Some(args) = parse_source_call_arguments(descriptor, "pulse") {
+        return rewrite_external_pulse_arguments(args).map(|args| format!("PULSE({args})"));
+    }
+    if let Some(args) = parse_source_call_arguments(descriptor, "exp") {
+        return rewrite_external_exp_arguments(args).map(|args| format!("EXP({args})"));
+    }
+    if let Some(args) = parse_source_call_arguments(descriptor, "sin") {
+        return rewrite_external_sin_arguments(args).map(|args| format!("SIN({args})"));
+    }
+    None
+}
+
+fn rewrite_external_pulse_arguments(args: &str) -> Option<String> {
+    let values = split_source_arguments(args);
+    let collapsed = collapse_spaced_assignments(&values);
+    if !collapsed.iter().any(|value| value.contains('=')) {
+        return None;
+    }
+
+    let mut low = None::<String>;
+    let mut high = None::<String>;
+    let mut delay = None::<String>;
+    let mut rise = None::<String>;
+    let mut fall = None::<String>;
+    let mut width = None::<String>;
+    let mut period = None::<String>;
+    let mut cycles = None::<String>;
+    for value in collapsed {
+        let (name, expr) = value.split_once('=')?;
+        if name.eq_ignore_ascii_case("v1") || name.eq_ignore_ascii_case("low") {
+            low = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("v2") || name.eq_ignore_ascii_case("high") {
+            high = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("td") || name.eq_ignore_ascii_case("delay") {
+            delay = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("tr") || name.eq_ignore_ascii_case("rise") {
+            rise = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("tf") || name.eq_ignore_ascii_case("fall") {
+            fall = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("pw") || name.eq_ignore_ascii_case("width") {
+            width = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("per") || name.eq_ignore_ascii_case("period") {
+            period = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("ncycles") || name.eq_ignore_ascii_case("cycles") {
+            cycles = Some(expr.to_string());
+            continue;
+        }
+        return None;
+    }
+
+    let mut fields = vec![low?, high?, delay?, rise?, fall?, width?];
+    if let Some(period) = period {
+        fields.push(period);
+    }
+    if let Some(cycles) = cycles {
+        if fields.len() == 6 {
+            return None;
+        }
+        fields.push(cycles);
+    }
+    Some(fields.join(" "))
+}
+
+fn rewrite_external_exp_arguments(args: &str) -> Option<String> {
+    let values = split_source_arguments(args);
+    let collapsed = collapse_spaced_assignments(&values);
+    if !collapsed.iter().any(|value| value.contains('=')) {
+        return None;
+    }
+
+    let mut initial = None::<String>;
+    let mut pulsed = None::<String>;
+    let mut rise_delay = None::<String>;
+    let mut rise_tau = None::<String>;
+    let mut fall_delay = None::<String>;
+    let mut fall_tau = None::<String>;
+    for value in collapsed {
+        let (name, expr) = value.split_once('=')?;
+        if name.eq_ignore_ascii_case("v1")
+            || name.eq_ignore_ascii_case("initial")
+            || name.eq_ignore_ascii_case("low")
+        {
+            initial = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("v2")
+            || name.eq_ignore_ascii_case("pulsed")
+            || name.eq_ignore_ascii_case("high")
+        {
+            pulsed = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("td1")
+            || name.eq_ignore_ascii_case("rise_delay")
+            || name.eq_ignore_ascii_case("delay1")
+        {
+            rise_delay = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("tau1")
+            || name.eq_ignore_ascii_case("rise_tau")
+            || name.eq_ignore_ascii_case("tau_rise")
+        {
+            rise_tau = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("td2")
+            || name.eq_ignore_ascii_case("fall_delay")
+            || name.eq_ignore_ascii_case("delay2")
+        {
+            fall_delay = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("tau2")
+            || name.eq_ignore_ascii_case("fall_tau")
+            || name.eq_ignore_ascii_case("tau_fall")
+        {
+            fall_tau = Some(expr.to_string());
+            continue;
+        }
+        return None;
+    }
+
+    Some(
+        [
+            initial?,
+            pulsed?,
+            rise_delay?,
+            rise_tau?,
+            fall_delay?,
+            fall_tau?,
+        ]
+        .join(" "),
+    )
+}
+
+fn rewrite_external_sin_arguments(args: &str) -> Option<String> {
+    let values = split_source_arguments(args);
+    let collapsed = collapse_spaced_assignments(&values);
+    if !collapsed.iter().any(|value| value.contains('=')) {
+        return None;
+    }
+
+    let mut offset = None::<String>;
+    let mut amplitude = None::<String>;
+    let mut frequency = None::<String>;
+    let mut delay = None::<String>;
+    let mut damping = None::<String>;
+    let mut phase = None::<String>;
+    for value in collapsed {
+        let (name, expr) = value.split_once('=')?;
+        if name.eq_ignore_ascii_case("vo") || name.eq_ignore_ascii_case("offset") {
+            offset = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("va") || name.eq_ignore_ascii_case("amplitude") {
+            amplitude = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("freq")
+            || name.eq_ignore_ascii_case("frequency")
+            || name.eq_ignore_ascii_case("f")
+        {
+            frequency = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("td") || name.eq_ignore_ascii_case("delay") {
+            delay = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("theta")
+            || name.eq_ignore_ascii_case("damp")
+            || name.eq_ignore_ascii_case("damping")
+        {
+            damping = Some(expr.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("phase")
+            || name.eq_ignore_ascii_case("phase_deg")
+            || name.eq_ignore_ascii_case("phi")
+        {
+            phase = Some(expr.to_string());
+            continue;
+        }
+        return None;
+    }
+
+    let mut fields = vec![offset?, amplitude?, frequency?];
+    if let Some(delay) = delay {
+        fields.push(delay);
+    }
+    if let Some(damping) = damping {
+        if fields.len() == 3 {
+            fields.push("0".to_string());
+        }
+        fields.push(damping);
+    }
+    if let Some(phase) = phase {
+        if fields.len() == 3 {
+            fields.push("0".to_string());
+        }
+        fields.push(phase);
+    }
+    Some(fields.join(" "))
 }
 
 fn strip_external_tran_uic(line: &str) -> String {
@@ -7893,6 +8142,36 @@ mod tests {
         assert!(!prepared.to_ascii_lowercase().contains("file="));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_external_simulator_deck_rewrites_keyword_exp_source_to_positional_form() {
+        let prepared = super::prepare_external_simulator_deck(
+            "V1 in 0 EXP(v1=0 v2=1m td1=1p tau1=0.5p td2=4p tau2=0.5p)\n.tran 1p 6p\n.end\n",
+            None,
+        );
+
+        assert!(prepared.contains("V1 in 0 EXP(0 1m 1p 0.5p 4p 0.5p)"));
+    }
+
+    #[test]
+    fn prepare_external_simulator_deck_rewrites_keyword_pulse_source_to_positional_form() {
+        let prepared = super::prepare_external_simulator_deck(
+            "V1 in 0 PULSE(v1 = 0 v2 = 1m td = 1p tr = 0.2p tf = 0.2p pw = 2p per = 4p ncycles = 2)\n.tran 0.5p 10p\n.end\n",
+            None,
+        );
+
+        assert!(prepared.contains("V1 in 0 PULSE(0 1m 1p 0.2p 0.2p 2p 4p 2)"));
+    }
+
+    #[test]
+    fn prepare_external_simulator_deck_rewrites_keyword_sin_source_to_positional_form() {
+        let prepared = super::prepare_external_simulator_deck(
+            "V1 in 0 SIN(vo=0 va=1m freq=100g td=0 theta=300g phi=90)\n.tran 1p 5p\n.end\n",
+            None,
+        );
+
+        assert!(prepared.contains("V1 in 0 SIN(0 1m 100g 0 300g 90)"));
     }
 
     #[test]

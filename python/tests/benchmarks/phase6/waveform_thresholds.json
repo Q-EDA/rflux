@@ -264,15 +264,50 @@
     "category": "source-waveform",
     "rationale": "Pulse-driven passive RC smoke deck used to keep a first waveform-source baseline in the JoSIM correlation gate without requiring JJ-specific semantics."
   },
+  "exp_alias_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Exponential passive RC smoke deck used to keep alias-style `EXP(low=... high=... delay1=... tau_rise=... delay2=... tau_fall=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
+  "pulse_keyword_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Pulse-driven passive RC smoke deck used to keep keyword-style `PULSE(v1=... v2=... td=... tr=... tf=... pw=... per=... ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
   "sin_rc_smoke.cir": {
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",
     "rationale": "Sinusoidal passive RC smoke deck used to keep the first continuous-wave source baseline in the same correlation gate as the pulse-driven source path."
   },
+  "sin_alias_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Sinusoidal passive RC smoke deck used to keep alias-style `SIN(offset=... amplitude=... f=... td=... damping=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
+  "sin_mixed_case_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Sinusoidal passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `sIn(...)` spelling in the thresholded waveform baseline."
+  },
+  "sin_space_before_paren_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Sinusoidal passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `SIN (...)` in the thresholded waveform baseline."
+  },
   "exp_rc_smoke.cir": {
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",
     "rationale": "Exponential passive RC smoke deck used to keep rise-and-fall source shaping in the first thresholded waveform-source baseline."
+  },
+  "exp_keyword_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Exponential passive RC smoke deck used to keep keyword-style `EXP(v1=... v2=... td1=... tau1=... td2=... tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
+  "sin_keyword_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Sinusoidal passive RC smoke deck used to keep keyword-style `SIN(vo=... va=... freq=... td=... theta=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
   },
   "pwl_file_rc_smoke.cir": {
     "max_abs_threshold_v": 0.1,

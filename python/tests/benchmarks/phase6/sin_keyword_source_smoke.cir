@@ -1,0 +1,6 @@
+.title sin keyword source smoke
+V1 in 0 SIN(vo=0 va=1m freq=100g td=0 theta=300g phi=90)
+R1 in out 1
+C1 out 0 1p
+.tran 1p 5p
+.end
