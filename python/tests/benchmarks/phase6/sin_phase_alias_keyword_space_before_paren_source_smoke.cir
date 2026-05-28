@@ -1,0 +1,9 @@
+.title sin phase alias keyword space before paren source smoke
+* Validates SIN source parsing with phase= alias and whitespace before opening paren.
+* Variant: keyword form with space before ( and phase= alias instead of phi=.
+
+V1 in 0 SIN (vo=0, va=1m, freq=100g, td=0, theta=300g, phase=90)
+R1 in out 1k
+C1 out 0 1p
+.tran 1p 5p
+.end
