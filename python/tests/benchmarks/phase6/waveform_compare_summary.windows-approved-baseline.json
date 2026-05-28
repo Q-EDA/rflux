@@ -23,6 +23,27 @@
       ]
     },
     {
+      "deck": "exp_keyword_comma_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Exponential passive RC smoke deck used to keep comma-separated keyword-style `EXP(v1=..., v2=..., td1=..., tau1=..., td2=..., tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.00036928551908405673,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 0.00036928551908405673,
+          "rms_v": 0.00014811408802589067
+        },
+        {
+          "node": "in",
+          "max_abs_v": 0.0001167295610410281,
+          "rms_v": 4.41196270234779e-05
+        }
+      ]
+    },
+    {
       "deck": "exp_keyword_mixed_case_source_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -1710,6 +1731,27 @@
       ]
     },
     {
+      "deck": "sin_keyword_comma_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sinusoidal passive RC smoke deck used to keep comma-separated keyword-style `SIN(vo=..., va=..., freq=..., td=..., theta=..., phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.0004083344083628409
+        },
+        {
+          "node": "out",
+          "max_abs_v": 0.0004,
+          "rms_v": 0.00017990521421489255
+        }
+      ]
+    },
+    {
       "deck": "sin_keyword_mixed_case_source_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -1941,7 +1983,7 @@
     },
     {
       "category": "source-waveform",
-      "deck_count": 21,
+      "deck_count": 23,
       "failures": 0,
       "worst_max_abs_v": 0.0015877853,
       "worst_deck": "sin_space_before_paren_source_smoke.cir",
@@ -2000,15 +2042,15 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "sin_keyword_mixed_case_source_smoke.cir",
+        "deck": "exp_keyword_comma_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
-        "current_worst_max_abs_v": 0.001,
+        "current_worst_max_abs_v": 0.00036928551908405673,
         "previous_worst_max_abs_v": null,
         "worst_max_abs_v_delta": null
       },
       {
-        "deck": "sin_keyword_space_before_paren_source_smoke.cir",
+        "deck": "sin_keyword_comma_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
         "current_worst_max_abs_v": 0.001,

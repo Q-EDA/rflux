@@ -1,0 +1,6 @@
+.title exp keyword comma source smoke
+V1 in 0 EXP(v1=0, v2=1m, td1=1p, tau1=0.5p, td2=4p, tau2=0.5p)
+R1 in out 1
+C1 out 0 1p
+.tran 1p 6p
+.end

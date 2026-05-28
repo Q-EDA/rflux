@@ -3,6 +3,7 @@
 | Deck | Category | Threshold (V) | Worst Max Abs (V) | Summary | Details |
 |------|----------|---------------|-------------------|---------|---------|
 | exp_alias_source_smoke.cir | source-waveform | 1.000000e-01 | 3.692855e-04 | PASS | out:3.693e-04, in:1.167e-04 |
+| exp_keyword_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 3.692855e-04 | PASS | out:3.693e-04, in:1.167e-04 |
 | exp_keyword_mixed_case_source_smoke.cir | source-waveform | 1.000000e-01 | 3.692855e-04 | PASS | out:3.693e-04, in:1.167e-04 |
 | exp_keyword_source_smoke.cir | source-waveform | 1.000000e-01 | 3.692855e-04 | PASS | out:3.693e-04, in:1.167e-04 |
 | exp_keyword_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 3.692855e-04 | PASS | out:3.693e-04, in:1.167e-04 |
@@ -80,6 +81,7 @@
 | pulse_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:3.988e-04 |
 | pwl_file_rc_smoke.cir | source-waveform | 1.000000e-01 | 8.131547e-06 | PASS | out:8.132e-06, in:1.084e-19 |
 | sin_alias_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
+| sin_keyword_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_mixed_case_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
@@ -95,12 +97,13 @@
 | hierarchical-subckt | 12 | 0 | 6.474674e-05 | nested_subckt_smoke.cir | include_chain_smoke.cir::out:6.475e-05, include_source_subckt_smoke.cir::out:6.475e-05 |
 | josephson-junction | 42 | 0 | 6.710659e-04 | include_chain_source_k_jj_subckt_smoke.cir | include_chain_source_k_jj_subckt_smoke.cir::tap:6.711e-04, jj_pi_model_smoke.cir::n1:5.945e-04 |
 | mutual-inductance | 5 | 0 | 1.680199e-04 | k_mutual_smoke.cir | include_chain_k_subckt_smoke.cir::tap:1.680e-04, include_chain_source_k_subckt_smoke.cir::tap:1.680e-04 |
-| source-waveform | 21 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
+| source-waveform | 23 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
 | transmission-delay | 5 | 0 | 1.000000e-03 | t_delay_smoke.cir | t_delay_smoke.cir::out:1.000e-03, t_delay_smoke.cir::in:1.000e-03 |
 
 ## Threshold Rationale
 
 - exp_alias_source_smoke.cir: [source-waveform] Exponential passive RC smoke deck used to keep alias-style `EXP(low=... high=... delay1=... tau_rise=... delay2=... tau_fall=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
+- exp_keyword_comma_source_smoke.cir: [source-waveform] Exponential passive RC smoke deck used to keep comma-separated keyword-style `EXP(v1=..., v2=..., td1=..., tau1=..., td2=..., tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - exp_keyword_mixed_case_source_smoke.cir: [source-waveform] Exponential passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `eXp(v1=... v2=... td1=... tau1=... td2=... tau2=...)` keyword spelling in the thresholded waveform baseline.
 - exp_keyword_source_smoke.cir: [source-waveform] Exponential passive RC smoke deck used to keep keyword-style `EXP(v1=... v2=... td1=... tau1=... td2=... tau2=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - exp_keyword_space_before_paren_source_smoke.cir: [source-waveform] Exponential passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `EXP (v1=... v2=... td1=... tau1=... td2=... tau2=...)` keyword spelling in the thresholded waveform baseline.
@@ -178,6 +181,7 @@
 - pulse_space_before_paren_source_smoke.cir: [source-waveform] Pulse-driven passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `PULSE (...)` in the thresholded waveform baseline.
 - pwl_file_rc_smoke.cir: [source-waveform] File-driven PWL passive RC smoke deck used to keep external waveform-file resolution and source playback inside the first thresholded waveform-source baseline.
 - sin_alias_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep alias-style `SIN(offset=... amplitude=... f=... td=... damping=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
+- sin_keyword_comma_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep comma-separated keyword-style `SIN(vo=..., va=..., freq=..., td=..., theta=..., phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - sin_keyword_mixed_case_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `sIn(vo=... va=... freq=... td=... theta=... phi=...)` keyword spelling in the thresholded waveform baseline.
 - sin_keyword_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep keyword-style `SIN(vo=... va=... freq=... td=... theta=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - sin_keyword_space_before_paren_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `SIN (vo=... va=... freq=... td=... theta=... phi=...)` keyword spelling in the thresholded waveform baseline.
@@ -192,7 +196,7 @@ failures: 0 (delta +0 vs previous 0)
 
 | Deck | Summary Change | Worst Max Abs Delta (V) |
 |------|----------------|-------------------------|
-| sin_keyword_mixed_case_source_smoke.cir | NEW -> PASS | n/a |
-| sin_keyword_space_before_paren_source_smoke.cir | NEW -> PASS | n/a |
+| exp_keyword_comma_source_smoke.cir | NEW -> PASS | n/a |
+| sin_keyword_comma_source_smoke.cir | NEW -> PASS | n/a |
 
 failures=0
