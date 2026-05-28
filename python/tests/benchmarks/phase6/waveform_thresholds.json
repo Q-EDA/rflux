@@ -468,5 +468,10 @@
                                                                        "category":  "source-waveform",
                                                                        "max_abs_threshold_v":  0.1,
                                                                        "rationale":  "Exponential passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `eXp (v1=... v2=... td1=... tau1=... td2=... tau2=...)` mixed-case keyword spelling in the thresholded waveform baseline."
+                                                                   },
+    "sin_keyword_mixed_case_space_before_paren_source_smoke.cir":  {
+                                                                       "category":  "source-waveform",
+                                                                       "max_abs_threshold_v":  0.1,
+                                                                       "rationale":  "Sine-wave passive RC smoke deck used to keep mixed-case keyword spelling (sIn) and space-before-paren form parsing coupled in the thresholded waveform baseline."
                                                                    }
 }

@@ -1,0 +1,9 @@
+.title sin keyword mixed case space before paren source smoke
+* Validates SIN source parsing with mixed-case keyword spelling (sIn) and whitespace before opening paren.
+* Variant: keyword form with space before ( and mixed-case keyword.
+
+V1 in 0 sIn (vo=0, va=1m, freq=100g, td=0, theta=300g)
+R1 in out 1k
+C1 out 0 1p
+.tran 1p 5p
+.end
