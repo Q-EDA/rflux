@@ -274,6 +274,11 @@
     "category": "source-waveform",
     "rationale": "Pulse-driven passive RC smoke deck used to keep keyword-style `PULSE(v1=... v2=... td=... tr=... tf=... pw=... per=... ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
   },
+  "pulse_keyword_comma_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Pulse-driven passive RC smoke deck used to keep comma-separated keyword-style `PULSE(v1=..., v2=..., td=..., tr=..., tf=..., pw=..., per=..., ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
   "pulse_keyword_mixed_case_source_smoke.cir": {
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",

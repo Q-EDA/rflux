@@ -1563,6 +1563,27 @@
       ]
     },
     {
+      "deck": "pulse_keyword_comma_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Pulse-driven passive RC smoke deck used to keep comma-separated keyword-style `PULSE(v1=..., v2=..., td=..., tr=..., tf=..., pw=..., per=..., ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.00030860669992418383
+        },
+        {
+          "node": "out",
+          "max_abs_v": 3.239974998755189e-05,
+          "rms_v": 1.9651729936937183e-05
+        }
+      ]
+    },
+    {
       "deck": "pulse_keyword_mixed_case_source_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -1983,7 +2004,7 @@
     },
     {
       "category": "source-waveform",
-      "deck_count": 23,
+      "deck_count": 24,
       "failures": 0,
       "worst_max_abs_v": 0.0015877853,
       "worst_deck": "sin_space_before_paren_source_smoke.cir",
@@ -2042,15 +2063,7 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "exp_keyword_comma_source_smoke.cir",
-        "current_summary": "PASS",
-        "previous_summary": "NEW",
-        "current_worst_max_abs_v": 0.00036928551908405673,
-        "previous_worst_max_abs_v": null,
-        "worst_max_abs_v_delta": null
-      },
-      {
-        "deck": "sin_keyword_comma_source_smoke.cir",
+        "deck": "pulse_keyword_comma_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
         "current_worst_max_abs_v": 0.001,
