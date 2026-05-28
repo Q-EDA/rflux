@@ -88,6 +88,7 @@
 | sin_keyword_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_mixed_case_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_mixed_case_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
+| sin_keyword_phase_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_keyword_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:4.000e-04 |
 | sin_mixed_case_source_smoke.cir | source-waveform | 1.000000e-01 | 1.587785e-03 | PASS | in:1.588e-03, out:1.459e-03 |
@@ -102,7 +103,7 @@
 | hierarchical-subckt | 12 | 0 | 6.474674e-05 | nested_subckt_smoke.cir | include_chain_smoke.cir::out:6.475e-05, include_source_subckt_smoke.cir::out:6.475e-05 |
 | josephson-junction | 42 | 0 | 6.710659e-04 | include_chain_source_k_jj_subckt_smoke.cir | include_chain_source_k_jj_subckt_smoke.cir::tap:6.711e-04, jj_pi_model_smoke.cir::n1:5.945e-04 |
 | mutual-inductance | 5 | 0 | 1.680199e-04 | k_mutual_smoke.cir | include_chain_k_subckt_smoke.cir::tap:1.680e-04, include_chain_source_k_subckt_smoke.cir::tap:1.680e-04 |
-| source-waveform | 28 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
+| source-waveform | 29 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
 | transmission-delay | 5 | 0 | 1.000000e-03 | t_delay_smoke.cir | t_delay_smoke.cir::out:1.000e-03, t_delay_smoke.cir::in:1.000e-03 |
 
 ## Threshold Rationale
@@ -193,6 +194,7 @@
 - sin_keyword_comma_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep comma-separated keyword-style `SIN(vo=..., va=..., freq=..., td=..., theta=..., phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - sin_keyword_mixed_case_comma_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep mixed-case comma-separated keyword-style `sIn(vo=..., va=..., freq=..., td=..., theta=..., phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - sin_keyword_mixed_case_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `sIn(vo=... va=... freq=... td=... theta=... phi=...)` keyword spelling in the thresholded waveform baseline.
+- sin_keyword_phase_comma_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep comma-separated keyword-style `SIN(vo=..., va=..., freq=..., td=..., theta=..., phase=...)` phase-alias parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - sin_keyword_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep keyword-style `SIN(vo=... va=... freq=... td=... theta=... phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - sin_keyword_space_before_paren_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `SIN (vo=... va=... freq=... td=... theta=... phi=...)` keyword spelling in the thresholded waveform baseline.
 - sin_mixed_case_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `sIn(...)` spelling in the thresholded waveform baseline.
@@ -206,6 +208,6 @@ failures: 0 (delta +0 vs previous 0)
 
 | Deck | Summary Change | Worst Max Abs Delta (V) |
 |------|----------------|-------------------------|
-| sin_keyword_mixed_case_comma_source_smoke.cir | NEW -> PASS | n/a |
+| sin_keyword_phase_comma_source_smoke.cir | NEW -> PASS | n/a |
 
 failures=0

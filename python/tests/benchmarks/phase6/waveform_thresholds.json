@@ -379,6 +379,11 @@
     "category": "source-waveform",
     "rationale": "Sinusoidal passive RC smoke deck used to keep comma-separated keyword-style `SIN(vo=..., va=..., freq=..., td=..., theta=..., phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
   },
+  "sin_keyword_phase_comma_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Sinusoidal passive RC smoke deck used to keep comma-separated keyword-style `SIN(vo=..., va=..., freq=..., td=..., theta=..., phase=...)` phase-alias parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
+  },
   "sin_keyword_mixed_case_comma_source_smoke.cir": {
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",
