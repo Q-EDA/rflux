@@ -1,0 +1,9 @@
+.title pulse keyword mixed case space before paren source smoke
+* Validates PULSE source parsing with mixed-case keyword spelling (pUlse) and whitespace before opening paren.
+* Variant: keyword form with space before ( and mixed-case keyword.
+
+V1 in 0 pUlse (v1=0, v2=1, td=0, tr=1n, tf=1n, pw=2n, per=5n)
+R1 in out 1k
+C1 out 0 1p
+.tran 1p 10p
+.end

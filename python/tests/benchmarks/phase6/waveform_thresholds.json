@@ -473,5 +473,10 @@
                                                                        "category":  "source-waveform",
                                                                        "max_abs_threshold_v":  0.1,
                                                                        "rationale":  "Sine-wave passive RC smoke deck used to keep mixed-case keyword spelling (sIn) and space-before-paren form parsing coupled in the thresholded waveform baseline."
-                                                                   }
+                                                                   },
+    "pulse_keyword_mixed_case_space_before_paren_source_smoke.cir":  {
+                                                                         "category":  "source-waveform",
+                                                                         "max_abs_threshold_v":  0.1,
+                                                                         "rationale":  "Pulse-wave passive RC smoke deck used to keep mixed-case keyword spelling (pUlse) and space-before-paren form parsing coupled in the thresholded waveform baseline."
+                                                                     }
 }
