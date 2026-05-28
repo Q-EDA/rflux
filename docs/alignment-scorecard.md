@@ -48,7 +48,7 @@ Gate rule:
 | P-01 | Productization | must | 8 | Python API surface contract remains stable under `--check`. | `python/scripts/export_python_api_surface.py` | `python/tests/test_python_api_surface_contract.py` | `checks / Python API surface contract gate` | `docs/release-policy.md` |
 | P-02 | Productization | must | 6 | Report schema surface contract remains stable under `--check`. | `python/scripts/export_report_schema_surface.py` | `python/tests/test_report_schema_surface_contract.py` | `checks / Report schema surface contract gate` | `docs/release-policy.md` |
 | P-03 | Productization | must | 6 | Week3 one-command quality baseline pipeline remains executable with no-regression check. | `python/scripts/generate_week3_golden_results.py` | `python/tests/test_generate_week3_golden_results.py` | `checks / Quality baseline artifact prep smoke` | `docs/full-alignment-plan.md` |
-| P-04 | Productization | should | 5 | Candidate release artifact helper remains green for review bundles. | `python/scripts/prepare_release_artifacts.py` | `python/tests/test_prepare_release_artifacts.py` | `checks / Release artifact helper smoke` | `docs/release-artifact-readiness-checklist.md` |
+| P-04 | Productization | should | 5 | Candidate release artifact helper remains green for review bundles. | `python/scripts/prepare_release_artifacts.py`, `python/scripts/check_release_artifact_bundle.py` | `python/tests/test_prepare_release_artifacts.py`, `python/tests/test_check_release_artifact_bundle.py` | `checks / Release artifact helper smoke`, `checks / Release artifact bundle checker smoke` | `docs/release-artifact-readiness-checklist.md` |
 
 ## 4. Current baseline snapshot (2026-05-28)
 
