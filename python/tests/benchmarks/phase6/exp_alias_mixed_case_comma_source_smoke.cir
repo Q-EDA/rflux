@@ -1,0 +1,9 @@
+.title exp alias mixed case comma source smoke
+* Validates EXP source parsing with alias arguments, mixed-case keyword spelling, and comma-separated arguments.
+* Variant: mixed-case alias form using low/high/delay1/tau_rise/delay2/tau_fall.
+
+V1 in 0 eXp(low=0, high=1, delay1=0, tau_rise=1n, delay2=1n, tau_fall=2n)
+R1 in out 1k
+C1 out 0 1p
+.tran 1p 10p
+.end
