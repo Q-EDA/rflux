@@ -1836,6 +1836,27 @@
       ]
     },
     {
+      "deck": "sin_keyword_mixed_case_comma_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sinusoidal passive RC smoke deck used to keep mixed-case comma-separated keyword-style `sIn(vo=..., va=..., freq=..., td=..., theta=..., phi=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.0004083344083628409
+        },
+        {
+          "node": "out",
+          "max_abs_v": 0.0004,
+          "rms_v": 0.00017990521421489255
+        }
+      ]
+    },
+    {
       "deck": "sin_keyword_mixed_case_source_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -2067,7 +2088,7 @@
     },
     {
       "category": "source-waveform",
-      "deck_count": 27,
+      "deck_count": 28,
       "failures": 0,
       "worst_max_abs_v": 0.0015877853,
       "worst_deck": "sin_space_before_paren_source_smoke.cir",
@@ -2126,10 +2147,10 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "exp_keyword_mixed_case_comma_source_smoke.cir",
+        "deck": "sin_keyword_mixed_case_comma_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
-        "current_worst_max_abs_v": 0.00036928551908405673,
+        "current_worst_max_abs_v": 0.001,
         "previous_worst_max_abs_v": null,
         "worst_max_abs_v_delta": null
       }
