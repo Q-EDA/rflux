@@ -19,6 +19,7 @@ Change scope:
 Rust validation command:
 Python validation command:
 Release artifact command:
+Release bundle checker command:
 CLI contract command:
 Python API contract command:
 Report schema contract command:
@@ -31,6 +32,8 @@ Week3 one-command baseline command:
 Release artifact directory:
 Release artifact manifest:
 Release artifact README:
+Release bundle checker JSON:
+Release bundle ready:
 CLI contract baseline + diff summary:
 Python API baseline + diff summary:
 Report schema baseline + diff summary:

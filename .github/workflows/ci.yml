@@ -153,6 +153,10 @@ jobs:
         run: |
           uv run pytest python/tests/test_check_release_artifact_bundle.py -q
 
+      - name: Release review record generator smoke
+        run: |
+          uv run pytest python/tests/test_generate_release_review_record.py -q
+
       - name: Python API surface contract smoke
         run: |
           uv run pytest python/tests/test_python_api_surface_contract.py -q

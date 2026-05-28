@@ -41,6 +41,7 @@ uv run cargo test --workspace
 uv run pytest
 uv run python python/scripts/prepare_release_artifacts.py --output-dir target/release-artifacts
 uv run python python/scripts/check_release_artifact_bundle.py --artifact-dir target/release-artifacts --json-output target/release-artifacts/release_bundle_check.json --require-ready
+uv run python python/scripts/generate_release_review_record.py --date 2026-05-28 --candidate-commit <sha> --candidate-branch <branch> --target-platform <runner-platform> --change-scope "candidate release review" --release-artifact-dir target/release-artifacts --release-bundle-check-json target/release-artifacts/release_bundle_check.json --week3-output-root target/week3-quality-pipeline --output docs/release-review-record-2026-05-28.md
 uv run python python/scripts/export_cli_command_surface.py --check
 uv run python python/scripts/export_python_api_surface.py --check
 uv run python python/scripts/export_report_schema_surface.py --check
@@ -51,6 +52,7 @@ The candidate artifact helper also has an explicit CI smoke anchor:
 
 - `uv run pytest python/tests/test_prepare_release_artifacts.py -q`
 - `uv run pytest python/tests/test_check_release_artifact_bundle.py -q`
+- `uv run pytest python/tests/test_generate_release_review_record.py -q`
 - `uv run pytest python/tests/test_cli_command_surface_contract.py -q`
 - `uv run pytest python/tests/test_python_api_surface_contract.py -q`
 - `uv run pytest python/tests/test_report_schema_surface_contract.py -q`
