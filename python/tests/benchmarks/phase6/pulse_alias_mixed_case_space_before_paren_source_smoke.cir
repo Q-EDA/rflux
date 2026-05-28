@@ -1,0 +1,9 @@
+.title pulse alias mixed case space before paren source smoke
+* Validates PULSE source parsing with alias arguments, mixed-case keyword spelling, and whitespace before opening paren.
+* Variant: mixed-case alias form using low/high/delay/rise/fall/width/period/cycles with space before (.
+
+V1 in 0 pUlSe (low=0 high=1 delay=0 rise=1n fall=1n width=2n period=5n cycles=3)
+R1 in out 1k
+C1 out 0 1p
+.tran 1p 20p
+.end
