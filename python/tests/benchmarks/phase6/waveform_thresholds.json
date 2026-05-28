@@ -493,5 +493,10 @@
                                                                        "category":  "source-waveform",
                                                                        "max_abs_threshold_v":  0.1,
                                                                        "rationale":  "Sine-wave passive RC smoke deck used to keep phase= keyword alias, mixed-case keyword spelling (sIn), and comma-separated keyword argument parsing coupled in the thresholded waveform baseline."
-                                                                   }
+                                                                   },
+    "pulse_alias_mixed_case_comma_source_smoke.cir":  {
+                                                            "category":  "source-waveform",
+                                                            "max_abs_threshold_v":  0.1,
+                                                            "rationale":  "Pulse-wave passive RC smoke deck used to keep alias argument spelling, mixed-case keyword spelling (pUlSe), and comma-separated argument parsing coupled in the thresholded waveform baseline."
+                                                        }
 }

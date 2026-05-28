@@ -75,6 +75,7 @@
 | lib_section_header_equals_spaced_value_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
 | lib_section_keyword_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
 | nested_subckt_smoke.cir | hierarchical-subckt | 1.000000e-01 | 6.474674e-05 | PASS | out:6.475e-05, in:0.000e+00 |
+| pulse_alias_mixed_case_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:2.397e-05 |
 | pulse_alias_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:3.240e-05 |
 | pulse_keyword_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:3.240e-05 |
 | pulse_keyword_mixed_case_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:3.240e-05 |
@@ -109,7 +110,7 @@
 | hierarchical-subckt | 12 | 0 | 6.474674e-05 | nested_subckt_smoke.cir | include_chain_smoke.cir::out:6.475e-05, include_source_subckt_smoke.cir::out:6.475e-05 |
 | josephson-junction | 42 | 0 | 6.710659e-04 | include_chain_source_k_jj_subckt_smoke.cir | include_chain_source_k_jj_subckt_smoke.cir::tap:6.711e-04, jj_pi_model_smoke.cir::n1:5.945e-04 |
 | mutual-inductance | 5 | 0 | 1.680199e-04 | k_mutual_smoke.cir | include_chain_k_subckt_smoke.cir::tap:1.680e-04, include_chain_source_k_subckt_smoke.cir::tap:1.680e-04 |
-| source-waveform | 35 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
+| source-waveform | 36 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
 | transmission-delay | 5 | 0 | 1.000000e-03 | t_delay_smoke.cir | t_delay_smoke.cir::out:1.000e-03, t_delay_smoke.cir::in:1.000e-03 |
 
 ## Threshold Rationale
@@ -187,6 +188,7 @@
 - lib_section_header_equals_spaced_value_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib/.endl section= ...` library-block header tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline.
 - lib_section_keyword_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib <path> section = ...` selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline.
 - nested_subckt_smoke.cir: [hierarchical-subckt] Nested included subckt passive RC smoke deck used to keep parameter passthrough across flattened hierarchy inside the thresholded phase-6 baseline.
+- pulse_alias_mixed_case_comma_source_smoke.cir: [source-waveform] Pulse-wave passive RC smoke deck used to keep alias argument spelling, mixed-case keyword spelling (pUlSe), and comma-separated argument parsing coupled in the thresholded waveform baseline.
 - pulse_alias_source_smoke.cir: [source-waveform] Pulse-driven passive RC smoke deck used to keep alias-style `PULSE(low=... high=... delay=... rise=... fall=... width=... period=... cycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - pulse_keyword_comma_source_smoke.cir: [source-waveform] Pulse-driven passive RC smoke deck used to keep comma-separated keyword-style `PULSE(v1=..., v2=..., td=..., tr=..., tf=..., pw=..., per=..., ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
 - pulse_keyword_mixed_case_comma_source_smoke.cir: [source-waveform] Pulse-driven passive RC smoke deck used to keep mixed-case comma-separated keyword-style `pUlSe(v1=..., v2=..., td=..., tr=..., tf=..., pw=..., per=..., ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline.
@@ -220,6 +222,6 @@ failures: 0 (delta +0 vs previous 0)
 
 | Deck | Summary Change | Worst Max Abs Delta (V) |
 |------|----------------|-------------------------|
-| sin_phase_alias_keyword_mixed_case_comma_source_smoke.cir | NEW -> PASS | n/a |
+| pulse_alias_mixed_case_comma_source_smoke.cir | NEW -> PASS | n/a |
 
 failures=0
