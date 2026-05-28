@@ -274,6 +274,16 @@
     "category": "source-waveform",
     "rationale": "Pulse-driven passive RC smoke deck used to keep keyword-style `PULSE(v1=... v2=... td=... tr=... tf=... pw=... per=... ncycles=...)` source parsing and external JoSIM deck lowering aligned in the thresholded waveform baseline."
   },
+  "pulse_mixed_case_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Pulse-driven passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `pUlSe(...)` spelling in the thresholded waveform baseline."
+  },
+  "pulse_space_before_paren_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Pulse-driven passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `PULSE (...)` in the thresholded waveform baseline."
+  },
   "sin_rc_smoke.cir": {
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",
@@ -293,6 +303,16 @@
     "max_abs_threshold_v": 0.1,
     "category": "source-waveform",
     "rationale": "Sinusoidal passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `SIN (...)` in the thresholded waveform baseline."
+  },
+  "exp_mixed_case_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Exponential passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `eXp(...)` spelling in the thresholded waveform baseline."
+  },
+  "exp_space_before_paren_source_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "source-waveform",
+    "rationale": "Exponential passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `EXP (...)` in the thresholded waveform baseline."
   },
   "exp_rc_smoke.cir": {
     "max_abs_threshold_v": 0.1,

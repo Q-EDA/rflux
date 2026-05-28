@@ -1,0 +1,6 @@
+.title exp space before paren source smoke
+V1 in 0 EXP (0 1m 1p 0.5p 4p 0.5p)
+R1 in out 1
+C1 out 0 1p
+.tran 1p 6p
+.end
