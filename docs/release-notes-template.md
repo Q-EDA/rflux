@@ -2,6 +2,8 @@
 
 Use this template when preparing candidate or formal release notes.
 
+For candidate releases, prefer pre-filling this template with `python/scripts/generate_release_notes.py` from the release review record and release bundle checker JSON.
+
 ## 1. Release metadata
 
 ```md
@@ -51,6 +53,7 @@ Recommended checks:
 uv run python python/scripts/export_cli_command_surface.py --check
 uv run python python/scripts/export_python_api_surface.py --check
 uv run python python/scripts/export_report_schema_surface.py --check
+uv run python python/scripts/generate_release_notes.py --release-version <version> --release-date <date> --commit-tag <sha-or-tag> --scope-summary "candidate release" --release-review-record docs/release-review-record-<date>.md --release-bundle-check-json target/release-artifacts/release_bundle_check.json --week3-output-root target/week3-quality-pipeline --output docs/release-notes-<date>.md
 ```
 
 ## 5. Quality baseline and regression status
@@ -72,6 +75,12 @@ Recommended command:
 
 ```bash
 uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0
+```
+
+For release notes drafts, also run:
+
+```bash
+uv run python python/scripts/generate_release_notes.py --release-version <version> --release-date <date> --commit-tag <sha-or-tag> --scope-summary "candidate release" --release-review-record docs/release-review-record-<date>.md --release-bundle-check-json target/release-artifacts/release_bundle_check.json --week3-output-root target/week3-quality-pipeline --output docs/release-notes-<date>.md
 ```
 
 ## 6. Known limitations and risks
