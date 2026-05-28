@@ -1,0 +1,6 @@
+.title pulse keyword space before paren source smoke
+V1 in 0 PULSE (v1=0 v2=1m td=1p tr=0.2p tf=0.2p pw=2p per=4p ncycles=2)
+R1 in out 1
+C1 out 0 1p
+.tran 1p 10p
+.end
