@@ -158,8 +158,8 @@ pub enum SimulationError {
     IncludeWithoutBase(String),
     #[error("invalid .subckt header: {0}")]
     InvalidSubcktHeader(String),
-    #[error("nested .subckt definition is not supported inside {0}")]
-    NestedSubcktDefinition(String),
+    #[error("duplicate .subckt definition in scope {scope}: {name}")]
+    DuplicateSubcktDefinition { scope: String, name: String },
     #[error("missing .ends for subckt: {0}")]
     MissingEnds(String),
     #[error("mismatched .ends for subckt {expected}: {found}")]
@@ -182,6 +182,16 @@ pub enum SimulationError {
     UnsupportedExpression(String),
     #[error("invalid .tran card: {0}")]
     InvalidTran(String),
+    #[error("missing .lib section {section} in {path}")]
+    MissingLibrarySection { path: String, section: String },
+    #[error("unterminated .lib section {section} in {path}")]
+    UnterminatedLibrarySection { path: String, section: String },
+    #[error("mismatched .endl section in {path}: expected {expected}, found {found}")]
+    MismatchedLibrarySectionEnd {
+        path: String,
+        expected: String,
+        found: String,
+    },
 }
 
 pub type ParsedSimulatorOutput = (
@@ -218,11 +228,35 @@ pub fn simulate_file(
     ))
 }
 
+fn normalize_continuation_lines(deck: &str) -> String {
+    let mut normalized: Vec<String> = Vec::new();
+
+    for raw_line in deck.lines() {
+        let trimmed_start = raw_line.trim_start();
+        if let Some(rest) = trimmed_start.strip_prefix('+') {
+            let continuation = rest.trim_start();
+            if let Some(previous) = normalized.last_mut() {
+                if !previous.is_empty() && !previous.ends_with(' ') {
+                    previous.push(' ');
+                }
+                previous.push_str(continuation);
+            } else {
+                normalized.push(continuation.to_string());
+            }
+        } else {
+            normalized.push(raw_line.to_string());
+        }
+    }
+
+    normalized.join("\n")
+}
+
 fn parse_deck_expanded(
     deck: &str,
     include_base_dir: Option<&Path>,
 ) -> Result<ParsedDeck, SimulationError> {
-    let deck = flatten_subckts(deck)?;
+    let deck = normalize_continuation_lines(deck);
+    let deck = flatten_subckts(&deck)?;
     let mut title = None;
     let mut params = BTreeMap::new();
     let mut transient = None;
@@ -255,6 +289,25 @@ fn parse_deck_expanded(
             control_count += 1;
             let resolved_path = resolve_include_path(base_dir, &include_path);
             let expanded = expand_deck_file(&resolved_path)?;
+            let nested = parse_deck_expanded(&expanded, resolved_path.parent())?;
+            if title.is_none() {
+                title = nested.title;
+            }
+            params.extend(nested.params);
+            transient = Some(nested.transient);
+            element_count += nested.element_count;
+            control_count += nested.control_count;
+            continue;
+        }
+
+        if let Some(rest) = strip_control_card_prefix(line, ".lib") {
+            let directive = parse_library_directive(rest.trim())?;
+            let Some(base_dir) = include_base_dir else {
+                return Err(SimulationError::IncludeWithoutBase(directive.include_path));
+            };
+            control_count += 1;
+            let resolved_path = resolve_include_path(base_dir, &directive.include_path);
+            let expanded = expand_library_file(&resolved_path, directive.section.as_deref())?;
             let nested = parse_deck_expanded(&expanded, resolved_path.parent())?;
             if title.is_none() {
                 title = nested.title;
@@ -725,6 +778,7 @@ struct ExternalJunctionModelCard {
     third_harmonic_current: Option<String>,
     fourth_harmonic_current: Option<String>,
     fifth_harmonic_current: Option<String>,
+    sixth_harmonic_current: Option<String>,
     normal_resistance: Option<String>,
     junction_cap: Option<String>,
     pi_junction: Option<bool>,
@@ -878,6 +932,7 @@ fn parse_external_josephson_model_card(line: &str) -> Option<(String, ExternalJu
         third_harmonic_current: None,
         fourth_harmonic_current: None,
         fifth_harmonic_current: None,
+        sixth_harmonic_current: None,
         normal_resistance: None,
         junction_cap: None,
         pi_junction: None,
@@ -919,6 +974,13 @@ fn parse_external_josephson_model_card(line: &str) -> Option<(String, ExternalJu
             || name.eq_ignore_ascii_case("cp5")
         {
             card.fifth_harmonic_current = Some(value.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("icrit6")
+            || name.eq_ignore_ascii_case("ic6")
+            || name.eq_ignore_ascii_case("cp6")
+        {
+            card.sixth_harmonic_current = Some(value.to_string());
             continue;
         }
         if name.eq_ignore_ascii_case("rn") {
@@ -966,6 +1028,11 @@ fn parse_external_josephson_model_card(line: &str) -> Option<(String, ExternalJu
         }
         if card.fifth_harmonic_current.is_none() {
             card.fifth_harmonic_current = coefficients.get(4).and_then(|coefficient| {
+                scale_external_harmonic_from_cpr(coefficient, &basis_current)
+            });
+        }
+        if card.sixth_harmonic_current.is_none() {
+            card.sixth_harmonic_current = coefficients.get(5).and_then(|coefficient| {
                 scale_external_harmonic_from_cpr(coefficient, &basis_current)
             });
         }
@@ -1023,6 +1090,7 @@ fn build_external_junction_harmonic_terms(
     third_harmonic_current: Option<String>,
     fourth_harmonic_current: Option<String>,
     fifth_harmonic_current: Option<String>,
+    sixth_harmonic_current: Option<String>,
     pi_junction: bool,
 ) -> (Option<String>, Option<String>) {
     let basis_harmonic = if critical_current.is_some() {
@@ -1035,6 +1103,8 @@ fn build_external_junction_harmonic_terms(
         Some(4)
     } else if fifth_harmonic_current.is_some() {
         Some(5)
+    } else if sixth_harmonic_current.is_some() {
+        Some(6)
     } else {
         None
     };
@@ -1048,6 +1118,7 @@ fn build_external_junction_harmonic_terms(
         3 => third_harmonic_current.clone().unwrap(),
         4 => fourth_harmonic_current.clone().unwrap(),
         5 => fifth_harmonic_current.clone().unwrap(),
+        6 => sixth_harmonic_current.clone().unwrap(),
         _ => unreachable!(),
     };
     let basis_sign_negative = pi_junction && basis_harmonic % 2 == 1;
@@ -1057,7 +1128,9 @@ fn build_external_junction_harmonic_terms(
         basis_current.clone()
     };
 
-    let max_harmonic = if fifth_harmonic_current.is_some() {
+    let max_harmonic = if sixth_harmonic_current.is_some() {
+        6
+    } else if fifth_harmonic_current.is_some() {
         5
     } else if fourth_harmonic_current.is_some() {
         4
@@ -1078,6 +1151,7 @@ fn build_external_junction_harmonic_terms(
         third_harmonic_current.as_deref(),
         fourth_harmonic_current.as_deref(),
         fifth_harmonic_current.as_deref(),
+        sixth_harmonic_current.as_deref(),
     ];
     let coefficients = (1..=max_harmonic)
         .map(|harmonic| {
@@ -1110,6 +1184,7 @@ fn parse_external_runtime_harmonic_assignment(
     third_harmonic_current: &mut Option<String>,
     fourth_harmonic_current: &mut Option<String>,
     fifth_harmonic_current: &mut Option<String>,
+    sixth_harmonic_current: &mut Option<String>,
 ) -> bool {
     if name.eq_ignore_ascii_case("icrit2")
         || name.eq_ignore_ascii_case("ic2")
@@ -1137,6 +1212,13 @@ fn parse_external_runtime_harmonic_assignment(
         || name.eq_ignore_ascii_case("cp5")
     {
         *fifth_harmonic_current = Some(value.to_string());
+        return true;
+    }
+    if name.eq_ignore_ascii_case("icrit6")
+        || name.eq_ignore_ascii_case("ic6")
+        || name.eq_ignore_ascii_case("cp6")
+    {
+        *sixth_harmonic_current = Some(value.to_string());
         return true;
     }
     false
@@ -1335,6 +1417,7 @@ fn build_external_josephson_model_card_line(
         card.third_harmonic_current.clone(),
         card.fourth_harmonic_current.clone(),
         card.fifth_harmonic_current.clone(),
+        card.sixth_harmonic_current.clone(),
         pi_junction,
     );
     let critical_current = harmonic_basis_current;
@@ -1386,6 +1469,7 @@ fn rewrite_external_josephson_inline_parameters(
     let mut instance_third_harmonic = None::<String>;
     let mut instance_fourth_harmonic = None::<String>;
     let mut instance_fifth_harmonic = None::<String>;
+    let mut instance_sixth_harmonic = None::<String>;
     let mut instance_native_cpr_coefficients = None::<Vec<String>>;
     for (index, token) in normalized.iter().enumerate() {
         if let Some((name, value)) = token.split_once('=') {
@@ -1404,6 +1488,7 @@ fn rewrite_external_josephson_inline_parameters(
                 &mut instance_third_harmonic,
                 &mut instance_fourth_harmonic,
                 &mut instance_fifth_harmonic,
+                &mut instance_sixth_harmonic,
             ) {
                 continue;
             }
@@ -1436,6 +1521,7 @@ fn rewrite_external_josephson_inline_parameters(
             && instance_third_harmonic.is_none()
             && instance_fourth_harmonic.is_none()
             && instance_fifth_harmonic.is_none()
+            && instance_sixth_harmonic.is_none()
             && instance_native_cpr_coefficients.is_none()
         {
             let mut instance_name = (*first).to_string();
@@ -1457,6 +1543,7 @@ fn rewrite_external_josephson_inline_parameters(
                 instance_third_harmonic.as_deref(),
                 instance_fourth_harmonic.as_deref(),
                 instance_fifth_harmonic.as_deref(),
+                instance_sixth_harmonic.as_deref(),
                 instance_native_cpr_coefficients.as_deref(),
             );
             if let Some(merged_model_line) = merged_model_line {
@@ -1480,6 +1567,7 @@ fn rewrite_external_josephson_inline_parameters(
         && instance_third_harmonic.is_none()
         && instance_fourth_harmonic.is_none()
         && instance_fifth_harmonic.is_none()
+        && instance_sixth_harmonic.is_none()
         && instance_native_cpr_coefficients.is_none()
     {
         return vec![rewrite_external_josephson_element_prefix(line)];
@@ -1494,6 +1582,7 @@ fn rewrite_external_josephson_inline_parameters(
         third_harmonic_current: None,
         fourth_harmonic_current: None,
         fifth_harmonic_current: None,
+        sixth_harmonic_current: None,
         normal_resistance: None,
         junction_cap: None,
         pi_junction: None,
@@ -1509,6 +1598,7 @@ fn rewrite_external_josephson_inline_parameters(
         instance_third_harmonic.as_deref(),
         instance_fourth_harmonic.as_deref(),
         instance_fifth_harmonic.as_deref(),
+        instance_sixth_harmonic.as_deref(),
         instance_native_cpr_coefficients.as_deref(),
     ) else {
         return vec![rewrite_external_josephson_element_prefix(line)];
@@ -1542,6 +1632,7 @@ fn build_external_merged_josephson_model_line(
     third_harmonic_override: Option<&str>,
     fourth_harmonic_override: Option<&str>,
     fifth_harmonic_override: Option<&str>,
+    sixth_harmonic_override: Option<&str>,
     native_cpr_override: Option<&[String]>,
 ) -> Option<String> {
     let mut critical_current = model_defaults.critical_current.clone();
@@ -1549,6 +1640,7 @@ fn build_external_merged_josephson_model_line(
     let mut third_harmonic_current = model_defaults.third_harmonic_current.clone();
     let mut fourth_harmonic_current = model_defaults.fourth_harmonic_current.clone();
     let mut fifth_harmonic_current = model_defaults.fifth_harmonic_current.clone();
+    let mut sixth_harmonic_current = model_defaults.sixth_harmonic_current.clone();
     let mut normal_resistance = model_defaults.normal_resistance.clone();
     let mut junction_cap = model_defaults.junction_cap.clone();
     let mut native_cpr_basis_current = model_defaults.native_cpr_basis_current.clone();
@@ -1571,6 +1663,7 @@ fn build_external_merged_josephson_model_line(
             &mut third_harmonic_current,
             &mut fourth_harmonic_current,
             &mut fifth_harmonic_current,
+            &mut sixth_harmonic_current,
         ) {
             native_cpr_basis_current = None;
             native_cpr_coefficients = None;
@@ -1604,6 +1697,11 @@ fn build_external_merged_josephson_model_line(
         native_cpr_basis_current = None;
         native_cpr_coefficients = None;
     }
+    if let Some(sixth_harmonic_override) = sixth_harmonic_override {
+        sixth_harmonic_current = Some(sixth_harmonic_override.to_string());
+        native_cpr_basis_current = None;
+        native_cpr_coefficients = None;
+    }
     if let Some(native_cpr_override) = native_cpr_override {
         native_cpr_basis_current = overrides
             .iter()
@@ -1622,6 +1720,7 @@ fn build_external_merged_josephson_model_line(
         third_harmonic_current = None;
         fourth_harmonic_current = None;
         fifth_harmonic_current = None;
+        sixth_harmonic_current = None;
     }
     let pi_junction = pi_override.or(model_defaults.pi_junction).unwrap_or(false);
     if pi_override.is_some() {
@@ -1636,6 +1735,7 @@ fn build_external_merged_josephson_model_line(
             third_harmonic_current,
             fourth_harmonic_current,
             fifth_harmonic_current,
+            sixth_harmonic_current,
             normal_resistance,
             junction_cap,
             pi_junction: Some(pi_junction),
@@ -1909,6 +2009,111 @@ fn parse_include_path(value: &str) -> Result<String, SimulationError> {
     Ok(raw.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LibraryDirective {
+    include_path: String,
+    section: Option<String>,
+}
+
+fn parse_library_directive(value: &str) -> Result<LibraryDirective, SimulationError> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return Err(SimulationError::IncludeWithoutBase(String::new()));
+    }
+
+    if let Some(quote) = raw.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
+        let tail = &raw[1..];
+        let Some(closing_index) = tail.find(quote) else {
+            return Err(SimulationError::IncludeWithoutBase(raw.to_string()));
+        };
+        let include_path = tail[..closing_index].trim().to_string();
+        let section = parse_library_section_from_text(&tail[closing_index + 1..]);
+        return Ok(LibraryDirective {
+            include_path,
+            section,
+        });
+    }
+
+    let normalized = raw.replace(',', " ");
+    let mut tokens = normalized.split_whitespace();
+    let include_path = tokens.next().unwrap_or_default().trim().to_string();
+    Ok(LibraryDirective {
+        include_path,
+        section: parse_library_section_from_text(&tokens.collect::<Vec<_>>().join(" ")),
+    })
+}
+
+fn normalize_library_section_token(token: &str) -> String {
+    let trimmed = token.trim().trim_matches(',');
+    let trimmed = trimmed.split(';').next().unwrap_or_default().trim();
+    strip_wrapping_quotes(trimmed)
+}
+
+fn parse_library_section_from_text(text: &str) -> Option<String> {
+    let normalized = text.replace(',', " ");
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let normalized_token = normalize_library_section_token(token);
+        if normalized_token.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if token == "=" {
+            index += 1;
+            continue;
+        }
+
+        if let Some((key, value)) = token.split_once('=') {
+            if key.eq_ignore_ascii_case("section") || key.eq_ignore_ascii_case("sec") {
+                let normalized_value = normalize_library_section_token(value);
+                if !normalized_value.is_empty() {
+                    return Some(normalized_value);
+                }
+                if let Some(next) = tokens.get(index + 1) {
+                    let normalized_next = normalize_library_section_token(next);
+                    if !normalized_next.is_empty() {
+                        return Some(normalized_next);
+                    }
+                }
+                return None;
+            }
+            return Some(normalized_token);
+        }
+
+        if token.eq_ignore_ascii_case("section") || token.eq_ignore_ascii_case("sec") {
+            if let Some(next) = tokens.get(index + 1) {
+                if *next == "=" {
+                    if let Some(value) = tokens.get(index + 2) {
+                        let normalized_value = normalize_library_section_token(value);
+                        return (!normalized_value.is_empty()).then_some(normalized_value);
+                    }
+                    return None;
+                }
+                if let Some(value) = next.strip_prefix('=') {
+                    let normalized_value = normalize_library_section_token(value);
+                    if !normalized_value.is_empty() {
+                        return Some(normalized_value);
+                    }
+                    if let Some(fallback) = tokens.get(index + 2) {
+                        let normalized_fallback = normalize_library_section_token(fallback);
+                        return (!normalized_fallback.is_empty()).then_some(normalized_fallback);
+                    }
+                    return None;
+                }
+                let normalized_value = normalize_library_section_token(next);
+                return (!normalized_value.is_empty()).then_some(normalized_value);
+            }
+            return None;
+        }
+
+        return Some(normalized_token);
+    }
+    None
+}
+
 fn resolve_include_path(base_dir: &Path, include_path: &str) -> PathBuf {
     let candidate = Path::new(include_path);
     if candidate.is_absolute() {
@@ -1926,6 +2131,93 @@ fn expand_deck_file(path: &Path) -> Result<String, SimulationError> {
     expand_deck_text(&deck, path.parent())
 }
 
+fn extract_library_section_text(
+    deck: &str,
+    section: &str,
+    source_path: &Path,
+) -> Result<String, SimulationError> {
+    let mut extracted = String::new();
+    let mut collecting = false;
+    let mut found_section = false;
+    let mut depth = 0usize;
+
+    for raw_line in deck.lines() {
+        let trimmed = strip_comment(raw_line).trim();
+        if let Some(rest) = strip_control_card_prefix(trimmed, ".lib") {
+            if collecting {
+                depth += 1;
+                extracted.push_str(raw_line);
+                extracted.push('\n');
+                continue;
+            }
+            let current_section = rest
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let current_section = parse_library_section_from_text(&current_section)
+                .unwrap_or_default();
+            if current_section.eq_ignore_ascii_case(section) {
+                collecting = true;
+                found_section = true;
+                depth = 1;
+            }
+            continue;
+        }
+
+        if let Some(rest) = strip_control_card_prefix(trimmed, ".endl") {
+            if collecting {
+                let end_section = parse_library_section_from_text(rest).unwrap_or_default();
+                if depth == 1 {
+                    if !end_section.is_empty() && !end_section.eq_ignore_ascii_case(section) {
+                        return Err(SimulationError::MismatchedLibrarySectionEnd {
+                            path: source_path.display().to_string(),
+                            expected: section.to_string(),
+                            found: end_section,
+                        });
+                    }
+                    return Ok(extracted);
+                }
+                depth -= 1;
+                extracted.push_str(raw_line);
+                extracted.push('\n');
+            }
+            continue;
+        }
+
+        if collecting {
+            extracted.push_str(raw_line);
+            extracted.push('\n');
+        }
+    }
+
+    let path = source_path.display().to_string();
+    if collecting {
+        return Err(SimulationError::UnterminatedLibrarySection {
+            path,
+            section: section.to_string(),
+        });
+    }
+    if !found_section {
+        return Err(SimulationError::MissingLibrarySection {
+            path,
+            section: section.to_string(),
+        });
+    }
+    Ok(extracted)
+}
+
+fn expand_library_file(path: &Path, section: Option<&str>) -> Result<String, SimulationError> {
+    let deck = fs::read_to_string(path).map_err(|err| SimulationError::Io {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    if let Some(section) = section {
+        let section_text = extract_library_section_text(&deck, section, path)?;
+        return expand_deck_text(&section_text, path.parent());
+    }
+    expand_deck_text(&deck, path.parent())
+}
+
 fn expand_deck_text(deck: &str, base_dir: Option<&Path>) -> Result<String, SimulationError> {
     let mut expanded = String::new();
     for raw_line in deck.lines() {
@@ -1937,6 +2229,22 @@ fn expand_deck_text(deck: &str, base_dir: Option<&Path>) -> Result<String, Simul
             };
             let resolved_path = resolve_include_path(base_dir, &include_path);
             expanded.push_str(&expand_deck_file(&resolved_path)?);
+            if !expanded.ends_with('\n') {
+                expanded.push('\n');
+            }
+            continue;
+        }
+
+        if let Some(rest) = strip_control_card_prefix(trimmed, ".lib") {
+            let directive = parse_library_directive(rest.trim())?;
+            let Some(base_dir) = base_dir else {
+                return Err(SimulationError::IncludeWithoutBase(directive.include_path));
+            };
+            let resolved_path = resolve_include_path(base_dir, &directive.include_path);
+            expanded.push_str(&expand_library_file(
+                &resolved_path,
+                directive.section.as_deref(),
+            )?);
             if !expanded.ends_with('\n') {
                 expanded.push('\n');
             }
@@ -2005,58 +2313,130 @@ fn extract_waveform_path_token(text: &str) -> Option<(&str, usize)> {
 }
 
 fn flatten_subckts(deck: &str) -> Result<String, SimulationError> {
+    const ROOT_SCOPE: &str = "";
+
     let mut defs = BTreeMap::<String, SubcktDef>::new();
     let mut top_level_lines = Vec::<String>::new();
-    let mut current_name = None::<String>;
-    let mut current_def = None::<SubcktDef>;
+    let mut scope_symbols = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut scope_parent = BTreeMap::<String, String>::new();
+    let mut def_stack = Vec::<SubcktFrame>::new();
+    scope_symbols.entry(ROOT_SCOPE.to_string()).or_default();
 
     for raw_line in deck.lines() {
         let line = strip_comment(raw_line).trim();
-        if let Some(name) = &current_name {
-            if strip_control_card_prefix(line, ".subckt").is_some() {
-                return Err(SimulationError::NestedSubcktDefinition(name.clone()));
-            }
-            if let Some(rest) = strip_control_card_prefix(line, ".ends") {
-                let end_name = rest.trim();
-                if !end_name.is_empty() && !end_name.eq_ignore_ascii_case(name) {
-                    return Err(SimulationError::MismatchedEnds {
-                        expected: name.clone(),
-                        found: end_name.to_string(),
-                    });
-                }
-                defs.insert(name.clone(), current_def.take().unwrap());
-                current_name = None;
-                continue;
-            }
-            if line.starts_with('.') {
-                return Err(SimulationError::UnsupportedSubcktControl {
-                    subckt: name.clone(),
-                    line: line.to_string(),
-                });
-            }
-            current_def
-                .as_mut()
-                .unwrap()
-                .body
-                .push(raw_line.to_string());
-            continue;
-        }
 
         if let Some(rest) = strip_control_card_prefix(line, ".subckt") {
             let (name, def) = parse_subckt_header(rest.trim())?;
-            current_name = Some(name);
-            current_def = Some(def);
+            let parent_scope = def_stack
+                .last()
+                .map(|frame| frame.scoped_name.as_str())
+                .unwrap_or(ROOT_SCOPE);
+            let scoped_name = scoped_subckt_name(parent_scope, &name);
+            let symbols = scope_symbols.entry(parent_scope.to_string()).or_default();
+            if symbols.contains_key(&name) {
+                return Err(SimulationError::DuplicateSubcktDefinition {
+                    scope: display_scope_name(parent_scope),
+                    name,
+                });
+            }
+            symbols.insert(name.clone(), scoped_name.clone());
+            scope_symbols.entry(scoped_name.clone()).or_default();
+            scope_parent.insert(scoped_name.clone(), parent_scope.to_string());
+            def_stack.push(SubcktFrame {
+                local_name: name,
+                scoped_name,
+                def,
+            });
+            continue;
+        }
+
+        if let Some(rest) = strip_control_card_prefix(line, ".ends") {
+            if let Some(frame) = def_stack.pop() {
+                let end_name = rest.trim();
+                if !end_name.is_empty() && !end_name.eq_ignore_ascii_case(&frame.local_name) {
+                    return Err(SimulationError::MismatchedEnds {
+                        expected: frame.local_name,
+                        found: end_name.to_string(),
+                    });
+                }
+                defs.insert(frame.scoped_name, frame.def);
+                continue;
+            }
+        }
+
+        if let Some(frame) = def_stack.last_mut() {
+            if line.starts_with('.') {
+                return Err(SimulationError::UnsupportedSubcktControl {
+                    subckt: frame.local_name.clone(),
+                    line: line.to_string(),
+                });
+            }
+            frame.def.body.push(raw_line.to_string());
             continue;
         }
 
         top_level_lines.push(raw_line.to_string());
     }
 
-    if let Some(name) = current_name {
-        return Err(SimulationError::MissingEnds(name));
+    if let Some(frame) = def_stack.last() {
+        return Err(SimulationError::MissingEnds(frame.local_name.clone()));
     }
 
-    expand_subckt_lines(&top_level_lines, &defs, None)
+    expand_subckt_lines(
+        &top_level_lines,
+        &defs,
+        &scope_symbols,
+        &scope_parent,
+        ROOT_SCOPE,
+        None,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubcktFrame {
+    local_name: String,
+    scoped_name: String,
+    def: SubcktDef,
+}
+
+fn scoped_subckt_name(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}__{}", scope, name)
+    }
+}
+
+fn display_scope_name(scope: &str) -> String {
+    if scope.is_empty() {
+        "<top-level>".to_string()
+    } else {
+        scope.to_string()
+    }
+}
+
+fn resolve_subckt_name(
+    local_name: &str,
+    declaration_scope: &str,
+    scope_symbols: &BTreeMap<String, BTreeMap<String, String>>,
+    scope_parent: &BTreeMap<String, String>,
+) -> Option<String> {
+    let mut scope = declaration_scope.to_string();
+    loop {
+        if let Some(symbols) = scope_symbols.get(&scope) {
+            if let Some(scoped_name) = symbols.get(local_name) {
+                return Some(scoped_name.clone());
+            }
+        }
+        if scope.is_empty() {
+            break;
+        }
+        let Some(parent) = scope_parent.get(&scope) else {
+            break;
+        };
+        scope = parent.clone();
+    }
+    None
 }
 
 fn parse_subckt_header(header: &str) -> Result<(String, SubcktDef), SimulationError> {
@@ -2097,6 +2477,9 @@ fn parse_subckt_header(header: &str) -> Result<(String, SubcktDef), SimulationEr
 fn expand_subckt_lines(
     lines: &[String],
     defs: &BTreeMap<String, SubcktDef>,
+    scope_symbols: &BTreeMap<String, BTreeMap<String, String>>,
+    scope_parent: &BTreeMap<String, String>,
+    declaration_scope: &str,
     instance_prefix: Option<&str>,
 ) -> Result<String, SimulationError> {
     let mut expanded = String::new();
@@ -2109,13 +2492,19 @@ fn expand_subckt_lines(
         }
 
         if starts_with_instance(line) {
-            let instance = parse_subckt_instance(line, defs)?;
+            let instance = parse_subckt_instance(
+                line,
+                defs,
+                scope_symbols,
+                scope_parent,
+                declaration_scope,
+            )?;
             let nested_prefix = match instance_prefix {
                 Some(prefix) => format!("{}__{}", prefix, instance.instance_name),
                 None => instance.instance_name.clone(),
             };
             let def = defs
-                .get(&instance.subckt_name)
+                .get(&instance.subckt_key)
                 .ok_or_else(|| SimulationError::UnknownSubckt(instance.subckt_name.clone()))?;
 
             let mut body_lines = Vec::with_capacity(def.body.len());
@@ -2130,6 +2519,9 @@ fn expand_subckt_lines(
             expanded.push_str(&expand_subckt_lines(
                 &body_lines,
                 defs,
+                scope_symbols,
+                scope_parent,
+                &instance.subckt_key,
                 Some(&nested_prefix),
             )?);
             continue;
@@ -2151,6 +2543,7 @@ fn expand_subckt_lines(
 struct ParsedSubcktInstance {
     instance_name: String,
     subckt_name: String,
+    subckt_key: String,
     node_map: BTreeMap<String, String>,
     param_map: BTreeMap<String, String>,
 }
@@ -2165,6 +2558,9 @@ fn starts_with_instance(line: &str) -> bool {
 fn parse_subckt_instance(
     line: &str,
     defs: &BTreeMap<String, SubcktDef>,
+    scope_symbols: &BTreeMap<String, BTreeMap<String, String>>,
+    scope_parent: &BTreeMap<String, String>,
+    declaration_scope: &str,
 ) -> Result<ParsedSubcktInstance, SimulationError> {
     let tokens = line.split_whitespace().collect::<Vec<_>>();
     if tokens.len() < 3 {
@@ -2181,7 +2577,9 @@ fn parse_subckt_instance(
     let split_index = params_marker_index.unwrap_or(first_assignment_index);
     let Some(subckt_index) = tokens[1..split_index]
         .iter()
-        .rposition(|token| defs.contains_key(*token))
+        .rposition(|token| {
+            resolve_subckt_name(token, declaration_scope, scope_symbols, scope_parent).is_some()
+        })
         .map(|index| index + 1)
     else {
         let subckt_index = split_index.saturating_sub(1);
@@ -2203,8 +2601,15 @@ fn parse_subckt_instance(
 
     let instance_name = tokens[0].to_string();
     let subckt_name = tokens[subckt_index].to_string();
+    let subckt_key = resolve_subckt_name(
+        &subckt_name,
+        declaration_scope,
+        scope_symbols,
+        scope_parent,
+    )
+    .ok_or_else(|| SimulationError::UnknownSubckt(subckt_name.clone()))?;
     let def = defs
-        .get(&subckt_name)
+        .get(&subckt_key)
         .ok_or_else(|| SimulationError::UnknownSubckt(subckt_name.clone()))?;
     let nodes = &tokens[1..subckt_index];
     if nodes.len() != def.pins.len() {
@@ -2230,6 +2635,7 @@ fn parse_subckt_instance(
     Ok(ParsedSubcktInstance {
         instance_name,
         subckt_name,
+        subckt_key,
         node_map,
         param_map,
     })
@@ -2448,6 +2854,7 @@ struct InternalJunctionModelCard {
     third_harmonic_current_a: Option<f64>,
     fourth_harmonic_current_a: Option<f64>,
     fifth_harmonic_current_a: Option<f64>,
+    sixth_harmonic_current_a: Option<f64>,
     normal_resistance_ohm: Option<f64>,
     junction_cap_f: Option<f64>,
     pi_junction: Option<bool>,
@@ -2499,6 +2906,7 @@ enum InternalElement {
         third_harmonic_current_a: f64,
         fourth_harmonic_current_a: f64,
         fifth_harmonic_current_a: f64,
+        sixth_harmonic_current_a: f64,
         normal_resistance_ohm: f64,
         junction_cap_f: f64,
     },
@@ -2859,6 +3267,7 @@ fn parse_internal_transient_netlist_with_base(
                     third_harmonic_current_a,
                     fourth_harmonic_current_a,
                     fifth_harmonic_current_a,
+                    sixth_harmonic_current_a,
                     normal_resistance_ohm,
                     junction_cap_f,
                 ) = parse_internal_junction_parameters(
@@ -2874,6 +3283,7 @@ fn parse_internal_transient_netlist_with_base(
                     third_harmonic_current_a,
                     fourth_harmonic_current_a,
                     fifth_harmonic_current_a,
+                    sixth_harmonic_current_a,
                     normal_resistance_ohm,
                     junction_cap_f,
                 });
@@ -3561,12 +3971,13 @@ fn parse_internal_junction_parameters(
     tokens: &[&str],
     params: &BTreeMap<String, f64>,
     model_defaults: Option<InternalJunctionModelCard>,
-) -> Result<(f64, f64, f64, f64, f64, f64, f64), String> {
+) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), String> {
     let mut critical_current_expr = None::<String>;
     let mut second_harmonic_current_expr = None::<String>;
     let mut third_harmonic_current_expr = None::<String>;
     let mut fourth_harmonic_current_expr = None::<String>;
     let mut fifth_harmonic_current_expr = None::<String>;
+    let mut sixth_harmonic_current_expr = None::<String>;
     let mut normal_resistance_expr = None::<String>;
     let mut junction_cap_expr = None::<String>;
     let mut pi_expr = None::<String>;
@@ -3606,6 +4017,13 @@ fn parse_internal_junction_parameters(
             || name.eq_ignore_ascii_case("cp5")
         {
             fifth_harmonic_current_expr = Some(value.to_string());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("icrit6")
+            || name.eq_ignore_ascii_case("ic6")
+            || name.eq_ignore_ascii_case("cp6")
+        {
+            sixth_harmonic_current_expr = Some(value.to_string());
             continue;
         }
         if name.eq_ignore_ascii_case("rn") {
@@ -3649,7 +4067,8 @@ fn parse_internal_junction_parameters(
                 (second_harmonic_current_expr.is_some()
                     || third_harmonic_current_expr.is_some()
                     || fourth_harmonic_current_expr.is_some()
-                    || fifth_harmonic_current_expr.is_some())
+                    || fifth_harmonic_current_expr.is_some()
+                    || sixth_harmonic_current_expr.is_some())
                 .then_some(0.0)
             })
             .ok_or_else(|| "internal_transient_invalid_junction_icrit".to_string())?
@@ -3708,6 +4127,20 @@ fn parse_internal_junction_parameters(
     };
     if !fifth_harmonic_current_a.is_finite() {
         return Err("internal_transient_invalid_junction_icrit5".to_string());
+    }
+
+    let sixth_harmonic_current_a = if let Some(expr) = sixth_harmonic_current_expr {
+        evaluate_expression(&expr, params)
+            .map_err(|err| format!("internal_transient_invalid_value:{err}"))?
+    } else if let Some(coefficients) = &evaluated_cpr_coefficients {
+        coefficients.get(5).copied().unwrap_or(0.0) * critical_current_basis_a
+    } else {
+        model_defaults
+            .and_then(|defaults| defaults.sixth_harmonic_current_a)
+            .unwrap_or(0.0)
+    };
+    if !sixth_harmonic_current_a.is_finite() {
+        return Err("internal_transient_invalid_junction_icrit6".to_string());
     }
 
     let critical_current_raw_a = if let Some(coefficients) = &evaluated_cpr_coefficients {
@@ -3770,6 +4203,7 @@ fn parse_internal_junction_parameters(
         third_harmonic_current_a,
         fourth_harmonic_current_a,
         fifth_harmonic_current_a,
+        sixth_harmonic_current_a,
         normal_resistance_ohm,
         junction_cap_f,
     ))
@@ -3845,6 +4279,7 @@ fn parse_internal_junction_model_card(
                 third_harmonic_current_a: None,
                 fourth_harmonic_current_a: None,
                 fifth_harmonic_current_a: None,
+                sixth_harmonic_current_a: None,
                 normal_resistance_ohm: None,
                 junction_cap_f: None,
                 pi_junction: None,
@@ -3861,6 +4296,7 @@ fn parse_internal_junction_model_card(
     let mut third_harmonic_current_a = None::<f64>;
     let mut fourth_harmonic_current_a = None::<f64>;
     let mut fifth_harmonic_current_a = None::<f64>;
+    let mut sixth_harmonic_current_a = None::<f64>;
     let mut normal_resistance_ohm = None::<f64>;
     let mut junction_cap_f = None::<f64>;
     let mut pi_junction = None::<bool>;
@@ -3987,6 +4423,15 @@ fn parse_internal_junction_model_card(
                 }
             }
         }
+        if sixth_harmonic_current_a.is_none() {
+            if let Some(sixth_coefficient) = coefficients.get(5) {
+                let sixth_value = evaluate_expression(sixth_coefficient, params)
+                    .map_err(|err| format!("internal_transient_invalid_value:{err}"))?;
+                if sixth_value.abs() >= 1.0e-12 {
+                    sixth_harmonic_current_a = Some(basis_current_a * sixth_value);
+                }
+            }
+        }
         critical_current_a
     } else {
         critical_current_basis_a
@@ -4007,6 +4452,9 @@ fn parse_internal_junction_model_card(
     if fifth_harmonic_current_a.is_some_and(|value| !value.is_finite()) {
         return Err("internal_transient_invalid_junction_icrit5".to_string());
     }
+    if sixth_harmonic_current_a.is_some_and(|value| !value.is_finite()) {
+        return Err("internal_transient_invalid_junction_icrit6".to_string());
+    }
     if normal_resistance_ohm.is_some_and(|value| !value.is_finite() || value <= 0.0) {
         return Err("internal_transient_invalid_junction_rn".to_string());
     }
@@ -4022,6 +4470,7 @@ fn parse_internal_junction_model_card(
             third_harmonic_current_a,
             fourth_harmonic_current_a,
             fifth_harmonic_current_a,
+            sixth_harmonic_current_a,
             normal_resistance_ohm,
             junction_cap_f,
             pi_junction,
@@ -6617,6 +7066,7 @@ fn stamp_internal_nonlinear_terms(
             third_harmonic_current_a,
             fourth_harmonic_current_a,
             fifth_harmonic_current_a,
+            sixth_harmonic_current_a,
             normal_resistance_ohm,
             junction_cap_f,
         } = *element
@@ -6640,7 +7090,8 @@ fn stamp_internal_nonlinear_terms(
             + 2.0 * second_harmonic_current_a * (2.0 * phase_iter).cos()
             + 3.0 * third_harmonic_current_a * (3.0 * phase_iter).cos()
             + 4.0 * fourth_harmonic_current_a * (4.0 * phase_iter).cos()
-            + 5.0 * fifth_harmonic_current_a * (5.0 * phase_iter).cos())
+            + 5.0 * fifth_harmonic_current_a * (5.0 * phase_iter).cos()
+            + 6.0 * sixth_harmonic_current_a * (6.0 * phase_iter).cos())
             * josephson_gain
             * time_step_s;
         let total_g = shunt_g + cap_g + nonlinear_g;
@@ -6650,7 +7101,8 @@ fn stamp_internal_nonlinear_terms(
             + second_harmonic_current_a * (2.0 * phase_iter).sin()
             + third_harmonic_current_a * (3.0 * phase_iter).sin()
             + fourth_harmonic_current_a * (4.0 * phase_iter).sin()
-            + fifth_harmonic_current_a * (5.0 * phase_iter).sin();
+            + fifth_harmonic_current_a * (5.0 * phase_iter).sin()
+            + sixth_harmonic_current_a * (6.0 * phase_iter).sin();
         let current_eq = current - total_g * v_iter;
 
         stamp_conductance(matrix, pos, neg, total_g);
@@ -7560,6 +8012,19 @@ mod tests {
     }
 
     #[test]
+    fn prepare_external_simulator_deck_rewrites_sixth_harmonic_into_cpr() {
+        let prepared = super::prepare_external_simulator_deck(
+            ".model jjmod jj(icrit=0.5m rn=20 cj=0.5p icrit6=0.001m)\nJ1 n1 0 jjmod\n.tran 1p 5p\n.end\n",
+            None,
+        );
+
+        assert!(prepared.contains(
+            ".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0,0,0.001m/0.5m})"
+        ));
+        assert!(!prepared.to_ascii_lowercase().contains("icrit6=0.001m"));
+    }
+
+    #[test]
     fn prepare_external_simulator_deck_rewrites_pure_third_harmonic_model_into_cpr_basis() {
         let prepared = super::prepare_external_simulator_deck(
             ".model jjmod jj(rn=20 cj=0.5p icrit3=0.05m)\nJ1 n1 0 jjmod\n.tran 1p 5p\n.end\n",
@@ -7889,6 +8354,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_deck_supports_spice_continuation_lines() {
+        let parsed = parse_deck(
+            ".title demo\n.param tstep=0.5p\n+ tstop=20p, scale=2\nR1 n1 0 50\n.tran 1p\n+ 10p uic\n.end\n",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.title.as_deref(), Some("demo"));
+        assert_eq!(parsed.transient.tstep_ps, 1.0);
+        assert_eq!(parsed.transient.tstop_ps, 10.0);
+        assert_eq!(parsed.params.get("tstep").copied(), Some(0.5e-12));
+        assert_eq!(parsed.params.get("tstop").copied(), Some(20.0e-12));
+        assert_eq!(parsed.params.get("scale").copied(), Some(2.0));
+        assert!(parsed.transient.use_initial_conditions);
+        assert_eq!(parsed.element_count, 1);
+    }
+
+    #[test]
     fn parse_deck_rejects_invalid_spaced_param_assignment() {
         let err =
             parse_deck(".title demo\n.param tstep =\nR1 n1 0 50\n.tran 1p 5p\n.end\n").unwrap_err();
@@ -8100,15 +8582,42 @@ mod tests {
     }
 
     #[test]
-    fn parse_deck_reports_nested_subckt_definition_as_unsupported() {
+    fn parse_deck_supports_nested_subckt_definition() {
+        let parsed = parse_deck(
+            ".subckt outer in out\n.subckt inner a b\nR1 a b 50\n.ends inner\nXinner in out inner\n.ends outer\nX1 n1 n2 outer\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 1.0);
+        assert_eq!(parsed.transient.tstop_ps, 10.0);
+    }
+
+    #[test]
+    fn parse_deck_resolves_shadowed_nested_subckt_name() {
+        let flattened = super::flatten_subckts(
+            ".subckt leaf a b\nRtop a b 100\n.ends\n.subckt outer in out\n.subckt leaf a b\nRinner a b 50\n.ends\nXlocal in out leaf\n.ends\nX1 n1 n2 outer\nX2 n3 n4 leaf\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        assert!(flattened.contains("X1__Xlocal"));
+        assert!(flattened.contains("50"));
+        assert!(flattened.contains("100"));
+    }
+
+    #[test]
+    fn parse_deck_rejects_duplicate_subckt_name_in_same_scope() {
         let err = parse_deck(
-            ".subckt outer in out\n.subckt inner a b\nR1 a b 50\n.ends\n.ends\nX1 n1 n2 outer\n.tran 1p 10p\n.end\n",
+            ".subckt stage in out\nR1 in out 50\n.ends\n.subckt stage in out\nR2 in out 75\n.ends\nX1 n1 n2 stage\n.tran 1p 10p\n.end\n",
         )
         .unwrap_err();
 
         assert_eq!(
             err,
-            super::SimulationError::NestedSubcktDefinition("outer".to_string())
+            super::SimulationError::DuplicateSubcktDefinition {
+                scope: "<top-level>".to_string(),
+                name: "stage".to_string(),
+            }
         );
     }
 
@@ -8143,6 +8652,537 @@ mod tests {
         let parsed = parse_deck_file(&top_path).unwrap();
 
         assert_eq!(parsed.title.as_deref(), Some("demo"));
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive() {
+        let dir = unique_test_dir("lib-parse");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".title demo\n.lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.title.as_deref(), Some("demo"));
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_reports_missing_lib_section() {
+        let dir = unique_test_dir("lib-missing-section");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(&inc_path, ".lib TT\n.param tstep=0.5p tstop=20p\n.endl TT\n").unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" FF\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        let err = parse_deck_file(&top_path).unwrap_err();
+
+        assert_eq!(
+            err,
+            super::SimulationError::MissingLibrarySection {
+                path: inc_path.display().to_string(),
+                section: "FF".to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_reports_unterminated_lib_section() {
+        let dir = unique_test_dir("lib-unterminated-section");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(&inc_path, ".lib TT\n.param tstep=0.5p tstop=20p\n").unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        let err = parse_deck_file(&top_path).unwrap_err();
+
+        assert_eq!(
+            err,
+            super::SimulationError::UnterminatedLibrarySection {
+                path: inc_path.display().to_string(),
+                section: "TT".to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_single_quote_and_case_insensitive_section() {
+        let dir = unique_test_dir("lib-parse-case-quote");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib 'defs.inc' tt\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_reports_mismatched_lib_section_end_name() {
+        let dir = unique_test_dir("lib-mismatched-endl");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        let err = parse_deck_file(&top_path).unwrap_err();
+
+        assert_eq!(
+            err,
+            super::SimulationError::MismatchedLibrarySectionEnd {
+                path: inc_path.display().to_string(),
+                expected: "TT".to_string(),
+                found: "FF".to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_quoted_section_tokens() {
+        let dir = unique_test_dir("lib-parse-quoted-sections");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib \"TT\"\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl \"TT\"\n.lib \"FF\"\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl \"FF\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" \"TT\"\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_reports_mismatched_lib_section_end_name_with_quoted_token() {
+        let dir = unique_test_dir("lib-mismatched-endl-quoted");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\n.endl \"FF\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        let err = parse_deck_file(&top_path).unwrap_err();
+
+        assert_eq!(
+            err,
+            super::SimulationError::MismatchedLibrarySectionEnd {
+                path: inc_path.display().to_string(),
+                expected: "TT".to_string(),
+                found: "FF".to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_comma_separated_section() {
+        let dir = unique_test_dir("lib-parse-comma-section");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\", TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_section_with_comma_delimited_lib_and_endl_tokens() {
+        let dir = unique_test_dir("lib-parse-comma-delimited-section-tokens");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT,\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT,\n.lib FF,\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF,\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_inline_semicolon_comment_tokens() {
+        let dir = unique_test_dir("lib-parse-semicolon-inline-comment");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT;body\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT;body-end\n.lib FF;body\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF;body-end\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT;select\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_section_equals_keyword() {
+        let dir = unique_test_dir("lib-parse-section-equals-keyword");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" section=TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_block_with_section_equals_headers() {
+        let dir = unique_test_dir("lib-parse-section-equals-headers");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib section=TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl section=TT\n.lib section=FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl section=FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_section_spaced_equals_keyword() {
+        let dir = unique_test_dir("lib-parse-section-spaced-equals-keyword");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" section = TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_block_with_section_spaced_equals_headers() {
+        let dir = unique_test_dir("lib-parse-section-spaced-equals-headers");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib section = TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl section = TT\n.lib section = FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl section = FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_sec_spaced_equals_keyword() {
+        let dir = unique_test_dir("lib-parse-sec-spaced-equals-keyword");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" sec = TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_section_equals_and_spaced_value() {
+        let dir = unique_test_dir("lib-parse-section-equals-spaced-value");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" section= TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_directive_with_sec_equals_attached_value() {
+        let dir = unique_test_dir("lib-parse-sec-equals-attached-value");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" sec =TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_block_with_sec_equals_headers() {
+        let dir = unique_test_dir("lib-parse-sec-equals-headers");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib sec=TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl sec=TT\n.lib sec=FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl sec=FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_block_with_section_equals_and_spaced_value_headers() {
+        let dir = unique_test_dir("lib-parse-section-equals-spaced-value-headers");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib section= TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl section= TT\n.lib section= FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl section= FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
+        assert_eq!(parsed.element_count, 1);
+        assert_eq!(parsed.transient.tstep_ps, 0.5);
+        assert_eq!(parsed.transient.tstop_ps, 20.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_deck_file_resolves_lib_block_with_sec_equals_attached_value_headers() {
+        let dir = unique_test_dir("lib-parse-sec-equals-attached-value-headers");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".lib sec =TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl sec =TT\n.lib sec =FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl sec =FF\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
+        )
+        .unwrap();
+
+        let parsed = parse_deck_file(&top_path).unwrap();
+
         assert_eq!(parsed.element_count, 1);
         assert_eq!(parsed.transient.tstep_ps, 0.5);
         assert_eq!(parsed.transient.tstop_ps, 20.0);
@@ -8188,6 +9228,38 @@ mod tests {
         fs::write(
             &top_path,
             ".include defs.inc\nX1 n1 n2 stage rval=75\n.tran 1p 10p\n.end\n",
+        )
+        .unwrap();
+
+        let report = simulate_file(
+            &top_path,
+            &SimulationConfig {
+                mode: SimulationMode::EventOnly,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.backend, SimulationBackend::EventOnly);
+        assert_eq!(report.simulated_events, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn simulate_file_supports_included_nested_subckt_definition() {
+        let dir = unique_test_dir("include-nested-subckt");
+        fs::create_dir_all(&dir).unwrap();
+        let inc_path = dir.join("defs.inc");
+        let top_path = dir.join("top.cir");
+        fs::write(
+            &inc_path,
+            ".subckt outer in out\n.subckt inner a b\nR1 a b 50\n.ends inner\nXinner in out inner\n.ends outer\n",
+        )
+        .unwrap();
+        fs::write(
+            &top_path,
+            ".include defs.inc\nX1 n1 n2 outer\n.tran 1p 10p\n.end\n",
         )
         .unwrap();
 
@@ -8849,6 +9921,36 @@ mod tests {
         );
         assert!(report.simulated_events > 0);
         assert!(report.waveform_path.is_some());
+    }
+
+    #[test]
+    fn simulate_file_supports_sixth_harmonic_junction() {
+        let dir = unique_test_dir("sixth-harmonic-junction");
+        fs::create_dir_all(&dir).unwrap();
+        let deck_path = dir.join("deck.cir");
+        fs::write(
+            &deck_path,
+            ".title demo\nV1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)\nR1 in n1 10\nJ1 n1 out icrit=0.5m ic6=0.02m rn=20 cj=0.5p\nR2 out 0 10\n.tran 1p 8p\n.end\n",
+        )
+        .unwrap();
+
+        let report = simulate_file(
+            &deck_path,
+            &SimulationConfig {
+                mode: SimulationMode::InternalTransient,
+                external_command: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.backend,
+            SimulationBackend::InternalTransientCompleted
+        );
+        assert!(report.simulated_events > 0);
+        assert!(report.waveform_path.is_some());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

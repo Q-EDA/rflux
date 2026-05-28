@@ -1,0 +1,7 @@
+.title jj-sixth-harmonic-model-smoke
+.model jjmod jj(icrit=0.5m rn=20 cj=0.5p icrit6=0.001m)
+V1 in 0 PULSE(0,2m,0,1p,1p,2p,8p)
+R1 in n1 10
+J1 n1 0 model=jjmod icrit6=0.002m
+.tran 0.25p 8p
+.end

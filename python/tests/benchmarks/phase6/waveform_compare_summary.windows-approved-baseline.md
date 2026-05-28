@@ -52,10 +52,19 @@
 | jj_second_harmonic_model_override_smoke.cir | josephson-junction | 3.000000e-01 | 4.536703e-05 | PASS | n1:4.537e-05, in:6.505e-19 |
 | jj_second_harmonic_model_smoke.cir | josephson-junction | 3.000000e-01 | 4.121780e-05 | PASS | n1:4.122e-05, in:6.505e-19 |
 | jj_second_harmonic_warning_smoke.cir | josephson-junction | 3.000000e-01 | 2.443788e-04 | PASS | n1:2.444e-04, in:6.505e-19 |
+| jj_sixth_harmonic_model_override_smoke.cir | josephson-junction | 3.000000e-01 | 7.216345e-05 | PASS | n1:7.216e-05, in:6.505e-19 |
+| jj_sixth_harmonic_model_smoke.cir | josephson-junction | 3.000000e-01 | 7.139231e-05 | PASS | n1:7.139e-05, in:6.505e-19 |
+| jj_sixth_harmonic_pure_smoke.cir | josephson-junction | 3.000000e-01 | 4.142722e-04 | PASS | n1:4.143e-04, in:6.505e-19 |
 | jj_third_harmonic_model_override_smoke.cir | josephson-junction | 3.000000e-01 | 6.842850e-05 | PASS | n1:6.843e-05, in:6.505e-19 |
 | jj_third_harmonic_model_smoke.cir | josephson-junction | 3.000000e-01 | 4.502457e-05 | PASS | n1:4.502e-05, in:6.505e-19 |
 | jj_third_harmonic_pure_smoke.cir | josephson-junction | 3.000000e-01 | 4.365998e-04 | PASS | n1:4.366e-04, in:6.505e-19 |
 | k_mutual_smoke.cir | mutual-inductance | 2.000000e-01 | 1.680199e-04 | PASS | tap:1.680e-04, out:1.026e-04 |
+| lib_sec_equals_attached_value_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
+| lib_sec_header_equals_attached_value_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
+| lib_sec_keyword_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
+| lib_section_equals_spaced_value_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
+| lib_section_header_equals_spaced_value_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
+| lib_section_keyword_smoke.cir | hierarchical-subckt | 1.000000e-01 | 2.789467e-06 | PASS | out:2.789e-06, in:2.385e-18 |
 | nested_subckt_smoke.cir | hierarchical-subckt | 1.000000e-01 | 6.474674e-05 | PASS | out:6.475e-05, in:0.000e+00 |
 | pulse_rc_smoke.cir | source-waveform | 1.000000e-01 | 6.474674e-05 | PASS | out:6.475e-05, in:0.000e+00 |
 | pwl_file_rc_smoke.cir | source-waveform | 1.000000e-01 | 8.131547e-06 | PASS | out:8.132e-06, in:1.084e-19 |
@@ -66,8 +75,8 @@
 
 | Category | Deck Count | Failures | Worst Max Abs (V) | Worst Deck | Hotspots |
 |----------|------------|----------|-------------------|------------|----------|
-| hierarchical-subckt | 6 | 0 | 6.474674e-05 | nested_subckt_smoke.cir | include_chain_smoke.cir::out:6.475e-05, include_source_subckt_smoke.cir::out:6.475e-05 |
-| josephson-junction | 39 | 0 | 6.710659e-04 | include_chain_source_k_jj_subckt_smoke.cir | include_chain_source_k_jj_subckt_smoke.cir::tap:6.711e-04, jj_pi_model_smoke.cir::n1:5.945e-04 |
+| hierarchical-subckt | 12 | 0 | 6.474674e-05 | nested_subckt_smoke.cir | include_chain_smoke.cir::out:6.475e-05, include_source_subckt_smoke.cir::out:6.475e-05 |
+| josephson-junction | 42 | 0 | 6.710659e-04 | include_chain_source_k_jj_subckt_smoke.cir | include_chain_source_k_jj_subckt_smoke.cir::tap:6.711e-04, jj_pi_model_smoke.cir::n1:5.945e-04 |
 | mutual-inductance | 5 | 0 | 1.680199e-04 | k_mutual_smoke.cir | include_chain_k_subckt_smoke.cir::tap:1.680e-04, include_chain_source_k_subckt_smoke.cir::tap:1.680e-04 |
 | source-waveform | 4 | 0 | 1.396802e-03 | sin_rc_smoke.cir | sin_rc_smoke.cir::in:1.397e-03, sin_rc_smoke.cir::out:3.300e-04 |
 | transmission-delay | 5 | 0 | 1.000000e-03 | t_delay_smoke.cir | t_delay_smoke.cir::out:1.000e-03, t_delay_smoke.cir::in:1.000e-03 |
@@ -124,10 +133,19 @@
 - jj_second_harmonic_model_override_smoke.cir: [josephson-junction] Top-level JJ deck that exercises supported second-harmonic CPR lowering through `.model ... jj(...)` defaults while also overriding `rn` at the instance site, so the numeric phase-6 baseline covers the current benchmark-safe model-default-plus-inline-override merge path without dropping harmonic CPR semantics.
 - jj_second_harmonic_model_smoke.cir: [josephson-junction] Top-level JJ deck that exercises supported second-harmonic CPR lowering through a `.model ... jj(...)` card plus an instance-side `icrit2` override, used to keep the external JoSIM translator aligned on native JoSIM `CPR={...}` emission instead of degrading second-harmonic semantics to warnings.
 - jj_second_harmonic_warning_smoke.cir: [josephson-junction] Top-level JJ deck that now exercises pure second-harmonic semantics without any primary `icrit` term, using a tighter transient step so both internal transient and external JoSIM can keep this previously warning-only boundary inside the numeric phase-6 baseline.
+- jj_sixth_harmonic_model_override_smoke.cir: [josephson-junction] Top-level JJ deck that exercises supported sixth-harmonic CPR lowering through `.model ... jj(...)` defaults while also overriding `rn` at the instance site, so the numeric phase-6 baseline covers the current benchmark-safe model-default-plus-inline-override merge path for six-coefficient JoSIM `CPR={...}` emission without dropping harmonic semantics.
+- jj_sixth_harmonic_model_smoke.cir: [josephson-junction] Top-level JJ deck that exercises newly supported sixth-harmonic CPR lowering through a `.model ... jj(...)` card plus an instance-side `icrit6` override, so the numeric phase-6 baseline now covers six-coefficient JoSIM `CPR={...}` emission through alias lowering instead of stopping at fifth harmonic.
+- jj_sixth_harmonic_pure_smoke.cir: [josephson-junction] Top-level JJ deck that exercises pure sixth-harmonic semantics without any primary `icrit` term, so the numeric phase-6 baseline starts covering native JoSIM `CPR={0,0,0,0,0,1}` emission when the sixth harmonic is the only available basis current.
 - jj_third_harmonic_model_override_smoke.cir: [josephson-junction] Top-level JJ deck that exercises supported third-harmonic CPR lowering through `.model ... jj(...)` defaults while also overriding `rn` at the instance site, so the numeric phase-6 baseline covers the current benchmark-safe model-default-plus-inline-override merge path for three-coefficient JoSIM `CPR={...}` emission without dropping harmonic semantics.
 - jj_third_harmonic_model_smoke.cir: [josephson-junction] Top-level JJ deck that exercises newly supported third-harmonic CPR lowering through a `.model ... jj(...)` card plus an instance-side `icrit3` override, so the numeric phase-6 baseline covers three-coefficient JoSIM `CPR={...}` emission instead of stopping at second harmonic.
 - jj_third_harmonic_pure_smoke.cir: [josephson-junction] Top-level JJ deck that exercises pure third-harmonic semantics without any primary `icrit` term, so the numeric phase-6 baseline starts covering native JoSIM `CPR={0,0,1}` emission when the third harmonic is the only available basis current.
 - k_mutual_smoke.cir: [mutual-inductance] Mutual-inductor smoke deck used to catch coupling regressions without overfitting the current linear transient approximation.
+- lib_sec_equals_attached_value_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib <path> sec =...` tokenization (value attached to the equals token) aligned in the thresholded phase-6 baseline.
+- lib_sec_header_equals_attached_value_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib/.endl sec =...` library-block header tokenization (value attached to the equals token) aligned in the thresholded phase-6 baseline.
+- lib_sec_keyword_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib <path> sec = ...` alias selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline.
+- lib_section_equals_spaced_value_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib <path> section= ...` tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline.
+- lib_section_header_equals_spaced_value_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib/.endl section= ...` library-block header tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline.
+- lib_section_keyword_smoke.cir: [hierarchical-subckt] Library-section passive RC smoke deck used to keep `.lib <path> section = ...` selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline.
 - nested_subckt_smoke.cir: [hierarchical-subckt] Nested included subckt passive RC smoke deck used to keep parameter passthrough across flattened hierarchy inside the thresholded phase-6 baseline.
 - pulse_rc_smoke.cir: [source-waveform] Pulse-driven passive RC smoke deck used to keep a first waveform-source baseline in the JoSIM correlation gate without requiring JJ-specific semantics.
 - pwl_file_rc_smoke.cir: [source-waveform] File-driven PWL passive RC smoke deck used to keep external waveform-file resolution and source playback inside the first thresholded waveform-source baseline.
@@ -140,6 +158,7 @@ failures: 0 (delta +0 vs previous 0)
 
 | Deck | Summary Change | Worst Max Abs Delta (V) |
 |------|----------------|-------------------------|
-| jj_native_cpr_model_override_fifth_smoke.cir | NEW -> PASS | n/a |
+| lib_sec_header_equals_attached_value_smoke.cir | NEW -> PASS | n/a |
+| lib_section_header_equals_spaced_value_smoke.cir | NEW -> PASS | n/a |
 
 failures=0

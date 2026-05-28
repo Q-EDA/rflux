@@ -1,0 +1,4 @@
+.title lib section header equals spaced value smoke
+.lib "lib_section_header_equals_spaced_value_defs.inc" TT
+.tran 0.5p 20p
+.end

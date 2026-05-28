@@ -1,0 +1,4 @@
+.title lib section keyword smoke
+.lib "lib_section_keyword_defs.inc" section = TT
+.tran 0.5p 20p
+.end

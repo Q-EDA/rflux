@@ -1,0 +1,4 @@
+.title lib sec header equals attached value smoke
+.lib "lib_sec_header_equals_attached_value_defs.inc" TT
+.tran 0.5p 20p
+.end

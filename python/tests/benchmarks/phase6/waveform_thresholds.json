@@ -139,6 +139,21 @@
     "category": "josephson-junction",
     "rationale": "Top-level JJ deck that exercises newly supported fifth-harmonic CPR lowering through a `.model ... jj(...)` card plus an instance-side `icrit5` override, so the numeric phase-6 baseline now covers five-coefficient JoSIM `CPR={...}` emission through alias lowering instead of stopping at fourth harmonic."
   },
+  "jj_sixth_harmonic_model_override_smoke.cir": {
+    "max_abs_threshold_v": 0.3,
+    "category": "josephson-junction",
+    "rationale": "Top-level JJ deck that exercises supported sixth-harmonic CPR lowering through `.model ... jj(...)` defaults while also overriding `rn` at the instance site, so the numeric phase-6 baseline covers the current benchmark-safe model-default-plus-inline-override merge path for six-coefficient JoSIM `CPR={...}` emission without dropping harmonic semantics."
+  },
+  "jj_sixth_harmonic_model_smoke.cir": {
+    "max_abs_threshold_v": 0.3,
+    "category": "josephson-junction",
+    "rationale": "Top-level JJ deck that exercises newly supported sixth-harmonic CPR lowering through a `.model ... jj(...)` card plus an instance-side `icrit6` override, so the numeric phase-6 baseline now covers six-coefficient JoSIM `CPR={...}` emission through alias lowering instead of stopping at fifth harmonic."
+  },
+  "jj_sixth_harmonic_pure_smoke.cir": {
+    "max_abs_threshold_v": 0.3,
+    "category": "josephson-junction",
+    "rationale": "Top-level JJ deck that exercises pure sixth-harmonic semantics without any primary `icrit` term, so the numeric phase-6 baseline starts covering native JoSIM `CPR={0,0,0,0,0,1}` emission when the sixth harmonic is the only available basis current."
+  },
   "jj_native_cpr_model_smoke.cir": {
     "max_abs_threshold_v": 0.3,
     "category": "josephson-junction",
@@ -278,6 +293,36 @@
     "max_abs_threshold_v": 0.1,
     "category": "hierarchical-subckt",
     "rationale": "Chained include passive RC smoke deck used to keep include-of-include expansion and file-backed hierarchy assembly inside the thresholded phase-6 baseline."
+  },
+  "lib_section_keyword_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "hierarchical-subckt",
+    "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> section = ...` selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline."
+  },
+  "lib_sec_keyword_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "hierarchical-subckt",
+    "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> sec = ...` alias selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline."
+  },
+  "lib_section_equals_spaced_value_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "hierarchical-subckt",
+    "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> section= ...` tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline."
+  },
+  "lib_sec_equals_attached_value_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "hierarchical-subckt",
+    "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> sec =...` tokenization (value attached to the equals token) aligned in the thresholded phase-6 baseline."
+  },
+  "lib_section_header_equals_spaced_value_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "hierarchical-subckt",
+    "rationale": "Library-section passive RC smoke deck used to keep `.lib/.endl section= ...` library-block header tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline."
+  },
+  "lib_sec_header_equals_attached_value_smoke.cir": {
+    "max_abs_threshold_v": 0.1,
+    "category": "hierarchical-subckt",
+    "rationale": "Library-section passive RC smoke deck used to keep `.lib/.endl sec =...` library-block header tokenization (value attached to the equals token) aligned in the thresholded phase-6 baseline."
   },
   "include_source_subckt_smoke.cir": {
     "max_abs_threshold_v": 0.1,

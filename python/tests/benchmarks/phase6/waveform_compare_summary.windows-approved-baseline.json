@@ -1117,6 +1117,69 @@
       ]
     },
     {
+      "deck": "jj_sixth_harmonic_model_override_smoke.cir",
+      "threshold_v": 0.3,
+      "category": "josephson-junction",
+      "rationale": "Top-level JJ deck that exercises supported sixth-harmonic CPR lowering through `.model ... jj(...)` defaults while also overriding `rn` at the instance site, so the numeric phase-6 baseline covers the current benchmark-safe model-default-plus-inline-override merge path for six-coefficient JoSIM `CPR={...}` emission without dropping harmonic semantics.",
+      "worst_max_abs_v": 7.21634519078013e-05,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "n1",
+          "max_abs_v": 7.21634519078013e-05,
+          "rms_v": 3.692401382139144e-05
+        },
+        {
+          "node": "in",
+          "max_abs_v": 6.505213034913027e-19,
+          "rms_v": 1.770494733737654e-19
+        }
+      ]
+    },
+    {
+      "deck": "jj_sixth_harmonic_model_smoke.cir",
+      "threshold_v": 0.3,
+      "category": "josephson-junction",
+      "rationale": "Top-level JJ deck that exercises newly supported sixth-harmonic CPR lowering through a `.model ... jj(...)` card plus an instance-side `icrit6` override, so the numeric phase-6 baseline now covers six-coefficient JoSIM `CPR={...}` emission through alias lowering instead of stopping at fifth harmonic.",
+      "worst_max_abs_v": 7.139231422280398e-05,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "n1",
+          "max_abs_v": 7.139231422280398e-05,
+          "rms_v": 3.652419297267552e-05
+        },
+        {
+          "node": "in",
+          "max_abs_v": 6.505213034913027e-19,
+          "rms_v": 1.770494733737654e-19
+        }
+      ]
+    },
+    {
+      "deck": "jj_sixth_harmonic_pure_smoke.cir",
+      "threshold_v": 0.3,
+      "category": "josephson-junction",
+      "rationale": "Top-level JJ deck that exercises pure sixth-harmonic semantics without any primary `icrit` term, so the numeric phase-6 baseline starts covering native JoSIM `CPR={0,0,0,0,0,1}` emission when the sixth harmonic is the only available basis current.",
+      "worst_max_abs_v": 0.0004142722101988448,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "n1",
+          "max_abs_v": 0.0004142722101988448,
+          "rms_v": 0.00014925237478628602
+        },
+        {
+          "node": "in",
+          "max_abs_v": 6.505213034913027e-19,
+          "rms_v": 1.770494733737654e-19
+        }
+      ]
+    },
+    {
       "deck": "jj_third_harmonic_model_override_smoke.cir",
       "threshold_v": 0.3,
       "category": "josephson-junction",
@@ -1202,6 +1265,132 @@
           "node": "in",
           "max_abs_v": 4.336808689942018e-19,
           "rms_v": 1.4456028966473392e-19
+        }
+      ]
+    },
+    {
+      "deck": "lib_sec_equals_attached_value_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "hierarchical-subckt",
+      "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> sec =...` tokenization (value attached to the equals token) aligned in the thresholded phase-6 baseline.",
+      "worst_max_abs_v": 2.7894667572484692e-06,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 2.7894667572484692e-06,
+          "rms_v": 1.541099900117695e-06
+        },
+        {
+          "node": "in",
+          "max_abs_v": 2.3852447794681098e-18,
+          "rms_v": 4.109377059889911e-19
+        }
+      ]
+    },
+    {
+      "deck": "lib_sec_header_equals_attached_value_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "hierarchical-subckt",
+      "rationale": "Library-section passive RC smoke deck used to keep `.lib/.endl sec =...` library-block header tokenization (value attached to the equals token) aligned in the thresholded phase-6 baseline.",
+      "worst_max_abs_v": 2.7894667572484692e-06,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 2.7894667572484692e-06,
+          "rms_v": 1.541099900117695e-06
+        },
+        {
+          "node": "in",
+          "max_abs_v": 2.3852447794681098e-18,
+          "rms_v": 4.109377059889911e-19
+        }
+      ]
+    },
+    {
+      "deck": "lib_sec_keyword_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "hierarchical-subckt",
+      "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> sec = ...` alias selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline.",
+      "worst_max_abs_v": 2.7894667572484692e-06,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 2.7894667572484692e-06,
+          "rms_v": 1.541099900117695e-06
+        },
+        {
+          "node": "in",
+          "max_abs_v": 2.3852447794681098e-18,
+          "rms_v": 4.109377059889911e-19
+        }
+      ]
+    },
+    {
+      "deck": "lib_section_equals_spaced_value_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "hierarchical-subckt",
+      "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> section= ...` tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline.",
+      "worst_max_abs_v": 2.7894667572484692e-06,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 2.7894667572484692e-06,
+          "rms_v": 1.541099900117695e-06
+        },
+        {
+          "node": "in",
+          "max_abs_v": 2.3852447794681098e-18,
+          "rms_v": 4.109377059889911e-19
+        }
+      ]
+    },
+    {
+      "deck": "lib_section_header_equals_spaced_value_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "hierarchical-subckt",
+      "rationale": "Library-section passive RC smoke deck used to keep `.lib/.endl section= ...` library-block header tokenization (empty right-hand side with value in the next token) aligned in the thresholded phase-6 baseline.",
+      "worst_max_abs_v": 2.7894667572484692e-06,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 2.7894667572484692e-06,
+          "rms_v": 1.541099900117695e-06
+        },
+        {
+          "node": "in",
+          "max_abs_v": 2.3852447794681098e-18,
+          "rms_v": 4.109377059889911e-19
+        }
+      ]
+    },
+    {
+      "deck": "lib_section_keyword_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "hierarchical-subckt",
+      "rationale": "Library-section passive RC smoke deck used to keep `.lib <path> section = ...` selection and section-scoped hierarchy assembly inside the thresholded phase-6 baseline.",
+      "worst_max_abs_v": 2.7894667572484692e-06,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "out",
+          "max_abs_v": 2.7894667572484692e-06,
+          "rms_v": 1.541099900117695e-06
+        },
+        {
+          "node": "in",
+          "max_abs_v": 2.3852447794681098e-18,
+          "rms_v": 4.109377059889911e-19
         }
       ]
     },
@@ -1314,7 +1503,7 @@
   "categories": [
     {
       "category": "hierarchical-subckt",
-      "deck_count": 6,
+      "deck_count": 12,
       "failures": 0,
       "worst_max_abs_v": 6.47467391730817e-05,
       "worst_deck": "nested_subckt_smoke.cir",
@@ -1341,7 +1530,7 @@
     },
     {
       "category": "josephson-junction",
-      "deck_count": 39,
+      "deck_count": 42,
       "failures": 0,
       "worst_max_abs_v": 0.000671065936427136,
       "worst_deck": "include_chain_source_k_jj_subckt_smoke.cir",
@@ -1454,10 +1643,18 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "jj_native_cpr_model_override_fifth_smoke.cir",
+        "deck": "lib_sec_header_equals_attached_value_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
-        "current_worst_max_abs_v": 3.994670277649714e-05,
+        "current_worst_max_abs_v": 2.7894667572484692e-06,
+        "previous_worst_max_abs_v": null,
+        "worst_max_abs_v_delta": null
+      },
+      {
+        "deck": "lib_section_header_equals_spaced_value_smoke.cir",
+        "current_summary": "PASS",
+        "previous_summary": "NEW",
+        "current_worst_max_abs_v": 2.7894667572484692e-06,
         "previous_worst_max_abs_v": null,
         "worst_max_abs_v_delta": null
       }

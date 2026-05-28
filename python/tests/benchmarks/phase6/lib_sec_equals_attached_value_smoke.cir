@@ -1,0 +1,4 @@
+.title lib sec equals attached value smoke
+.lib "lib_sec_keyword_defs.inc" sec =TT
+.tran 0.5p 20p
+.end
