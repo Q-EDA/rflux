@@ -1,0 +1,6 @@
+.title exp keyword mixed case space before paren source smoke
+V1 in 0 eXp (v1=0, v2=1, td1=0, tau1=1n, td2=1n, tau2=2n)
+R1 in out 1
+C1 out 0 1p
+.tran 1p 10p
+.end
