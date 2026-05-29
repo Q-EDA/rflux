@@ -414,6 +414,11 @@
                                            "category":  "source-waveform",
                                            "rationale":  "Parameter-driven passive RC smoke deck used to keep spaced and comma-separated `.param` assignment forms inside the thresholded waveform baseline."
                                        },
+    "continuation_rc_smoke.cir":  {
+                                     "max_abs_threshold_v":  0.1,
+                                     "category":  "source-waveform",
+                                     "rationale":  "Parameter-driven passive RC smoke deck used to keep SPICE continuation-line normalization for `.param` and `.tran` cards inside the thresholded waveform baseline."
+                                 },
     "include_subckt_smoke.cir":  {
                                      "max_abs_threshold_v":  0.1,
                                      "category":  "hierarchical-subckt",

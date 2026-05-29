@@ -386,6 +386,7 @@ fn run_generated_deck_with_base(
     simulation_config: &SimulationConfig,
     include_base_dir: Option<&Path>,
 ) -> SimulationReport {
+    let deck = normalize_continuation_lines(deck);
     let generated_deck_lines = deck.lines().count();
     let requested_mode = simulation_mode_name(&simulation_config.mode).to_string();
 
@@ -494,7 +495,7 @@ fn run_generated_deck_with_base(
             Some(command)
         }
         SimulationMode::InternalTransient => {
-            return match run_internal_transient_with_base(deck, include_base_dir) {
+            return match run_internal_transient_with_base(&deck, include_base_dir) {
                 Ok(result) => {
                     let waveform_path = write_internal_transient_waveform(
                         &result,
@@ -567,8 +568,8 @@ fn run_generated_deck_with_base(
                     };
                 }
             };
-            let external_translation_notes = collect_external_translation_notes(deck);
-            let prepared_deck = prepare_external_simulator_deck(deck, include_base_dir);
+            let external_translation_notes = collect_external_translation_notes(&deck);
+            let prepared_deck = prepare_external_simulator_deck(&deck, include_base_dir);
             let deck_path = run_dir.join("input.sp");
             if fs::write(&deck_path, prepared_deck).is_err() {
                 return SimulationReport {
