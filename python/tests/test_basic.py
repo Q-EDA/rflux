@@ -2279,6 +2279,59 @@ def test_simulate_text_internal_transient_accepts_nodeset_startup_hint():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_honors_keyword_tran_print_window() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".ic V(out)=1m\n"
+        "R1 out 0 1\n"
+        "C1 out 0 1p\n"
+        ".tran tstep = 1p tstop = 10p tstart = 2p tprint = 2p uic\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+    waveform_lines = Path(report.waveform_path).read_text(encoding="utf-8").splitlines()
+    captured_times = [float(line.split(",", 1)[0]) for line in waveform_lines[1:]]
+    assert captured_times == [2.0, 4.0, 6.0, 8.0, 10.0]
+
+
+def test_simulate_text_internal_transient_accepts_nodeset_spaced_and_comma_forms() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".nodeset V(out) = 1, V(in) = 0.5\n"
+        "V1 in 0 DC 0\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 2p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_options_card_space_pairs_and_aliases() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".options rel 1e-4 abs 1e-6 itl 12 seed 123\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc;seed=123"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_noise_is_reproducible_with_same_seed() -> None:
     deck = (
         ".title demo\n"
