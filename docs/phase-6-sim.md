@@ -21,6 +21,7 @@ Current repository state now has a substantial `rflux-sim` slice with a native i
 - explicit `simulation_mode` selection now flows through Rust, PyO3, and Python for `auto`, `event_only`, `external_josim`, and `internal_transient`.
 - simulation reports across Rust, PyO3, and Python now expose explicit JoSIM-alignment and quality-gate semantics (`josim_alignment_level`, `josim_alignment_available`, `josim_next_step`, `josim_quality_passed`, `josim_quality_status`) derived from the shared quality-gate policy.
 - external-simulator summary parsing now also surfaces explicit summary-contract metadata (`external_summary_contract`: `sim_v1` / `legacy` / `mixed`) through Rust, PyO3, and Python reports.
+- waveform artifacts now expose explicit format metadata (`waveform_format`: `csv_v1` / `external_passthrough`) alongside `waveform_path` through Rust, PyO3, Python, and CLI JSON surfaces.
 - external command policy is now probeable via embeddable APIs (`rflux_sim::is_supported_external_command`, Python `is_supported_external_command(...)`) in addition to runtime enforcement.
 - `rflux-sim` now also exposes a direct `simulate_text(...)` path with a growing SPICE-subset frontend (`.param`, `.tran`, `.option`, `.ic/.nodeset`, source families, `.model` JJ subset, `.subckt` flattening).
 - `rflux-sim` now also exposes `simulate_file(...)` with relative `.include` expansion for file-backed decks.

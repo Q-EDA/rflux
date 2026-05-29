@@ -463,7 +463,10 @@ fn classify_simulation_error(error: &SimulationError) -> CliErrorClassification 
             suggestion: "Validate the deck syntax against the supported SPICE/JoSIM subset, then retry simulate-file.",
         },
         SimulationError::IncludeWithoutBase(_)
-        | SimulationError::NestedSubcktDefinition(_)
+        | SimulationError::DuplicateSubcktDefinition { .. }
+        | SimulationError::MissingLibrarySection { .. }
+        | SimulationError::UnterminatedLibrarySection { .. }
+        | SimulationError::MismatchedLibrarySectionEnd { .. }
         | SimulationError::UnsupportedSubcktControl { .. }
         | SimulationError::UnsupportedSubcktInstanceSyntax(_)
         | SimulationError::UnsupportedExpression(_) => CliErrorClassification {
@@ -4033,6 +4036,7 @@ fn simulation_report_to_json(report: &SimulationReport) -> Value {
         "generated_deck_lines": report.generated_deck_lines,
         "generated_deck_path": report.generated_deck_path,
         "waveform_path": report.waveform_path,
+        "waveform_format": report.waveform_format,
         "reported_violations": report.reported_violations,
         "reported_worst_delay_ps": report.reported_worst_delay_ps,
         "delay_details": report.delay_details.iter().map(|detail| json!({
@@ -5885,6 +5889,8 @@ mod tests {
             generated_deck_lines: 8,
             generated_deck_path: None,
             waveform_path: None,
+            waveform_format: None,
+            external_summary_contract: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(1.25e-3),
             delay_details: vec![rflux_sim::SimulationDelayDetail {
@@ -5929,6 +5935,7 @@ mod tests {
         let report_json = simulation_report_to_json(&report);
 
         assert_eq!(report_json["quality_gate"]["passed"], false);
+        assert_eq!(report_json["waveform_format"], Value::Null);
         assert_eq!(
             report_json["quality_gate"]["status"],
             "failed_measurement_warnings"

@@ -3814,6 +3814,8 @@ mod tests {
             generated_deck_lines: 4,
             generated_deck_path: None,
             waveform_path: Some("wave.raw".to_string()),
+            waveform_format: Some("external_passthrough".to_string()),
+            external_summary_contract: Some("legacy".to_string()),
             reported_violations: 0,
             reported_worst_delay_ps: Some(13.5),
             delay_details: vec![
@@ -3954,6 +3956,8 @@ mod tests {
             generated_deck_lines: 4,
             generated_deck_path: None,
             waveform_path: None,
+            waveform_format: None,
+            external_summary_contract: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(20.0),
             delay_details: vec![
@@ -4101,6 +4105,8 @@ mod tests {
             generated_deck_lines: 4,
             generated_deck_path: None,
             waveform_path: None,
+            waveform_format: None,
+            external_summary_contract: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(20.0),
             delay_details: vec![
@@ -5264,6 +5270,7 @@ mod tests {
             events,
             result,
             waveform_path,
+            external_summary_contract,
             reported_violations,
             reported_worst_delay_ps,
             delay_details,
@@ -5276,6 +5283,7 @@ mod tests {
         assert_eq!(events, Some(42));
         assert_eq!(result.as_deref(), Some("pass"));
         assert_eq!(waveform_path.as_deref(), Some("C:/tmp/out.raw"));
+        assert_eq!(external_summary_contract.as_deref(), Some("legacy"));
         assert_eq!(reported_violations, Some(3));
         assert_eq!(reported_worst_delay_ps, Some(18.5));
         assert_eq!(delay_details.len(), 1);
@@ -5299,6 +5307,7 @@ mod tests {
             events,
             result,
             waveform_path,
+            external_summary_contract,
             reported_violations,
             reported_worst_delay_ps,
             delay_details,
@@ -5311,6 +5320,7 @@ mod tests {
         assert_eq!(events, Some(17));
         assert_eq!(result.as_deref(), Some("pass"));
         assert_eq!(waveform_path.as_deref(), Some("C:/tmp/josim.raw"));
+        assert_eq!(external_summary_contract.as_deref(), Some("legacy"));
         assert_eq!(reported_violations, Some(2));
         assert_eq!(reported_worst_delay_ps, Some(11.25));
         assert_eq!(delay_details.len(), 1);

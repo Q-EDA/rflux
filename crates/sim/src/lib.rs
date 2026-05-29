@@ -83,6 +83,7 @@ pub struct SimulationReport {
     pub generated_deck_lines: usize,
     pub generated_deck_path: Option<String>,
     pub waveform_path: Option<String>,
+    pub waveform_format: Option<String>,
     pub external_summary_contract: Option<String>,
     pub reported_violations: usize,
     pub reported_worst_delay_ps: Option<f64>,
@@ -382,6 +383,7 @@ fn run_generated_deck_with_base(
         generated_deck_lines,
         generated_deck_path: None,
         waveform_path: None,
+        waveform_format: None,
         external_summary_contract: None,
         reported_violations: 0,
         reported_worst_delay_ps: None,
@@ -399,6 +401,7 @@ fn run_generated_deck_with_base(
         generated_deck_lines,
         generated_deck_path: None,
         waveform_path: None,
+        waveform_format: None,
         external_summary_contract: None,
         reported_violations: 0,
         reported_worst_delay_ps: None,
@@ -416,12 +419,18 @@ fn run_generated_deck_with_base(
                 .option_seed
                 .map(|seed| format!("internal_transient_linear_rc;seed={seed}"))
                 .unwrap_or_else(|| "internal_transient_linear_rc".to_string());
+            let waveform_format = if waveform_path.is_some() {
+                Some("csv_v1".to_string())
+            } else {
+                None
+            };
             SimulationReport {
                 backend: SimulationBackend::InternalTransientCompleted,
                 simulated_events: result.simulated_steps,
                 generated_deck_lines,
                 generated_deck_path: None,
                 waveform_path,
+                waveform_format,
                 external_summary_contract: None,
                 reported_violations: 0,
                 reported_worst_delay_ps: result
@@ -450,6 +459,7 @@ fn run_generated_deck_with_base(
                     generated_deck_lines,
                     generated_deck_path: None,
                     waveform_path: None,
+                    waveform_format: None,
                     external_summary_contract: None,
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
@@ -487,6 +497,7 @@ fn run_generated_deck_with_base(
                     generated_deck_lines,
                     generated_deck_path: None,
                     waveform_path: None,
+                    waveform_format: None,
                     external_summary_contract: None,
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
@@ -519,6 +530,7 @@ fn run_generated_deck_with_base(
                         generated_deck_lines,
                         generated_deck_path: None,
                         waveform_path: None,
+                        waveform_format: None,
                         external_summary_contract: None,
                         reported_violations: 0,
                         reported_worst_delay_ps: None,
@@ -541,6 +553,7 @@ fn run_generated_deck_with_base(
                     generated_deck_lines,
                     generated_deck_path: None,
                     waveform_path: None,
+                    waveform_format: None,
                     external_summary_contract: None,
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
@@ -610,6 +623,7 @@ fn run_generated_deck_with_base(
                         simulated_events: reported_events.unwrap_or(simulated_events),
                         generated_deck_lines,
                         generated_deck_path,
+                        waveform_format: waveform_path.as_deref().and_then(detect_waveform_format),
                         waveform_path,
                         external_summary_contract,
                         reported_violations: reported_violations.unwrap_or(violation_details.len()),
@@ -629,6 +643,7 @@ fn run_generated_deck_with_base(
                         generated_deck_lines,
                         generated_deck_path: Some(deck_path.display().to_string()),
                         waveform_path: None,
+                        waveform_format: None,
                         external_summary_contract: None,
                         reported_violations: 0,
                         reported_worst_delay_ps: None,
@@ -718,6 +733,17 @@ fn simulation_quality_gate(
         violation_count,
         warning_count,
         next_step: next_step.to_string(),
+    }
+}
+
+fn detect_waveform_format(path: &str) -> Option<String> {
+    let lowered = path.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        None
+    } else if lowered.ends_with(".csv") {
+        Some("csv_v1".to_string())
+    } else {
+        Some("external_passthrough".to_string())
     }
 }
 
@@ -7925,6 +7951,7 @@ mod tests {
             generated_deck_lines: 2,
             generated_deck_path: Some("input.sp".to_string()),
             waveform_path: Some("wave.csv".to_string()),
+            waveform_format: Some("csv_v1".to_string()),
             external_summary_contract: Some("sim_v1".to_string()),
             reported_violations: 0,
             reported_worst_delay_ps: Some(8.0),
@@ -7953,6 +7980,7 @@ mod tests {
             generated_deck_lines: 2,
             generated_deck_path: Some("input.sp".to_string()),
             waveform_path: Some("wave.csv".to_string()),
+            waveform_format: Some("csv_v1".to_string()),
             external_summary_contract: Some("sim_v1".to_string()),
             reported_violations: 1,
             reported_worst_delay_ps: Some(8.0),

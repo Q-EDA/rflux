@@ -419,6 +419,7 @@ class VerificationReport:
     generated_deck_lines: int
     generated_deck_path: str | None
     waveform_path: str | None
+    waveform_format: str | None
     external_summary_contract: str | None
     reported_violations: int
     reported_worst_delay_ps: float | None
@@ -587,6 +588,7 @@ class SimulationReport:
     generated_deck_lines: int
     generated_deck_path: str | None
     waveform_path: str | None
+    waveform_format: str | None
     external_summary_contract: str | None
     reported_violations: int
     reported_worst_delay_ps: float | None
