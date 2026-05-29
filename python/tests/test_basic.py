@@ -1491,6 +1491,38 @@ def test_simulate_file_resolves_include_and_returns_event_only_report(tmp_path):
     assert report.external_result is None
 
 
+def test_simulate_file_resolves_lib_section_and_returns_internal_transient_report(tmp_path):
+    library_file = tmp_path / "defs.inc"
+    library_file.write_text(
+        ".lib TT\n"
+        ".param tstep=0.5p tstop=20p\n"
+        "R1 n1 0 50\n"
+        ".endl TT\n"
+        ".lib FF\n"
+        ".param tstep=1p tstop=10p\n"
+        "R2 n2 0 75\n"
+        ".endl FF\n",
+        encoding="utf-8",
+    )
+    deck_file = tmp_path / "top.cir"
+    deck_file.write_text(
+        ".title demo\n"
+        ".lib \"defs.inc\" section = TT\n"
+        ".tran tstep tstop\n"
+        ".end\n",
+        encoding="utf-8",
+    )
+
+    report = rflux.simulate_file(
+        str(deck_file),
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
 def test_simulate_file_resolves_file_driven_pwl_source_from_deck_directory(tmp_path):
     waveform_file = tmp_path / "wave.txt"
     waveform_file.write_text("0 0\n2p 1\n4p 0\n", encoding="utf-8")
