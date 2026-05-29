@@ -8063,7 +8063,7 @@ mod tests {
     #[test]
     fn stage_external_run_artifacts_can_retain_run_dir_for_failure_review() {
         let base_dir = unique_test_dir("external-stage-retain");
-        let run_dir = base_dir.join("rflux-ext-1234-5678");
+        let run_dir = base_dir.join("rflux-ext-2234-6678");
         fs::create_dir_all(&run_dir).unwrap();
         let deck_path = run_dir.join("input.sp");
         let waveform_path = run_dir.join("external_output.csv");
@@ -8074,8 +8074,8 @@ mod tests {
             &run_dir,
             &deck_path,
             Some(&waveform_path),
-            1234,
-            5678,
+            2234,
+            6678,
             false,
         );
 
