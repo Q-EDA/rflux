@@ -1417,6 +1417,53 @@ def test_simulate_text_parses_param_tran_and_returns_event_only_report():
     assert report.external_result is None
 
 
+def test_simulate_text_parses_spaced_and_comma_param_assignments() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".param tstep = 1p, tstop=5p, scale = 2\n"
+        "R1 n1 0 50\n"
+        ".tran tstep tstop\n"
+        ".end\n",
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
+def test_simulate_text_parses_param_continuation_lines() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".param tstep=0.5p\n"
+        "+ tstop=20p, scale=2\n"
+        "R1 n1 0 50\n"
+        ".tran 1p\n"
+        "+ 10p uic\n"
+        ".end\n",
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
+def test_simulate_text_parses_scientific_notation_params() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".param tstep=1e-12 tstop=5e-12\n"
+        "R1 n1 0 50\n"
+        ".tran tstep tstop\n"
+        ".end\n",
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
 def test_simulate_file_resolves_include_and_returns_event_only_report(tmp_path):
     include_file = tmp_path / "defs.inc"
     include_file.write_text(
@@ -2653,6 +2700,74 @@ def test_simulate_text_internal_transient_noise_differs_for_different_seed() -> 
     assert Path(report_a.waveform_path).read_text(encoding="utf-8") != Path(
         report_b.waveform_path
     ).read_text(encoding="utf-8")
+
+
+def test_simulate_text_internal_transient_accepts_option_temp_and_tnom() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".option seed=77 tnoise=1u temp=60 tnom=27\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc;seed=77"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_option_aliases_for_noise_and_temperature() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".option seed=77 noise_sigma=1u temperature=60 nominal_temperature=27\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc;seed=77"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_kelvin_option_temperature_aliases() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".option seed=77 sigma=1u temperature_k=333.15 nominal_temperature_k=300.15\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc;seed=77"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_celsius_option_temperature_aliases() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".option seed=77 sigma=1u tempc=60 tnomc=27\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc;seed=77"
+    assert report.waveform_path is not None
 
 
 def test_simulate_file_external_josim_preserves_pi_semantics_for_benchmark_asset() -> None:
