@@ -508,5 +508,10 @@
                                                          "category":  "source-waveform",
                                                          "max_abs_threshold_v":  0.1,
                                                          "rationale":  "Exponential passive RC smoke deck used to keep alias argument spelling, mixed-case keyword spelling (eXp), and comma-separated argument parsing coupled in the thresholded waveform baseline."
-                                                     }
+                                                     },
+    "exp_alias_mixed_case_space_before_paren_source_smoke.cir":  {
+                                                                       "category":  "source-waveform",
+                                                                       "max_abs_threshold_v":  0.1,
+                                                                       "rationale":  "Exponential passive RC smoke deck used to keep alias argument spelling, mixed-case keyword spelling (eXp), and space-before-paren form parsing coupled in the thresholded waveform baseline."
+                                                                   }
 }
