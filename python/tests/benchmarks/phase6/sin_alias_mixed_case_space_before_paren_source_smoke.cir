@@ -1,0 +1,9 @@
+.title sin alias mixed case space before paren source smoke
+* Validates SIN source parsing with alias arguments, mixed-case keyword spelling, and whitespace before opening paren.
+* Variant: mixed-case alias form with space before ( using offset/amplitude/f/td/damping/phi.
+
+V1 in 0 sIn (offset=0, amplitude=1m, f=100g, td=0, damping=300g, phi=90)
+R1 in out 1k
+C1 out 0 1p
+.tran 1p 5p
+.end
