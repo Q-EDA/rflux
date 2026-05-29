@@ -4030,6 +4030,7 @@ fn verification_report_to_json(report: &rflux_flow::VerificationReport) -> Value
 fn simulation_report_to_json(report: &SimulationReport) -> Value {
     json!({
         "backend": format!("{:?}", report.backend),
+        "requested_mode": report.requested_mode,
         "quality_gate": simulation_quality_gate_to_json(&report.quality_gate()),
         "josim_quality_gate": simulation_quality_gate_to_json(&report.josim_quality_gate()),
         "simulated_events": report.simulated_events,
@@ -5886,6 +5887,7 @@ mod tests {
     fn simulation_report_json_includes_measurement_details() {
         let report = SimulationReport {
             backend: rflux_sim::SimulationBackend::InternalTransientCompleted,
+            requested_mode: "internal_transient".to_string(),
             simulated_events: 6,
             generated_deck_lines: 8,
             generated_deck_path: None,
@@ -5937,6 +5939,7 @@ mod tests {
         let report_json = simulation_report_to_json(&report);
 
         assert_eq!(report_json["quality_gate"]["passed"], false);
+        assert_eq!(report_json["requested_mode"], "internal_transient");
         assert_eq!(report_json["waveform_format"], Value::Null);
         assert_eq!(report_json["diagnostic_code"], Value::Null);
         assert_eq!(

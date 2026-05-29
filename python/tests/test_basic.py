@@ -205,6 +205,7 @@ def test_simulate_file_accepts_path_objects(tmp_path):
 
     assert isinstance(report, rflux.SimulationReport)
     assert report.backend == "event_only"
+    assert report.requested_mode == "auto"
     assert report.josim_alignment_level == "event_only"
     assert report.josim_alignment_available is False
     assert report.josim_quality_passed is False
@@ -1309,6 +1310,7 @@ def test_verify_layout_reports_ptl_macro_boundary_checks():
     assert report.checked_ptl_routes == 1
     assert report.ptl_macro_boundary_violations == 1
     assert report.simulation_backend == "event_only"
+    assert report.requested_mode == "auto"
     assert report.josim_alignment_level == "event_only"
     assert report.josim_alignment_available is False
     assert report.josim_quality_passed is False
@@ -1337,6 +1339,7 @@ def test_verify_layout_reports_missing_external_simulator_with_deck_path():
     )
 
     assert report.simulation_backend == "external_unavailable"
+    assert report.requested_mode == "auto"
     assert report.josim_alignment_level == "unavailable"
     assert report.josim_alignment_available is False
     assert report.josim_quality_passed is False
@@ -1378,6 +1381,7 @@ def test_verify_layout_internal_transient_mode_reports_unavailable():
     )
 
     assert report.simulation_backend == "internal_transient_completed"
+    assert report.requested_mode == "internal_transient"
     assert report.josim_alignment_level == "internal_transient"
     assert report.josim_alignment_available is False
     assert report.josim_quality_passed is False
@@ -1400,6 +1404,7 @@ def test_simulate_text_parses_param_tran_and_returns_event_only_report():
     )
 
     assert report.backend == "event_only"
+    assert report.requested_mode == "event_only"
     assert report.josim_alignment_level == "event_only"
     assert report.josim_alignment_available is False
     assert report.josim_quality_passed is False
@@ -1483,6 +1488,7 @@ def test_simulate_text_internal_transient_completes_for_passive_source_only_deck
     )
 
     assert report.backend == "internal_transient_completed"
+    assert report.requested_mode == "internal_transient"
     assert report.josim_alignment_level == "internal_transient"
     assert report.josim_alignment_available is False
     assert report.josim_quality_passed is False

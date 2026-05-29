@@ -3810,6 +3810,7 @@ mod tests {
         };
         let simulation = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
+            requested_mode: "external_josim".to_string(),
             simulated_events: 2,
             generated_deck_lines: 4,
             generated_deck_path: None,
@@ -3953,6 +3954,7 @@ mod tests {
         };
         let simulation = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
+            requested_mode: "external_josim".to_string(),
             simulated_events: 2,
             generated_deck_lines: 4,
             generated_deck_path: None,
@@ -4103,6 +4105,7 @@ mod tests {
         };
         let simulation = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
+            requested_mode: "external_josim".to_string(),
             simulated_events: 2,
             generated_deck_lines: 4,
             generated_deck_path: None,

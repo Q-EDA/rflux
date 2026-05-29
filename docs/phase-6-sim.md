@@ -23,6 +23,7 @@ Current repository state now has a substantial `rflux-sim` slice with a native i
 - external-simulator summary parsing now also surfaces explicit summary-contract metadata (`external_summary_contract`: `sim_v1` / `legacy` / `mixed`) through Rust, PyO3, and Python reports.
 - waveform artifacts now expose explicit format metadata (`waveform_format`: `csv_v1` / `external_passthrough`) alongside `waveform_path` through Rust, PyO3, Python, and CLI JSON surfaces.
 - simulation reports now expose structured diagnostic metadata (`diagnostic_code`) for parser/runtime/backend failure outcomes across Rust, PyO3, Python, and CLI JSON surfaces.
+- simulation reports now expose explicit mode-selection metadata (`requested_mode`) alongside resolved backend identity, making backend-selection behavior auditable for embedding and CLI consumers.
 - external command policy is now probeable via embeddable APIs (`rflux_sim::is_supported_external_command`, Python `is_supported_external_command(...)`) in addition to runtime enforcement.
 - `rflux-sim` now also exposes a direct `simulate_text(...)` path with a growing SPICE-subset frontend (`.param`, `.tran`, `.option`, `.ic/.nodeset`, source families, `.model` JJ subset, `.subckt` flattening).
 - `rflux-sim` now also exposes `simulate_file(...)` with relative `.include` expansion for file-backed decks.

@@ -1371,6 +1371,8 @@ struct PySimulationReport {
     #[pyo3(get)]
     backend: String,
     #[pyo3(get)]
+    requested_mode: String,
+    #[pyo3(get)]
     josim_alignment_level: String,
     #[pyo3(get)]
     josim_alignment_available: bool,
@@ -1426,6 +1428,8 @@ struct PyVerificationReport {
     ptl_forbidden_length_violations: usize,
     #[pyo3(get)]
     simulation_backend: String,
+    #[pyo3(get)]
+    requested_mode: String,
     #[pyo3(get)]
     josim_alignment_level: String,
     #[pyo3(get)]
@@ -1916,6 +1920,7 @@ impl From<SimulationReport> for PySimulationReport {
         let josim_gate = value.josim_quality_gate();
         Self {
             backend: simulation_backend_name(&value.backend).to_string(),
+            requested_mode: value.requested_mode,
             josim_alignment_level: josim_gate.alignment_level,
             josim_alignment_available: josim_gate.external_alignment_available,
             josim_next_step: josim_gate.next_step,
@@ -2005,6 +2010,7 @@ impl From<VerificationReport> for PyVerificationReport {
             ptl_macro_boundary_violations: value.ptl_macro_boundary_violations,
             ptl_forbidden_length_violations: value.ptl_forbidden_length_violations,
             simulation_backend: simulation_backend_name(&value.simulation.backend).to_string(),
+            requested_mode: value.simulation.requested_mode,
             josim_alignment_level: josim_gate.alignment_level,
             josim_alignment_available: josim_gate.external_alignment_available,
             josim_next_step: josim_gate.next_step,

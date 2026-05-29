@@ -79,6 +79,7 @@ pub struct SimulationViolationDetail {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulationReport {
     pub backend: SimulationBackend,
+    pub requested_mode: String,
     pub simulated_events: usize,
     pub generated_deck_lines: usize,
     pub generated_deck_path: Option<String>,
@@ -370,6 +371,15 @@ pub fn run_generated_deck(
     run_generated_deck_with_base(deck, simulated_events, simulation_config, None)
 }
 
+fn simulation_mode_name(mode: &SimulationMode) -> &'static str {
+    match mode {
+        SimulationMode::Auto => "auto",
+        SimulationMode::EventOnly => "event_only",
+        SimulationMode::ExternalJosim => "external_josim",
+        SimulationMode::InternalTransient => "internal_transient",
+    }
+}
+
 fn run_generated_deck_with_base(
     deck: &str,
     simulated_events: usize,
@@ -377,9 +387,11 @@ fn run_generated_deck_with_base(
     include_base_dir: Option<&Path>,
 ) -> SimulationReport {
     let generated_deck_lines = deck.lines().count();
+    let requested_mode = simulation_mode_name(&simulation_config.mode).to_string();
 
     let event_only_report = || SimulationReport {
         backend: SimulationBackend::EventOnly,
+        requested_mode: requested_mode.clone(),
         simulated_events,
         generated_deck_lines,
         generated_deck_path: None,
@@ -399,6 +411,7 @@ fn run_generated_deck_with_base(
 
     let internal_transient_unavailable_report = |reason: String| SimulationReport {
         backend: SimulationBackend::InternalTransientUnavailable,
+        requested_mode: requested_mode.clone(),
         simulated_events,
         generated_deck_lines,
         generated_deck_path: None,
@@ -429,6 +442,7 @@ fn run_generated_deck_with_base(
             };
             SimulationReport {
                 backend: SimulationBackend::InternalTransientCompleted,
+                requested_mode: requested_mode.clone(),
                 simulated_events: result.simulated_steps,
                 generated_deck_lines,
                 generated_deck_path: None,
@@ -459,6 +473,7 @@ fn run_generated_deck_with_base(
             let Some(command) = simulation_config.external_command.as_deref() else {
                 return SimulationReport {
                     backend: SimulationBackend::ExternalUnavailable,
+                    requested_mode: requested_mode.clone(),
                     simulated_events,
                     generated_deck_lines,
                     generated_deck_path: None,
@@ -498,6 +513,7 @@ fn run_generated_deck_with_base(
             if !is_allowed_external_command(command) {
                 return SimulationReport {
                     backend: SimulationBackend::ExternalUnavailable,
+                    requested_mode: requested_mode.clone(),
                     simulated_events,
                     generated_deck_lines,
                     generated_deck_path: None,
@@ -532,6 +548,7 @@ fn run_generated_deck_with_base(
                 Err(_) => {
                     return SimulationReport {
                         backend: SimulationBackend::ExternalUnavailable,
+                        requested_mode: requested_mode.clone(),
                         simulated_events,
                         generated_deck_lines,
                         generated_deck_path: None,
@@ -556,6 +573,7 @@ fn run_generated_deck_with_base(
             if fs::write(&deck_path, prepared_deck).is_err() {
                 return SimulationReport {
                     backend: SimulationBackend::ExternalUnavailable,
+                    requested_mode: requested_mode.clone(),
                     simulated_events,
                     generated_deck_lines,
                     generated_deck_path: None,
@@ -633,6 +651,7 @@ fn run_generated_deck_with_base(
                     );
                     return SimulationReport {
                         backend,
+                        requested_mode: requested_mode.clone(),
                         simulated_events: reported_events.unwrap_or(simulated_events),
                         generated_deck_lines,
                         generated_deck_path,
@@ -653,6 +672,7 @@ fn run_generated_deck_with_base(
                 Err(_) => {
                     return SimulationReport {
                         backend: SimulationBackend::ExternalUnavailable,
+                        requested_mode: requested_mode.clone(),
                         simulated_events,
                         generated_deck_lines,
                         generated_deck_path: Some(deck_path.display().to_string()),
@@ -7962,6 +7982,7 @@ mod tests {
     fn external_completed_report_passes_josim_quality_gate() {
         let report = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
+            requested_mode: "external_josim".to_string(),
             simulated_events: 3,
             generated_deck_lines: 2,
             generated_deck_path: Some("input.sp".to_string()),
@@ -7992,6 +8013,7 @@ mod tests {
     fn external_completed_report_fails_gate_on_reported_violations() {
         let report = SimulationReport {
             backend: SimulationBackend::ExternalCompleted,
+            requested_mode: "external_josim".to_string(),
             simulated_events: 3,
             generated_deck_lines: 2,
             generated_deck_path: Some("input.sp".to_string()),

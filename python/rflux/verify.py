@@ -54,6 +54,7 @@ def verify_layout(
         ptl_macro_boundary_violations=report.ptl_macro_boundary_violations,
         ptl_forbidden_length_violations=report.ptl_forbidden_length_violations,
         simulation_backend=report.simulation_backend,
+        requested_mode=report.requested_mode,
         josim_alignment_level=report.josim_alignment_level,
         josim_alignment_available=report.josim_alignment_available,
         josim_next_step=report.josim_next_step,

@@ -410,6 +410,7 @@ class VerificationReport:
     ptl_macro_boundary_violations: int
     ptl_forbidden_length_violations: int
     simulation_backend: str
+    requested_mode: str
     josim_alignment_level: str
     josim_alignment_available: bool
     josim_next_step: str
@@ -580,6 +581,7 @@ class SimulationViolationDetail:
 @dataclass(frozen=True)
 class SimulationReport:
     backend: str
+    requested_mode: str
     josim_alignment_level: str
     josim_alignment_available: bool
     josim_next_step: str

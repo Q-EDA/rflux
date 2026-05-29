@@ -18,6 +18,7 @@ _api = sys.modules[__package__]
 def _simulation_report_from_core(report) -> SimulationReport:
     return SimulationReport(
         backend=report.backend,
+        requested_mode=report.requested_mode,
         josim_alignment_level=report.josim_alignment_level,
         josim_alignment_available=report.josim_alignment_available,
         josim_next_step=report.josim_next_step,
