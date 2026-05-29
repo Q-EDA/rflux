@@ -419,6 +419,21 @@
                                      "category":  "source-waveform",
                                      "rationale":  "Parameter-driven passive RC smoke deck used to keep SPICE continuation-line normalization for `.param` and `.tran` cards inside the thresholded waveform baseline."
                                  },
+    "option_reltol_abstol_space_rc_smoke.cir":  {
+                                                     "max_abs_threshold_v":  0.1,
+                                                     "category":  "source-waveform",
+                                                     "rationale":  "Option-driven passive RC smoke deck used to keep space-separated `.option reltol ... abstol ...` parsing inside the thresholded waveform baseline."
+                                                 },
+    "option_maxiter_space_rc_smoke.cir":  {
+                                              "max_abs_threshold_v":  0.1,
+                                              "category":  "source-waveform",
+                                              "rationale":  "Option-driven passive RC smoke deck used to keep space-separated `.option maxiter ...` parsing inside the thresholded waveform baseline."
+                                          },
+    "options_mixed_comma_rc_smoke.cir":  {
+                                             "max_abs_threshold_v":  0.1,
+                                             "category":  "source-waveform",
+                                             "rationale":  "Option-driven passive RC smoke deck used to keep comma-separated `.option` forms (`reltol`/`abstol`/`itl1`) inside the thresholded waveform baseline."
+                                         },
     "include_subckt_smoke.cir":  {
                                      "max_abs_threshold_v":  0.1,
                                      "category":  "hierarchical-subckt",
