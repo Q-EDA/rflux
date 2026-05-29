@@ -63,6 +63,7 @@ def verify_layout(
         generated_deck_lines=report.generated_deck_lines,
         generated_deck_path=report.generated_deck_path,
         waveform_path=report.waveform_path,
+        external_summary_contract=getattr(report, "external_summary_contract", None),
         reported_violations=report.reported_violations,
         reported_worst_delay_ps=report.reported_worst_delay_ps,
         delay_details=[

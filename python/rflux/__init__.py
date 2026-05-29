@@ -87,6 +87,7 @@ try:
         check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
         check_bounded_sequential_equivalence as _core_check_bounded_sequential_equivalence,
         simulate_file as _core_simulate_file,
+        is_supported_external_command as _core_is_supported_external_command,
         simulate_text as _core_simulate_text,
         read_bench_file as _core_read_bench_file,
         read_bench_text as _core_read_bench_text,
@@ -124,6 +125,7 @@ except ImportError as relative_import_error:
             check_single_step_sequential_equivalence as _core_check_single_step_sequential_equivalence,
             check_bounded_sequential_equivalence as _core_check_bounded_sequential_equivalence,
             simulate_file as _core_simulate_file,
+            is_supported_external_command as _core_is_supported_external_command,
             simulate_text as _core_simulate_text,
             read_bench_file as _core_read_bench_file,
             read_bench_text as _core_read_bench_text,
@@ -164,6 +166,7 @@ except ImportError as relative_import_error:
         _core_check_single_step_sequential_equivalence = None
         _core_check_bounded_sequential_equivalence = None
         _core_simulate_file = None
+        _core_is_supported_external_command = None
         _core_simulate_text = None
         _core_read_bench_file = None
         _core_read_bench_text = None
@@ -465,6 +468,7 @@ compile_plan = flow.compile_plan
 compile_netlist = flow.compile_netlist
 simulate_text = sim.simulate_text
 simulate_file = sim.simulate_file
+is_supported_external_command = sim.is_supported_external_command
 analyze_timing = timing.analyze_timing
 analyze_timing_corners = timing.analyze_timing_corners
 analyze_timing_statistical = timing.analyze_timing_statistical
@@ -550,6 +554,7 @@ __all__ = [
     "read_bench_file",
     "read_bench_text",
     "simulate_file",
+    "is_supported_external_command",
     "simulate_text",
     "compile",
     "compile_layout",

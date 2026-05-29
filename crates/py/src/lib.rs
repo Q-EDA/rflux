@@ -13,7 +13,11 @@ use rflux_io::{read_bench_netlist, read_netlist_as, NetlistInputFormat};
 use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
 use rflux_place::{FixedNodePlacement, Point};
 use rflux_route::{BlockedRegion, RouteMode};
-use rflux_sim::{simulate_file as simulate_file_core, simulate_text as simulate_text_core};
+use rflux_sim::{
+    is_supported_external_command as is_supported_external_command_core,
+    simulate_file as simulate_file_core,
+    simulate_text as simulate_text_core,
+};
 use rflux_synth::{
     BalanceStrategy, BoolOptConfig, CompilePlan, CompileReport, Compiler, ConnectionSpec,
     SynthesisConfig, SynthesisReport,
@@ -1385,6 +1389,8 @@ struct PySimulationReport {
     #[pyo3(get)]
     waveform_path: Option<String>,
     #[pyo3(get)]
+    external_summary_contract: Option<String>,
+    #[pyo3(get)]
     reported_violations: usize,
     #[pyo3(get)]
     reported_worst_delay_ps: Option<f64>,
@@ -1434,6 +1440,8 @@ struct PyVerificationReport {
     generated_deck_path: Option<String>,
     #[pyo3(get)]
     waveform_path: Option<String>,
+    #[pyo3(get)]
+    external_summary_contract: Option<String>,
     #[pyo3(get)]
     reported_violations: usize,
     #[pyo3(get)]
@@ -1909,6 +1917,7 @@ impl From<SimulationReport> for PySimulationReport {
             generated_deck_lines: value.generated_deck_lines,
             generated_deck_path: value.generated_deck_path,
             waveform_path: value.waveform_path,
+            external_summary_contract: value.external_summary_contract,
             reported_violations: value.reported_violations,
             reported_worst_delay_ps: value.reported_worst_delay_ps,
             delay_details: value
@@ -1995,6 +2004,7 @@ impl From<VerificationReport> for PyVerificationReport {
             generated_deck_lines: value.simulation.generated_deck_lines,
             generated_deck_path: value.simulation.generated_deck_path,
             waveform_path: value.simulation.waveform_path,
+            external_summary_contract: value.simulation.external_summary_contract,
             reported_violations: value.simulation.reported_violations,
             reported_worst_delay_ps: value.simulation.reported_worst_delay_ps,
             delay_details: value
@@ -3307,6 +3317,11 @@ fn simulate_file(
 }
 
 #[pyfunction]
+fn is_supported_external_command(command: &str) -> bool {
+    is_supported_external_command_core(command)
+}
+
+#[pyfunction]
 fn check_equivalence(
     lhs: PyRef<'_, Circuit>,
     rhs: PyRef<'_, Circuit>,
@@ -3415,6 +3430,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_layout, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_text, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_file, m)?)?;
+    m.add_function(wrap_pyfunction!(is_supported_external_command, m)?)?;
     m.add_function(wrap_pyfunction!(check_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(
         check_single_step_sequential_equivalence,

@@ -83,6 +83,7 @@ pub struct SimulationReport {
     pub generated_deck_lines: usize,
     pub generated_deck_path: Option<String>,
     pub waveform_path: Option<String>,
+    pub external_summary_contract: Option<String>,
     pub reported_violations: usize,
     pub reported_worst_delay_ps: Option<f64>,
     pub delay_details: Vec<SimulationDelayDetail>,
@@ -198,6 +199,7 @@ pub type ParsedSimulatorOutput = (
     Option<usize>,
     Option<String>,
     Option<String>,
+    Option<String>,
     Option<usize>,
     Option<f64>,
     Vec<SimulationDelayDetail>,
@@ -212,6 +214,10 @@ pub fn parse_deck(deck: &str) -> Result<ParsedDeck, SimulationError> {
 pub fn parse_deck_file(path: impl AsRef<Path>) -> Result<ParsedDeck, SimulationError> {
     let expanded = expand_deck_file(path.as_ref())?;
     parse_deck_expanded(&expanded, path.as_ref().parent())
+}
+
+pub fn is_supported_external_command(command: &str) -> bool {
+    is_allowed_external_command(command)
 }
 
 pub fn simulate_file(
@@ -376,6 +382,7 @@ fn run_generated_deck_with_base(
         generated_deck_lines,
         generated_deck_path: None,
         waveform_path: None,
+        external_summary_contract: None,
         reported_violations: 0,
         reported_worst_delay_ps: None,
         delay_details: Vec::new(),
@@ -392,6 +399,7 @@ fn run_generated_deck_with_base(
         generated_deck_lines,
         generated_deck_path: None,
         waveform_path: None,
+        external_summary_contract: None,
         reported_violations: 0,
         reported_worst_delay_ps: None,
         delay_details: Vec::new(),
@@ -414,6 +422,7 @@ fn run_generated_deck_with_base(
                 generated_deck_lines,
                 generated_deck_path: None,
                 waveform_path,
+                external_summary_contract: None,
                 reported_violations: 0,
                 reported_worst_delay_ps: result
                     .delay_details
@@ -441,6 +450,7 @@ fn run_generated_deck_with_base(
                     generated_deck_lines,
                     generated_deck_path: None,
                     waveform_path: None,
+                    external_summary_contract: None,
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
                     delay_details: Vec::new(),
@@ -477,6 +487,7 @@ fn run_generated_deck_with_base(
                     generated_deck_lines,
                     generated_deck_path: None,
                     waveform_path: None,
+                    external_summary_contract: None,
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
                     delay_details: Vec::new(),
@@ -508,6 +519,7 @@ fn run_generated_deck_with_base(
                         generated_deck_lines,
                         generated_deck_path: None,
                         waveform_path: None,
+                        external_summary_contract: None,
                         reported_violations: 0,
                         reported_worst_delay_ps: None,
                         delay_details: Vec::new(),
@@ -529,6 +541,7 @@ fn run_generated_deck_with_base(
                     generated_deck_lines,
                     generated_deck_path: None,
                     waveform_path: None,
+                    external_summary_contract: None,
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
                     delay_details: Vec::new(),
@@ -552,6 +565,7 @@ fn run_generated_deck_with_base(
                         reported_events,
                         reported_result,
                         waveform_path,
+                        external_summary_contract,
                         reported_violations,
                         reported_worst_delay_ps,
                         delay_details,
@@ -597,6 +611,7 @@ fn run_generated_deck_with_base(
                         generated_deck_lines,
                         generated_deck_path,
                         waveform_path,
+                        external_summary_contract,
                         reported_violations: reported_violations.unwrap_or(violation_details.len()),
                         reported_worst_delay_ps,
                         delay_details,
@@ -614,6 +629,7 @@ fn run_generated_deck_with_base(
                         generated_deck_lines,
                         generated_deck_path: Some(deck_path.display().to_string()),
                         waveform_path: None,
+                        external_summary_contract: None,
                         reported_violations: 0,
                         reported_worst_delay_ps: None,
                         delay_details: Vec::new(),
@@ -7909,6 +7925,7 @@ mod tests {
             generated_deck_lines: 2,
             generated_deck_path: Some("input.sp".to_string()),
             waveform_path: Some("wave.csv".to_string()),
+            external_summary_contract: Some("sim_v1".to_string()),
             reported_violations: 0,
             reported_worst_delay_ps: Some(8.0),
             delay_details: Vec::new(),
@@ -7936,6 +7953,7 @@ mod tests {
             generated_deck_lines: 2,
             generated_deck_path: Some("input.sp".to_string()),
             waveform_path: Some("wave.csv".to_string()),
+            external_summary_contract: Some("sim_v1".to_string()),
             reported_violations: 1,
             reported_worst_delay_ps: Some(8.0),
             delay_details: Vec::new(),
@@ -13284,6 +13302,7 @@ mod tests {
             events,
             result,
             waveform,
+            summary_contract,
             violations,
             worst_delay,
             delay_details,
@@ -13294,6 +13313,7 @@ mod tests {
         assert_eq!(events, Some(12));
         assert_eq!(result.as_deref(), Some("ok"));
         assert_eq!(waveform.as_deref(), Some("wave.csv"));
+        assert_eq!(summary_contract.as_deref(), Some("sim_v1"));
         assert_eq!(violations, Some(2));
         assert_eq!(worst_delay, Some(18.5));
         assert_eq!(delay_details.len(), 1);
@@ -13333,6 +13353,7 @@ mod tests {
             events,
             result,
             waveform,
+            summary_contract,
             violations,
             worst_delay,
             delay_details,
@@ -13343,6 +13364,7 @@ mod tests {
         assert_eq!(events, Some(4));
         assert_eq!(result.as_deref(), Some("pass"));
         assert_eq!(waveform.as_deref(), Some("legacy.csv"));
+        assert_eq!(summary_contract.as_deref(), Some("mixed"));
         assert_eq!(violations, Some(1));
         assert_eq!(worst_delay, Some(7.25));
         assert_eq!(delay_details.len(), 1);
@@ -13489,6 +13511,8 @@ pub fn parse_simulator_output(stdout: &str) -> ParsedSimulatorOutput {
     let mut events = None;
     let mut result = None;
     let mut waveform_path = None;
+    let mut saw_sim_contract_key = false;
+    let mut saw_legacy_contract_key = false;
     let mut reported_violations = None;
     let mut reported_worst_delay_ps = None;
     let mut delay_details = Vec::new();
@@ -13512,34 +13536,74 @@ pub fn parse_simulator_output(stdout: &str) -> ParsedSimulatorOutput {
         let value = raw_value.trim();
         match key.as_str() {
             "RFLOW_EVENTS" | "EVENTS" | "MEASURED_EVENTS" | "SIM_EVENTS" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 events = value.parse::<usize>().ok();
             }
             "RFLOW_RESULT" | "RESULT" | "STATUS" | "SIM_RESULT" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 result = Some(value.to_ascii_lowercase());
             }
             "RFLOW_WAVEFORM" | "WAVEFORM" | "RAW_FILE" | "SIM_WAVEFORM_PATH" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 waveform_path = Some(value.to_string());
             }
             "RFLOW_VIOLATIONS" | "VIOLATIONS" | "VIOLATION_COUNT" | "SIM_VIOLATIONS" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 reported_violations = value.parse::<usize>().ok();
             }
             "RFLOW_WORST_DELAY_PS"
             | "WORST_DELAY_PS"
             | "MEASURED_DELAY_PS"
             | "SIM_WORST_DELAY_PS" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 reported_worst_delay_ps = value.parse::<f64>().ok();
             }
             "RFLOW_DELAY_DETAIL" | "DELAY_DETAIL" | "SIM_DELAY_DETAIL" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 if let Some(detail) = parse_delay_detail(value) {
                     delay_details.push(detail);
                 }
             }
             "RFLOW_MEASUREMENT_DETAIL" | "MEASUREMENT_DETAIL" | "SIM_MEASUREMENT_DETAIL" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 if let Some(detail) = parse_measurement_detail(value) {
                     measurement_details.push(detail);
                 }
             }
             "RFLOW_VIOLATION_DETAIL" | "VIOLATION_DETAIL" | "SIM_VIOLATION_DETAIL" => {
+                if key.starts_with("SIM_") {
+                    saw_sim_contract_key = true;
+                } else {
+                    saw_legacy_contract_key = true;
+                }
                 if let Some(detail) = parse_violation_detail(value) {
                     violation_details.push(detail);
                 }
@@ -13548,10 +13612,21 @@ pub fn parse_simulator_output(stdout: &str) -> ParsedSimulatorOutput {
         }
     }
 
+    let external_summary_contract = if saw_sim_contract_key && saw_legacy_contract_key {
+        Some("mixed".to_string())
+    } else if saw_sim_contract_key {
+        Some("sim_v1".to_string())
+    } else if saw_legacy_contract_key {
+        Some("legacy".to_string())
+    } else {
+        None
+    };
+
     (
         events,
         result,
         waveform_path,
+        external_summary_contract,
         reported_violations,
         reported_worst_delay_ps,
         delay_details,

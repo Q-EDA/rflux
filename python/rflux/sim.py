@@ -27,6 +27,7 @@ def _simulation_report_from_core(report) -> SimulationReport:
         generated_deck_lines=report.generated_deck_lines,
         generated_deck_path=report.generated_deck_path,
         waveform_path=report.waveform_path,
+        external_summary_contract=getattr(report, "external_summary_contract", None),
         reported_violations=report.reported_violations,
         reported_worst_delay_ps=report.reported_worst_delay_ps,
         delay_details=[
@@ -134,6 +135,15 @@ def simulate_file(
         _api._core_simulate_file(str(file_path), simulation_mode, external_command)
     )
 
+
+def is_supported_external_command(command: str) -> bool:
+    """Return whether an external simulator command is accepted by the command policy."""
+    _api._require_core_extension(
+        "is_supported_external_command(...)",
+        _api._core_is_supported_external_command,
+    )
+    return bool(_api._core_is_supported_external_command(command))
+
 __all__ = [
     "SIMULATION_MODES",
     "SimulationDelayDetail",
@@ -142,6 +152,7 @@ __all__ = [
     "SimulationMeasurementWarning",
     "SimulationReport",
     "SimulationViolationDetail",
+    "is_supported_external_command",
     "simulate_file",
     "simulate_text",
 ]
