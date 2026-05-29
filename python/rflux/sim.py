@@ -21,6 +21,8 @@ def _simulation_report_from_core(report) -> SimulationReport:
         josim_alignment_level=report.josim_alignment_level,
         josim_alignment_available=report.josim_alignment_available,
         josim_next_step=report.josim_next_step,
+        josim_quality_passed=report.josim_quality_passed,
+        josim_quality_status=report.josim_quality_status,
         simulated_events=report.simulated_events,
         generated_deck_lines=report.generated_deck_lines,
         generated_deck_path=report.generated_deck_path,

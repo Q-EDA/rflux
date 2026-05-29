@@ -1373,6 +1373,10 @@ struct PySimulationReport {
     #[pyo3(get)]
     josim_next_step: String,
     #[pyo3(get)]
+    josim_quality_passed: bool,
+    #[pyo3(get)]
+    josim_quality_status: String,
+    #[pyo3(get)]
     simulated_events: usize,
     #[pyo3(get)]
     generated_deck_lines: usize,
@@ -1418,6 +1422,10 @@ struct PyVerificationReport {
     josim_alignment_available: bool,
     #[pyo3(get)]
     josim_next_step: String,
+    #[pyo3(get)]
+    josim_quality_passed: bool,
+    #[pyo3(get)]
+    josim_quality_status: String,
     #[pyo3(get)]
     simulated_events: usize,
     #[pyo3(get)]
@@ -1895,6 +1903,8 @@ impl From<SimulationReport> for PySimulationReport {
             josim_alignment_level: josim_gate.alignment_level,
             josim_alignment_available: josim_gate.external_alignment_available,
             josim_next_step: josim_gate.next_step,
+            josim_quality_passed: josim_gate.passed,
+            josim_quality_status: josim_gate.status,
             simulated_events: value.simulated_events,
             generated_deck_lines: value.generated_deck_lines,
             generated_deck_path: value.generated_deck_path,
@@ -1979,6 +1989,8 @@ impl From<VerificationReport> for PyVerificationReport {
             josim_alignment_level: josim_gate.alignment_level,
             josim_alignment_available: josim_gate.external_alignment_available,
             josim_next_step: josim_gate.next_step,
+            josim_quality_passed: josim_gate.passed,
+            josim_quality_status: josim_gate.status,
             simulated_events: value.simulation.simulated_events,
             generated_deck_lines: value.simulation.generated_deck_lines,
             generated_deck_path: value.simulation.generated_deck_path,

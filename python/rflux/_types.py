@@ -413,6 +413,8 @@ class VerificationReport:
     josim_alignment_level: str
     josim_alignment_available: bool
     josim_next_step: str
+    josim_quality_passed: bool
+    josim_quality_status: str
     simulated_events: int
     generated_deck_lines: int
     generated_deck_path: str | None
@@ -578,6 +580,8 @@ class SimulationReport:
     josim_alignment_level: str
     josim_alignment_available: bool
     josim_next_step: str
+    josim_quality_passed: bool
+    josim_quality_status: str
     simulated_events: int
     generated_deck_lines: int
     generated_deck_path: str | None

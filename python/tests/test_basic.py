@@ -205,6 +205,8 @@ def test_simulate_file_accepts_path_objects(tmp_path):
     assert report.backend == "event_only"
     assert report.josim_alignment_level == "event_only"
     assert report.josim_alignment_available is False
+    assert report.josim_quality_passed is False
+    assert report.josim_quality_status == "failed_external_alignment_missing"
     assert isinstance(report.josim_next_step, str)
     assert len(report.josim_next_step) > 0
 
@@ -1304,6 +1306,8 @@ def test_verify_layout_reports_ptl_macro_boundary_checks():
     assert report.simulation_backend == "event_only"
     assert report.josim_alignment_level == "event_only"
     assert report.josim_alignment_available is False
+    assert report.josim_quality_passed is False
+    assert report.josim_quality_status == "failed_external_alignment_missing"
     assert isinstance(report.josim_next_step, str)
     assert len(report.josim_next_step) > 0
     assert report.simulated_events > 0
@@ -1327,6 +1331,8 @@ def test_verify_layout_reports_missing_external_simulator_with_deck_path():
     assert report.simulation_backend == "external_unavailable"
     assert report.josim_alignment_level == "unavailable"
     assert report.josim_alignment_available is False
+    assert report.josim_quality_passed is False
+    assert report.josim_quality_status == "failed_external_alignment_missing"
     assert report.generated_deck_lines > 0
     assert report.generated_deck_path is not None
     assert report.waveform_path is None
@@ -1365,6 +1371,8 @@ def test_verify_layout_internal_transient_mode_reports_unavailable():
     assert report.simulation_backend == "internal_transient_completed"
     assert report.josim_alignment_level == "internal_transient"
     assert report.josim_alignment_available is False
+    assert report.josim_quality_passed is False
+    assert report.josim_quality_status == "failed_external_alignment_missing"
     assert report.external_result == "internal_transient_linear_rc"
     assert report.waveform_path is not None
 
@@ -1382,6 +1390,8 @@ def test_simulate_text_parses_param_tran_and_returns_event_only_report():
     assert report.backend == "event_only"
     assert report.josim_alignment_level == "event_only"
     assert report.josim_alignment_available is False
+    assert report.josim_quality_passed is False
+    assert report.josim_quality_status == "failed_external_alignment_missing"
     assert report.simulated_events == 1
     assert report.generated_deck_lines == 5
     assert report.external_result is None
@@ -1460,6 +1470,8 @@ def test_simulate_text_internal_transient_completes_for_passive_source_only_deck
     assert report.backend == "internal_transient_completed"
     assert report.josim_alignment_level == "internal_transient"
     assert report.josim_alignment_available is False
+    assert report.josim_quality_passed is False
+    assert report.josim_quality_status == "failed_external_alignment_missing"
     assert report.simulated_events == 5
     assert report.external_result == "internal_transient_linear_rc"
     assert report.reported_worst_delay_ps == 0.001
