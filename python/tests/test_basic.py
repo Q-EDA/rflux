@@ -2279,6 +2279,65 @@ def test_simulate_text_internal_transient_accepts_nodeset_startup_hint():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_noise_is_reproducible_with_same_seed() -> None:
+    deck = (
+        ".title demo\n"
+        ".option seed=42 tnoise=1m\n"
+        "V1 in 0 DC 1\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 3p\n"
+        ".end\n"
+    )
+
+    first = rflux.simulate_text(deck, simulation_mode="internal_transient")
+    second = rflux.simulate_text(deck, simulation_mode="internal_transient")
+
+    assert first.backend == "internal_transient_completed"
+    assert second.backend == "internal_transient_completed"
+    assert first.external_result == "internal_transient_linear_rc;seed=42"
+    assert second.external_result == "internal_transient_linear_rc;seed=42"
+    assert first.waveform_path is not None
+    assert second.waveform_path is not None
+    assert Path(first.waveform_path).read_text(encoding="utf-8") == Path(
+        second.waveform_path
+    ).read_text(encoding="utf-8")
+
+
+def test_simulate_text_internal_transient_noise_differs_for_different_seed() -> None:
+    deck_a = (
+        ".title demo\n"
+        ".option seed=100 tnoise=1m\n"
+        "V1 in 0 DC 1\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 3p\n"
+        ".end\n"
+    )
+    deck_b = (
+        ".title demo\n"
+        ".option seed=101 tnoise=1m\n"
+        "V1 in 0 DC 1\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 3p\n"
+        ".end\n"
+    )
+
+    report_a = rflux.simulate_text(deck_a, simulation_mode="internal_transient")
+    report_b = rflux.simulate_text(deck_b, simulation_mode="internal_transient")
+
+    assert report_a.backend == "internal_transient_completed"
+    assert report_b.backend == "internal_transient_completed"
+    assert report_a.external_result == "internal_transient_linear_rc;seed=100"
+    assert report_b.external_result == "internal_transient_linear_rc;seed=101"
+    assert report_a.waveform_path is not None
+    assert report_b.waveform_path is not None
+    assert Path(report_a.waveform_path).read_text(encoding="utf-8") != Path(
+        report_b.waveform_path
+    ).read_text(encoding="utf-8")
+
+
 def test_simulate_file_external_josim_preserves_pi_semantics_for_benchmark_asset() -> None:
     josim_override = os.environ.get("RFLOW_JOSIM_COMMAND", "").strip()
     josim = josim_override or shutil.which("josim")
