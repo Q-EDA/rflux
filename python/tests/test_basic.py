@@ -1547,6 +1547,26 @@ def test_simulate_text_internal_transient_reports_measurement_details():
     assert report.measurement_details[2].kind == "final"
 
 
+def test_simulate_text_internal_transient_supports_meas_alias() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 PULSE(0,1m,0,1p,1p,2p,6p)\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".meas tran out_pp pp V(out)\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.external_result == "internal_transient_linear_rc"
+    assert len(report.measurement_details) == 1
+    assert report.measurement_details[0].name == "out_pp"
+    assert report.measurement_details[0].kind == "peak_to_peak"
+    assert report.measurement_details[0].measured_value > 0.0
+
+
 def test_simulate_text_internal_transient_measurement_details_honor_time_windows():
     report = rflux.simulate_text(
         ".title demo\n"
