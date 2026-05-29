@@ -1367,6 +1367,12 @@ struct PySimulationReport {
     #[pyo3(get)]
     backend: String,
     #[pyo3(get)]
+    josim_alignment_level: String,
+    #[pyo3(get)]
+    josim_alignment_available: bool,
+    #[pyo3(get)]
+    josim_next_step: String,
+    #[pyo3(get)]
     simulated_events: usize,
     #[pyo3(get)]
     generated_deck_lines: usize,
@@ -1406,6 +1412,12 @@ struct PyVerificationReport {
     ptl_forbidden_length_violations: usize,
     #[pyo3(get)]
     simulation_backend: String,
+    #[pyo3(get)]
+    josim_alignment_level: String,
+    #[pyo3(get)]
+    josim_alignment_available: bool,
+    #[pyo3(get)]
+    josim_next_step: String,
     #[pyo3(get)]
     simulated_events: usize,
     #[pyo3(get)]
@@ -1877,8 +1889,12 @@ impl From<AcBiasOptimizationReport> for PyAcBiasOptimizationReport {
 
 impl From<SimulationReport> for PySimulationReport {
     fn from(value: SimulationReport) -> Self {
+        let josim_gate = value.josim_quality_gate();
         Self {
             backend: simulation_backend_name(&value.backend).to_string(),
+            josim_alignment_level: josim_gate.alignment_level,
+            josim_alignment_available: josim_gate.external_alignment_available,
+            josim_next_step: josim_gate.next_step,
             simulated_events: value.simulated_events,
             generated_deck_lines: value.generated_deck_lines,
             generated_deck_path: value.generated_deck_path,
@@ -1952,6 +1968,7 @@ impl From<SimulationReport> for PySimulationReport {
 
 impl From<VerificationReport> for PyVerificationReport {
     fn from(value: VerificationReport) -> Self {
+        let josim_gate = value.simulation.josim_quality_gate();
         Self {
             checked_routes: value.checked_routes,
             checked_ptl_routes: value.checked_ptl_routes,
@@ -1959,6 +1976,9 @@ impl From<VerificationReport> for PyVerificationReport {
             ptl_macro_boundary_violations: value.ptl_macro_boundary_violations,
             ptl_forbidden_length_violations: value.ptl_forbidden_length_violations,
             simulation_backend: simulation_backend_name(&value.simulation.backend).to_string(),
+            josim_alignment_level: josim_gate.alignment_level,
+            josim_alignment_available: josim_gate.external_alignment_available,
+            josim_next_step: josim_gate.next_step,
             simulated_events: value.simulation.simulated_events,
             generated_deck_lines: value.simulation.generated_deck_lines,
             generated_deck_path: value.simulation.generated_deck_path,
