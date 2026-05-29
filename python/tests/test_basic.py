@@ -1939,6 +1939,108 @@ def test_simulate_text_internal_transient_supports_inductor():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_accepts_keyword_resistor_value() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out resistance=50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_keyword_capacitor_value() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 capacitance=1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_keyword_inductor_value() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "L1 in out inductance=1p\n"
+        "R1 out 0 1\n"
+        ".tran 1p 4p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 4
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_space_separated_keyword_resistor_value() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out resistance 50\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_space_separated_keyword_capacitor_value() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out 50\n"
+        "C1 out 0 capacitance 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_space_separated_keyword_inductor_value() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "L1 in out inductance 1p\n"
+        "R1 out 0 1\n"
+        ".tran 1p 4p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 4
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_supports_mutual_inductance():
     report = rflux.simulate_text(
         ".title demo\n"
