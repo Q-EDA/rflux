@@ -1632,6 +1632,44 @@ def test_simulate_text_supports_nested_subckt_param_passthrough():
     assert report.external_result is None
 
 
+def test_simulate_text_supports_nested_subckt_definition():
+    report = rflux.simulate_text(
+        ".subckt stage in out\n"
+        ".subckt leaf a b\n"
+        "Rleaf a b 25\n"
+        ".ends\n"
+        "Xleaf in out leaf\n"
+        ".ends\n"
+        "X1 n1 n2 stage\n"
+        ".tran 1p 10p\n"
+        ".end\n",
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
+def test_simulate_text_rejects_duplicate_subckt_name_in_same_scope():
+    with pytest.raises(
+        ValueError,
+        match=r"duplicate \.subckt definition in scope <top-level>: stage",
+    ):
+        rflux.simulate_text(
+            ".subckt stage in out\n"
+            "R1 in out 50\n"
+            ".ends\n"
+            ".subckt stage in out\n"
+            "R2 in out 75\n"
+            ".ends\n"
+            "X1 n1 n2 stage\n"
+            ".tran 1p 10p\n"
+            ".end\n",
+            simulation_mode="event_only",
+        )
+
+
 def test_simulate_text_internal_transient_completes_for_passive_source_only_deck():
     report = rflux.simulate_text(
         ".title demo\n"
