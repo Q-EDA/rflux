@@ -2081,6 +2081,46 @@ def test_simulate_text_internal_transient_supports_mutual_inductance_coupling_ke
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_supports_mutual_inductance_space_separated_coupling() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "K1 L1 L2 coupling 0.9\n"
+        "V1 in 0 PULSE(0,1m,0,1p,1p,2p,8p)\n"
+        "L1 in out 1p\n"
+        "R1 out 0 1\n"
+        "L2 tap 0 1p\n"
+        "R2 tap 0 1\n"
+        ".tran 1p 8p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 8
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_supports_mutual_inductance_space_separated_k_alias() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "K1 L1 L2 k 0.9\n"
+        "V1 in 0 PULSE(0,1m,0,1p,1p,2p,8p)\n"
+        "L1 in out 1p\n"
+        "R1 out 0 1\n"
+        "L2 tap 0 1p\n"
+        "R2 tap 0 1\n"
+        ".tran 1p 8p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 8
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_supports_zero_delay_transmission_line_subset():
     report = rflux.simulate_text(
         ".title demo\n"
