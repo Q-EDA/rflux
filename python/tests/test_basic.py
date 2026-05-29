@@ -1613,6 +1613,25 @@ def test_simulate_text_supports_subckt_params_marker_override():
     assert report.external_result is None
 
 
+def test_simulate_text_supports_nested_subckt_param_passthrough():
+    report = rflux.simulate_text(
+        ".subckt leaf in out params: rval=50\n"
+        "R1 in out rval\n"
+        ".ends\n"
+        ".subckt stage in out params: stage_r=75\n"
+        "Xleaf in out leaf params: rval=stage_r\n"
+        ".ends\n"
+        "X1 n1 n2 stage params: stage_r=90\n"
+        ".tran 1p 10p\n"
+        ".end\n",
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
 def test_simulate_text_internal_transient_completes_for_passive_source_only_deck():
     report = rflux.simulate_text(
         ".title demo\n"
