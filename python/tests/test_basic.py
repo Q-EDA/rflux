@@ -2189,6 +2189,74 @@ def test_simulate_text_internal_transient_supports_spaced_t_assignments():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_supports_space_separated_t_keywords() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "T1 in 0 out 0 z0 50 td 3p loss 0.3\n"
+        "R1 out 0 50\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 6
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_supports_comma_separated_t_keywords() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "T1 in 0 out 0 z0=50, td=3p, loss=0.3\n"
+        "R1 out 0 50\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 6
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_supports_t_alias_keywords() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "T1 in 0 out 0 zo=50 tau=3p atten=0.3\n"
+        "R1 out 0 50\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 6
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_supports_t_alpha_attenuation() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC 1m\n"
+        "T1 in 0 out 0 z0=50 td=3p alpha=1e11\n"
+        "R1 out 0 50\n"
+        ".tran 1p 6p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 6
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_supports_minimal_junction_subset():
     report = rflux.simulate_text(
         ".title demo\n"
