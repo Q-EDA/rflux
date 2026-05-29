@@ -404,6 +404,16 @@
                                   "category":  "source-waveform",
                                   "rationale":  "File-driven PWL passive RC smoke deck used to keep external waveform-file resolution and source playback inside the first thresholded waveform-source baseline."
                               },
+    "param_rc_smoke.cir":  {
+                              "max_abs_threshold_v":  0.1,
+                              "category":  "source-waveform",
+                              "rationale":  "Parameter-driven passive RC smoke deck used to keep `.param` substitution and parameterized source timing inside the thresholded waveform baseline."
+                          },
+    "param_spaced_comma_rc_smoke.cir":  {
+                                           "max_abs_threshold_v":  0.1,
+                                           "category":  "source-waveform",
+                                           "rationale":  "Parameter-driven passive RC smoke deck used to keep spaced and comma-separated `.param` assignment forms inside the thresholded waveform baseline."
+                                       },
     "include_subckt_smoke.cir":  {
                                      "max_abs_threshold_v":  0.1,
                                      "category":  "hierarchical-subckt",
