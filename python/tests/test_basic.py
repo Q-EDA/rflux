@@ -1464,6 +1464,39 @@ def test_simulate_text_parses_scientific_notation_params() -> None:
     assert report.external_result is None
 
 
+def test_simulate_text_parses_param_arithmetic_expressions() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".param base=10 gain=2 offset=5\n"
+        "V1 in 0 DC 1m\n"
+        "R1 in out base*(gain+offset)\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_parses_braced_param_references() -> None:
+    report = rflux.simulate_text(
+        ".title demo\n"
+        ".param tstep=1p tstop=5p\n"
+        "R1 n1 0 50\n"
+        ".tran {tstep} {tstop}\n"
+        ".end\n",
+        simulation_mode="event_only",
+    )
+
+    assert report.backend == "event_only"
+    assert report.simulated_events == 1
+    assert report.external_result is None
+
+
 def test_simulate_file_resolves_include_and_returns_event_only_report(tmp_path):
     include_file = tmp_path / "defs.inc"
     include_file.write_text(
