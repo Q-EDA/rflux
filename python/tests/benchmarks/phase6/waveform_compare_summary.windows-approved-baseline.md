@@ -101,6 +101,7 @@
 | sin_mixed_case_source_smoke.cir | source-waveform | 1.000000e-01 | 1.587785e-03 | PASS | in:1.588e-03, out:1.459e-03 |
 | sin_phase_alias_keyword_mixed_case_comma_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:8.196e-07 |
 | sin_phase_alias_keyword_mixed_case_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:8.196e-07 |
+| sin_phase_alias_keyword_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:8.196e-07 |
 | sin_phase_alias_keyword_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 1.000000e-03 | PASS | in:1.000e-03, out:8.196e-07 |
 | sin_rc_smoke.cir | source-waveform | 1.000000e-01 | 1.396802e-03 | PASS | in:1.397e-03, out:3.300e-04 |
 | sin_space_before_paren_source_smoke.cir | source-waveform | 1.000000e-01 | 1.587785e-03 | PASS | in:1.588e-03, out:1.459e-03 |
@@ -113,7 +114,7 @@
 | hierarchical-subckt | 12 | 0 | 6.474674e-05 | nested_subckt_smoke.cir | include_chain_smoke.cir::out:6.475e-05, include_source_subckt_smoke.cir::out:6.475e-05 |
 | josephson-junction | 42 | 0 | 6.710659e-04 | include_chain_source_k_jj_subckt_smoke.cir | include_chain_source_k_jj_subckt_smoke.cir::tap:6.711e-04, jj_pi_model_smoke.cir::n1:5.945e-04 |
 | mutual-inductance | 5 | 0 | 1.680199e-04 | k_mutual_smoke.cir | include_chain_k_subckt_smoke.cir::tap:1.680e-04, include_chain_source_k_subckt_smoke.cir::tap:1.680e-04 |
-| source-waveform | 39 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
+| source-waveform | 40 | 0 | 1.587785e-03 | sin_space_before_paren_source_smoke.cir | sin_mixed_case_source_smoke.cir::in:1.588e-03, sin_space_before_paren_source_smoke.cir::in:1.588e-03 |
 | transmission-delay | 5 | 0 | 1.000000e-03 | t_delay_smoke.cir | t_delay_smoke.cir::out:1.000e-03, t_delay_smoke.cir::in:1.000e-03 |
 
 ## Threshold Rationale
@@ -217,6 +218,7 @@
 - sin_mixed_case_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep case-insensitive source-function parsing and external JoSIM deck lowering aligned for mixed-case `sIn(...)` spelling in the thresholded waveform baseline.
 - sin_phase_alias_keyword_mixed_case_comma_source_smoke.cir: [source-waveform] Sine-wave passive RC smoke deck used to keep phase= keyword alias, mixed-case keyword spelling (sIn), and comma-separated keyword argument parsing coupled in the thresholded waveform baseline.
 - sin_phase_alias_keyword_mixed_case_space_before_paren_source_smoke.cir: [source-waveform] Sine-wave passive RC smoke deck used to keep phase= keyword alias, mixed-case keyword spelling (sIn), and space-before-paren form parsing coupled in the thresholded waveform baseline.
+- sin_phase_alias_keyword_source_smoke.cir: [source-waveform] Sine-wave passive RC smoke deck used to keep phase= keyword alias in compact keyword-form parsing coupled in the thresholded waveform baseline.
 - sin_phase_alias_keyword_space_before_paren_source_smoke.cir: [source-waveform] Sine-wave passive RC smoke deck used to keep phase= keyword alias and space-before-paren form parsing coupled in the thresholded waveform baseline.
 - sin_rc_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep the first continuous-wave source baseline in the same correlation gate as the pulse-driven source path.
 - sin_space_before_paren_source_smoke.cir: [source-waveform] Sinusoidal passive RC smoke deck used to keep optional whitespace between the function name and `(` aligned across native parsing and external JoSIM deck lowering for `SIN (...)` in the thresholded waveform baseline.
@@ -228,6 +230,6 @@ failures: 0 (delta +0 vs previous 0)
 
 | Deck | Summary Change | Worst Max Abs Delta (V) |
 |------|----------------|-------------------------|
-| exp_alias_mixed_case_space_before_paren_source_smoke.cir | NEW -> PASS | n/a |
+| sin_phase_alias_keyword_source_smoke.cir | NEW -> PASS | n/a |
 
 failures=0
