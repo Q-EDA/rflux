@@ -1491,6 +1491,64 @@ def test_simulate_file_resolves_include_and_returns_event_only_report(tmp_path):
     assert report.external_result is None
 
 
+def test_simulate_file_resolves_file_driven_pwl_source_from_deck_directory(tmp_path):
+    waveform_file = tmp_path / "wave.txt"
+    waveform_file.write_text("0 0\n2p 1\n4p 0\n", encoding="utf-8")
+    deck_file = tmp_path / "top.cir"
+    deck_file.write_text(
+        ".title demo\n"
+        "V1 in 0 PWL(file=\"wave.txt\")\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        encoding="utf-8",
+    )
+
+    report = rflux.simulate_file(
+        str(deck_file),
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_file_resolves_included_file_driven_pwl_source(tmp_path):
+    include_file = tmp_path / "defs.inc"
+    include_file.write_text(
+        ".subckt driver out\n"
+        "V1 src 0 PWL(file=\"wave.txt\")\n"
+        "R1 src out 1\n"
+        "C1 out 0 1p\n"
+        ".ends\n",
+        encoding="utf-8",
+    )
+    waveform_file = tmp_path / "wave.txt"
+    waveform_file.write_text("0 0\n2p 1\n4p 0\n", encoding="utf-8")
+    deck_file = tmp_path / "top.cir"
+    deck_file.write_text(
+        ".title demo\n"
+        ".include \"defs.inc\"\n"
+        "X1 out driver\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        encoding="utf-8",
+    )
+
+    report = rflux.simulate_file(
+        str(deck_file),
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_supports_subckt_param_override():
     report = rflux.simulate_text(
         ".subckt stage in out rval=50\n"
