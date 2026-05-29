@@ -2130,6 +2130,27 @@
       ]
     },
     {
+      "deck": "sin_phase_alias_keyword_mixed_case_source_smoke.cir",
+      "threshold_v": 0.1,
+      "category": "source-waveform",
+      "rationale": "Sine-wave passive RC smoke deck used to keep phase= keyword alias with mixed-case compact keyword-form parsing coupled in the thresholded waveform baseline.",
+      "worst_max_abs_v": 0.001,
+      "summary": "PASS",
+      "failing_nodes": [],
+      "top_worst_nodes": [
+        {
+          "node": "in",
+          "max_abs_v": 0.001,
+          "rms_v": 0.0004083344083628409
+        },
+        {
+          "node": "out",
+          "max_abs_v": 8.196321073919334e-07,
+          "rms_v": 6.086361131877551e-07
+        }
+      ]
+    },
+    {
       "deck": "sin_phase_alias_keyword_mixed_case_space_before_paren_source_smoke.cir",
       "threshold_v": 0.1,
       "category": "source-waveform",
@@ -2340,7 +2361,7 @@
     },
     {
       "category": "source-waveform",
-      "deck_count": 40,
+      "deck_count": 41,
       "failures": 0,
       "worst_max_abs_v": 0.0015877853,
       "worst_deck": "sin_space_before_paren_source_smoke.cir",
@@ -2399,7 +2420,7 @@
     "failure_delta": 0,
     "deck_changes": [
       {
-        "deck": "sin_phase_alias_keyword_source_smoke.cir",
+        "deck": "sin_phase_alias_keyword_mixed_case_source_smoke.cir",
         "current_summary": "PASS",
         "previous_summary": "NEW",
         "current_worst_max_abs_v": 0.001,

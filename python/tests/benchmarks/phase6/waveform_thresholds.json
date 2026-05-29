@@ -518,5 +518,10 @@
                                                        "category":  "source-waveform",
                                                        "max_abs_threshold_v":  0.1,
                                                        "rationale":  "Sine-wave passive RC smoke deck used to keep phase= keyword alias in compact keyword-form parsing coupled in the thresholded waveform baseline."
-                                                   }
+                                                   },
+    "sin_phase_alias_keyword_mixed_case_source_smoke.cir":  {
+                                                                  "category":  "source-waveform",
+                                                                  "max_abs_threshold_v":  0.1,
+                                                                  "rationale":  "Sine-wave passive RC smoke deck used to keep phase= keyword alias with mixed-case compact keyword-form parsing coupled in the thresholded waveform baseline."
+                                                              }
 }
