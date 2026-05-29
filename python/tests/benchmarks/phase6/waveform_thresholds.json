@@ -434,6 +434,21 @@
                                              "category":  "source-waveform",
                                              "rationale":  "Option-driven passive RC smoke deck used to keep comma-separated `.option` forms (`reltol`/`abstol`/`itl1`) inside the thresholded waveform baseline."
                                          },
+    "option_uppercase_reltol_abstol_space_rc_smoke.cir":  {
+                                                                "max_abs_threshold_v":  0.1,
+                                                                "category":  "source-waveform",
+                                                                "rationale":  "Option-driven passive RC smoke deck used to keep uppercase `.OPTION RELTOL ... ABSTOL ...` token parsing aligned inside the thresholded waveform baseline."
+                                                            },
+    "option_mixed_case_maxiter_space_rc_smoke.cir":  {
+                                                          "max_abs_threshold_v":  0.1,
+                                                          "category":  "source-waveform",
+                                                          "rationale":  "Option-driven passive RC smoke deck used to keep mixed-case `.OpTiOn MaxIter ...` parsing aligned inside the thresholded waveform baseline."
+                                                      },
+    "option_uppercase_comma_rc_smoke.cir":  {
+                                                  "max_abs_threshold_v":  0.1,
+                                                  "category":  "source-waveform",
+                                                  "rationale":  "Option-driven passive RC smoke deck used to keep uppercase comma-separated `.OPTION` forms (`RELTOL`/`ABSTOL`/`ITL1`) inside the thresholded waveform baseline."
+                                              },
     "include_subckt_smoke.cir":  {
                                      "max_abs_threshold_v":  0.1,
                                      "category":  "hierarchical-subckt",
