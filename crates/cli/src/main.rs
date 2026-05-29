@@ -5884,6 +5884,42 @@ mod tests {
     }
 
     #[test]
+    fn run_simulate_file_emits_internal_transient_report_json() {
+        let dir = unique_test_dir("run-simulate-file");
+        let input_path = dir.join("example.cir");
+        let output_path = dir.join("simulate-file-report.json");
+        fs::write(
+            &input_path,
+            ".title rc_demo\nV1 in 0 PULSE(0 1m 0 1p 1p 2p 6p)\nR1 in out 1\nC1 out 0 1p\n.measure tran out_rms rms V(out)\n.tran 1p 6p\n.end\n",
+        )
+        .expect("deck should write");
+
+        run_simulate_file(SimulateFileArgs {
+            input: input_path,
+            mode: CliSimulationMode::InternalTransient,
+            external_command: None,
+            output: Some(output_path.clone()),
+        })
+        .expect("simulate-file should succeed");
+
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(&output_path).expect("report should exist"),
+        )
+        .expect("report should be valid json");
+
+        assert_eq!(report["schema_version"], json!(CLI_SCHEMA_VERSION));
+        assert_eq!(report["backend"], "InternalTransientCompleted");
+        assert_eq!(report["requested_mode"], "internal_transient");
+        assert_eq!(report["measurement_details"][0]["name"], "out_rms");
+        assert_eq!(report["measurement_details"][0]["kind"], "rms");
+        assert!(report["waveform_path"].is_string());
+        assert_eq!(
+            report["quality_gate"]["alignment_level"],
+            "internal_transient"
+        );
+    }
+
+    #[test]
     fn simulation_report_json_includes_measurement_details() {
         let report = SimulationReport {
             backend: rflux_sim::SimulationBackend::InternalTransientCompleted,
