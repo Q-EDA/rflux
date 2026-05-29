@@ -421,6 +421,7 @@ class VerificationReport:
     waveform_path: str | None
     waveform_format: str | None
     external_summary_contract: str | None
+    diagnostic_code: str | None
     reported_violations: int
     reported_worst_delay_ps: float | None
     delay_details: list[SimulationDelayDetail]
@@ -590,6 +591,7 @@ class SimulationReport:
     waveform_path: str | None
     waveform_format: str | None
     external_summary_contract: str | None
+    diagnostic_code: str | None
     reported_violations: int
     reported_worst_delay_ps: float | None
     delay_details: list[SimulationDelayDetail]

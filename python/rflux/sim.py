@@ -29,6 +29,7 @@ def _simulation_report_from_core(report) -> SimulationReport:
         waveform_path=report.waveform_path,
         waveform_format=getattr(report, "waveform_format", None),
         external_summary_contract=getattr(report, "external_summary_contract", None),
+        diagnostic_code=getattr(report, "diagnostic_code", None),
         reported_violations=report.reported_violations,
         reported_worst_delay_ps=report.reported_worst_delay_ps,
         delay_details=[

@@ -3816,6 +3816,7 @@ mod tests {
             waveform_path: Some("wave.raw".to_string()),
             waveform_format: Some("external_passthrough".to_string()),
             external_summary_contract: Some("legacy".to_string()),
+            diagnostic_code: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(13.5),
             delay_details: vec![
@@ -3958,6 +3959,7 @@ mod tests {
             waveform_path: None,
             waveform_format: None,
             external_summary_contract: None,
+            diagnostic_code: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(20.0),
             delay_details: vec![
@@ -4107,6 +4109,7 @@ mod tests {
             waveform_path: None,
             waveform_format: None,
             external_summary_contract: None,
+            diagnostic_code: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(20.0),
             delay_details: vec![

@@ -4037,6 +4037,7 @@ fn simulation_report_to_json(report: &SimulationReport) -> Value {
         "generated_deck_path": report.generated_deck_path,
         "waveform_path": report.waveform_path,
         "waveform_format": report.waveform_format,
+        "diagnostic_code": report.diagnostic_code,
         "reported_violations": report.reported_violations,
         "reported_worst_delay_ps": report.reported_worst_delay_ps,
         "delay_details": report.delay_details.iter().map(|detail| json!({
@@ -5891,6 +5892,7 @@ mod tests {
             waveform_path: None,
             waveform_format: None,
             external_summary_contract: None,
+            diagnostic_code: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(1.25e-3),
             delay_details: vec![rflux_sim::SimulationDelayDetail {
@@ -5936,6 +5938,7 @@ mod tests {
 
         assert_eq!(report_json["quality_gate"]["passed"], false);
         assert_eq!(report_json["waveform_format"], Value::Null);
+        assert_eq!(report_json["diagnostic_code"], Value::Null);
         assert_eq!(
             report_json["quality_gate"]["status"],
             "failed_measurement_warnings"

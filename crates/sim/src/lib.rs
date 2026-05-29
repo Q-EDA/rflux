@@ -85,6 +85,7 @@ pub struct SimulationReport {
     pub waveform_path: Option<String>,
     pub waveform_format: Option<String>,
     pub external_summary_contract: Option<String>,
+    pub diagnostic_code: Option<String>,
     pub reported_violations: usize,
     pub reported_worst_delay_ps: Option<f64>,
     pub delay_details: Vec<SimulationDelayDetail>,
@@ -385,6 +386,7 @@ fn run_generated_deck_with_base(
         waveform_path: None,
         waveform_format: None,
         external_summary_contract: None,
+        diagnostic_code: None,
         reported_violations: 0,
         reported_worst_delay_ps: None,
         delay_details: Vec::new(),
@@ -403,6 +405,7 @@ fn run_generated_deck_with_base(
         waveform_path: None,
         waveform_format: None,
         external_summary_contract: None,
+        diagnostic_code: Some(reason.clone()),
         reported_violations: 0,
         reported_worst_delay_ps: None,
         delay_details: Vec::new(),
@@ -432,6 +435,7 @@ fn run_generated_deck_with_base(
                 waveform_path,
                 waveform_format,
                 external_summary_contract: None,
+                diagnostic_code: None,
                 reported_violations: 0,
                 reported_worst_delay_ps: result
                     .delay_details
@@ -461,6 +465,7 @@ fn run_generated_deck_with_base(
                     waveform_path: None,
                     waveform_format: None,
                     external_summary_contract: None,
+                    diagnostic_code: Some("external_command_missing".to_string()),
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
                     delay_details: Vec::new(),
@@ -499,6 +504,7 @@ fn run_generated_deck_with_base(
                     waveform_path: None,
                     waveform_format: None,
                     external_summary_contract: None,
+                    diagnostic_code: Some("external_command_not_allowed".to_string()),
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
                     delay_details: Vec::new(),
@@ -532,6 +538,7 @@ fn run_generated_deck_with_base(
                         waveform_path: None,
                         waveform_format: None,
                         external_summary_contract: None,
+                        diagnostic_code: Some("external_run_dir_create_failed".to_string()),
                         reported_violations: 0,
                         reported_worst_delay_ps: None,
                         delay_details: Vec::new(),
@@ -555,6 +562,7 @@ fn run_generated_deck_with_base(
                     waveform_path: None,
                     waveform_format: None,
                     external_summary_contract: None,
+                    diagnostic_code: Some("deck_write_failed".to_string()),
                     reported_violations: 0,
                     reported_worst_delay_ps: None,
                     delay_details: Vec::new(),
@@ -597,6 +605,11 @@ fn run_generated_deck_with_base(
                     } else {
                         SimulationBackend::ExternalFailed
                     };
+                    let diagnostic_code = if matches!(backend, SimulationBackend::ExternalFailed) {
+                        Some("external_command_failed_exit".to_string())
+                    } else {
+                        None
+                    };
                     let external_runtime_warnings =
                         parse_external_simulator_stderr_warnings(&stderr);
                     let mut external_notes = external_translation_notes;
@@ -626,6 +639,7 @@ fn run_generated_deck_with_base(
                         waveform_format: waveform_path.as_deref().and_then(detect_waveform_format),
                         waveform_path,
                         external_summary_contract,
+                        diagnostic_code,
                         reported_violations: reported_violations.unwrap_or(violation_details.len()),
                         reported_worst_delay_ps,
                         delay_details,
@@ -645,6 +659,7 @@ fn run_generated_deck_with_base(
                         waveform_path: None,
                         waveform_format: None,
                         external_summary_contract: None,
+                        diagnostic_code: Some("external_command_spawn_failed".to_string()),
                         reported_violations: 0,
                         reported_worst_delay_ps: None,
                         delay_details: Vec::new(),
@@ -7953,6 +7968,7 @@ mod tests {
             waveform_path: Some("wave.csv".to_string()),
             waveform_format: Some("csv_v1".to_string()),
             external_summary_contract: Some("sim_v1".to_string()),
+            diagnostic_code: None,
             reported_violations: 0,
             reported_worst_delay_ps: Some(8.0),
             delay_details: Vec::new(),
@@ -7982,6 +7998,7 @@ mod tests {
             waveform_path: Some("wave.csv".to_string()),
             waveform_format: Some("csv_v1".to_string()),
             external_summary_contract: Some("sim_v1".to_string()),
+            diagnostic_code: None,
             reported_violations: 1,
             reported_worst_delay_ps: Some(8.0),
             delay_details: Vec::new(),

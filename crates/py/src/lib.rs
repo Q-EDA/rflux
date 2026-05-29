@@ -1393,6 +1393,8 @@ struct PySimulationReport {
     #[pyo3(get)]
     external_summary_contract: Option<String>,
     #[pyo3(get)]
+    diagnostic_code: Option<String>,
+    #[pyo3(get)]
     reported_violations: usize,
     #[pyo3(get)]
     reported_worst_delay_ps: Option<f64>,
@@ -1446,6 +1448,8 @@ struct PyVerificationReport {
     waveform_format: Option<String>,
     #[pyo3(get)]
     external_summary_contract: Option<String>,
+    #[pyo3(get)]
+    diagnostic_code: Option<String>,
     #[pyo3(get)]
     reported_violations: usize,
     #[pyo3(get)]
@@ -1923,6 +1927,7 @@ impl From<SimulationReport> for PySimulationReport {
             waveform_path: value.waveform_path,
             waveform_format: value.waveform_format,
             external_summary_contract: value.external_summary_contract,
+            diagnostic_code: value.diagnostic_code,
             reported_violations: value.reported_violations,
             reported_worst_delay_ps: value.reported_worst_delay_ps,
             delay_details: value
@@ -2011,6 +2016,7 @@ impl From<VerificationReport> for PyVerificationReport {
             waveform_path: value.simulation.waveform_path,
             waveform_format: value.simulation.waveform_format,
             external_summary_contract: value.simulation.external_summary_contract,
+            diagnostic_code: value.simulation.diagnostic_code,
             reported_violations: value.simulation.reported_violations,
             reported_worst_delay_ps: value.simulation.reported_worst_delay_ps,
             delay_details: value
