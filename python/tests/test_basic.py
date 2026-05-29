@@ -2146,6 +2146,40 @@ def test_simulate_text_internal_transient_accepts_dc_source_with_ac_tail():
     assert report.waveform_path is not None
 
 
+def test_simulate_text_internal_transient_accepts_dc_equals_source_with_ac_tail():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC=1m AC=0\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
+def test_simulate_text_internal_transient_accepts_dc_spaced_equals_source_with_ac_tail():
+    report = rflux.simulate_text(
+        ".title demo\n"
+        "V1 in 0 DC = 1m AC = 0\n"
+        "R1 in out 1\n"
+        "C1 out 0 1p\n"
+        ".tran 1p 5p\n"
+        ".end\n",
+        simulation_mode="internal_transient",
+    )
+
+    assert report.backend == "internal_transient_completed"
+    assert report.simulated_events == 5
+    assert report.external_result == "internal_transient_linear_rc"
+    assert report.waveform_path is not None
+
+
 def test_simulate_text_internal_transient_supports_sin_source():
     report = rflux.simulate_text(
         ".title demo\n"
