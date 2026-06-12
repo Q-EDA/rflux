@@ -799,4 +799,123 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn empty_netlist_produces_zero_size_placement() {
+        let placer = LevelizedPlacer::new();
+        let netlist = Netlist::new();
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("empty placement should succeed");
+        assert!(placement.nodes.is_empty());
+        assert_eq!(placement.width_um, 0.0);
+        assert_eq!(placement.height_um, 0.0);
+    }
+
+    #[test]
+    fn single_node_occupies_origin() {
+        let placer = LevelizedPlacer::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement should succeed");
+        assert_eq!(
+            placement.point_of(a).expect("a point"),
+            Point {
+                x_um: 0.0,
+                y_um: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn point_of_returns_none_for_unknown_node() {
+        let placer = LevelizedPlacer::new();
+        let netlist = Netlist::new();
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement should succeed");
+        assert!(placement.point_of(rflux_ir::NodeId(999)).is_none());
+    }
+
+    #[test]
+    fn default_placement_config_has_expected_values() {
+        let config = PlacementConfig::default();
+        assert_eq!(config.x_pitch_um, 40.0);
+        assert_eq!(config.y_pitch_um, 24.0);
+        assert!(config.fixed_nodes.is_empty());
+        assert!(config.blocked_regions.is_empty());
+        assert_eq!(config.macro_halo_x_um, 40.0);
+        assert_eq!(config.macro_halo_y_um, 24.0);
+        assert_eq!(config.max_nodes_per_level, 0);
+    }
+
+    #[test]
+    fn custom_pitch_scales_placement() {
+        let placer = LevelizedPlacer::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef { node: b, port: 0 },
+            )
+            .expect("a to b");
+
+        let placement = placer
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 80.0,
+                    y_pitch_um: 48.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .expect("placement should succeed");
+        assert_eq!(placement.point_of(a).expect("a").x_um, 0.0);
+        assert_eq!(placement.point_of(b).expect("b").x_um, 80.0);
+    }
+
+    #[test]
+    fn branching_netlist_spreads_across_levels() {
+        let placer = LevelizedPlacer::new();
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef { node: g1, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: input, port: 1 },
+                PinRef { node: g2, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: g1, port: 0 },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: g2, port: 0 },
+                PinRef { node: out, port: 1 },
+            )
+            .unwrap();
+
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement should succeed");
+        assert_eq!(placement.point_of(input).expect("input").x_um, 0.0);
+        assert_eq!(placement.width_um, 120.0);
+    }
 }

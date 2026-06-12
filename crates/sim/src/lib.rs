@@ -789,10 +789,15 @@ fn is_allowed_external_command(command: &str) -> bool {
         return false;
     }
 
-    let path = Path::new(candidate);
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
+    let raw_name = Path::new(candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(candidate);
+
+    let file_name = raw_name
+        .rsplit_once('\\')
+        .map(|(_, name)| name)
+        .unwrap_or(raw_name);
 
     is_allowed_external_command_file_name(file_name)
 }
