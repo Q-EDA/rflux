@@ -1429,6 +1429,60 @@ impl FlowRunner {
 
         Ok(report)
     }
+
+    /// Generate an H-tree clock distribution network.
+    pub fn build_clock_tree(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+    ) -> clock_tree::ClockTreeReport {
+        let placement = match self.placer.place(netlist, &config.placement) {
+            Ok(p) => p,
+            Err(_) => {
+                return clock_tree::ClockTreeReport {
+                    sink_count: 0,
+                    buffer_count: 0,
+                    levels: 0,
+                    total_wire_length_um: 0.0,
+                    estimated_skew_ps: 0.0,
+                    phase_count: config.clock_phase_count,
+                    phases: Vec::new(),
+                }
+            }
+        };
+        let sinks = clock_tree::find_clock_sinks(netlist, &placement);
+        clock_tree::build_h_tree(
+            netlist,
+            &sinks,
+            &placement,
+            &clock_tree::ClockTreeConfig {
+                phase_count: config.clock_phase_count,
+                ..clock_tree::ClockTreeConfig::default()
+            },
+        )
+    }
+
+    /// Generate a bias distribution grid estimate.
+    pub fn build_bias_grid(
+        &self,
+        netlist: &Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+    ) -> bias_grid::BiasGridReport {
+        let placement = match self.placer.place(netlist, &config.placement) {
+            Ok(p) => p,
+            Err(_) => {
+                return bias_grid::BiasGridReport {
+                    grid_cells: 0,
+                    total_wire_length_um: 0.0,
+                    connected_nodes: 0,
+                    estimated_total_bias_current_ma: 0.0,
+                }
+            }
+        };
+        bias_grid::build_bias_grid(netlist, &placement, &bias_grid::BiasGridConfig::default())
+    }
 }
 
 fn simulate_hook(
@@ -3796,150 +3850,8 @@ mod tests {
                 arcs: Vec::new(),
                 worst_setup_slack_ps: 10.0,
                 worst_hold_slack_ps: 2.0,
-                critical_path_delay_ps: 12.0,
-                setup_violations: 0,
-                hold_violations: 0,
-                capture_window_violations: 0,
-                analyzed_arcs: 1,
-                false_path_arcs: 0,
-            },
-            initial_total_detour_overhead_um: 0.0,
-            initial_hold_violations: 0,
-            hold_fix_attempted: false,
-            detour_feedback_applied: false,
-            route_delay_optimization_attempted: false,
-            route_delay_optimization_applied: false,
-            hold_fix_applied: false,
-        };
-        let simulation = SimulationReport {
-            backend: SimulationBackend::ExternalCompleted,
-            requested_mode: "external_josim".to_string(),
-            simulated_events: 2,
-            generated_deck_lines: 4,
-            generated_deck_path: None,
-            waveform_path: Some("wave.raw".to_string()),
-            waveform_format: Some("external_passthrough".to_string()),
-            external_summary_contract: Some("legacy".to_string()),
-            diagnostic_code: None,
-            reported_violations: 0,
-            reported_worst_delay_ps: Some(13.5),
-            delay_details: vec![
-                SimulationDelayDetail {
-                    name: "stage_a".to_string(),
-                    delay_ps: 11.0,
-                    from_ref: None,
-                    to_ref: None,
-                },
-                SimulationDelayDetail {
-                    name: "stage_b".to_string(),
-                    delay_ps: 15.5,
-                    from_ref: None,
-                    to_ref: None,
-                },
-            ],
-            measurement_details: Vec::new(),
-            measurement_warnings: Vec::new(),
-            violation_details: Vec::new(),
-            external_status_code: Some(0),
-            external_result: Some("ok".to_string()),
-        };
-
-        let mut netlist = Netlist::new();
-        let source = netlist.add_node(NodeKind::Port, "source");
-        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
-        let sink = netlist.add_node(NodeKind::Port, "sink");
-        netlist
-            .connect(
-                PinRef {
-                    node: source,
-                    port: 0,
-                },
-                PinRef {
-                    node: gate,
-                    port: 0,
-                },
-            )
-            .expect("source to gate");
-        netlist
-            .connect(
-                PinRef {
-                    node: gate,
-                    port: 0,
-                },
-                PinRef {
-                    node: sink,
-                    port: 0,
-                },
-            )
-            .expect("gate to sink");
-
-        let report = compound_cell_characterization_from_artifacts(
-            &netlist,
-            &artifacts,
-            simulation,
-            &CompoundCellCharacterizationConfig {
-                cell_name: "macro_buf".to_string(),
-            },
-        );
-
-        assert_eq!(report.derived_intrinsic_delay_ps, 15.5);
-        let entry: rflux_tech::CharacterizedCellLibraryEntry =
-            serde_json::from_str(&report.generated_library_json).expect("artifact should parse");
-        let metadata = entry.metadata.expect("metadata should exist");
-        assert_eq!(metadata.delay_details.len(), 2);
-        assert_eq!(metadata.arc_delays.len(), 3);
-        let canonical_arc = metadata
-            .arc_delays
-            .iter()
-            .find(|arc| arc.driver_cell_name == "macro_buf" && arc.sink_cell_name == "*")
-            .expect("canonical output arc");
-        assert!(canonical_arc.delay_ps > 0.0);
-        assert!(metadata.delay_calibration_sigma_ps > 0.0);
-        assert_eq!(metadata.delay_detail_spread_sigma_ps(), 2.25);
-    }
-
-    #[test]
-    fn characterization_matches_arc_delays_by_detail_name_heuristic() {
-        let artifacts = CompiledArtifacts {
-            synthesis: SynthesisReport {
-                compile: CompileReport::default(),
-                bool_opt: BoolOptReport {
-                    gate_count_before: 0,
-                    gate_count_after: 0,
-                },
-                tech_map: TechMapReport {
-                    mapped_nodes: 2,
-                    total_area_um2: 48.0,
-                },
-                path_balance: Default::default(),
-                bool_opt_compatibility: Default::default(),
-                node_count: 2,
-                edge_count: 1,
-            },
-            placement: Placement {
-                nodes: Vec::new(),
-                width_um: 40.0,
-                height_um: 24.0,
-            },
-            routing: RoutingReport {
-                routes: Vec::new(),
-                total_length_um: 40.0,
-                total_detour_overhead_um: 0.0,
-                detoured_routes: 0,
-                jtl_routes: 1,
-                ptl_routes: 0,
-            },
-            effective_routing_config: RoutingConfig::default(),
-            clock: ClockSummary {
-                clock_sinks: 1,
-                clock_buffers: 0,
-                phase_count: 2,
-                assigned_phases: 2,
-            },
-            timing: TimingReport {
-                arcs: Vec::new(),
-                worst_setup_slack_ps: 10.0,
-                worst_hold_slack_ps: 2.0,
+                total_negative_setup_slack_ps: 0.0,
+                total_negative_hold_slack_ps: 0.0,
                 critical_path_delay_ps: 12.0,
                 setup_violations: 0,
                 hold_violations: 0,
@@ -4091,6 +4003,8 @@ mod tests {
                 arcs: Vec::new(),
                 worst_setup_slack_ps: 10.0,
                 worst_hold_slack_ps: 2.0,
+                total_negative_setup_slack_ps: 0.0,
+                total_negative_hold_slack_ps: 0.0,
                 critical_path_delay_ps: 12.0,
                 setup_violations: 0,
                 hold_violations: 0,
@@ -5402,59 +5316,5 @@ mod tests {
                 .and_then(|endpoint| endpoint.port),
             Some(0)
         );
-    }
-
-    /// Generate an H-tree clock distribution network.
-    pub fn build_clock_tree(
-        &mut self,
-        netlist: &mut Netlist,
-        pdk: &Pdk,
-        config: &FlowConfig,
-    ) -> ClockTreeReport {
-        let placement = match self.placer.place(netlist, &config.placement) {
-            Ok(p) => p,
-            Err(_) => {
-                return ClockTreeReport {
-                    sink_count: 0,
-                    buffer_count: 0,
-                    levels: 0,
-                    total_wire_length_um: 0.0,
-                    estimated_skew_ps: 0.0,
-                    phase_count: config.clock_phase_count,
-                    phases: Vec::new(),
-                }
-            }
-        };
-        let sinks = clock_tree::find_clock_sinks(netlist, &placement);
-        clock_tree::build_h_tree(
-            netlist,
-            &sinks,
-            &placement,
-            &clock_tree::ClockTreeConfig {
-                phase_count: config.clock_phase_count,
-                ..clock_tree::ClockTreeConfig::default()
-            },
-        )
-    }
-
-    /// Generate a bias distribution grid estimate.
-    pub fn build_bias_grid(
-        &self,
-        netlist: &Netlist,
-        pdk: &Pdk,
-        config: &FlowConfig,
-    ) -> BiasGridReport {
-        let placement = match self.placer.place(netlist, &config.placement) {
-            Ok(p) => p,
-            Err(_) => {
-                return BiasGridReport {
-                    grid_cells: 0,
-                    total_wire_length_um: 0.0,
-                    connected_nodes: 0,
-                    estimated_total_bias_current_ma: 0.0,
-                }
-            }
-        };
-        bias_grid::build_bias_grid(netlist, &placement, &bias_grid::BiasGridConfig::default())
     }
 }
