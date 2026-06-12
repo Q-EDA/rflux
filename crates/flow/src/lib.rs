@@ -1434,7 +1434,7 @@ impl FlowRunner {
     pub fn build_clock_tree(
         &mut self,
         netlist: &mut Netlist,
-        pdk: &Pdk,
+        _pdk: &Pdk,
         config: &FlowConfig,
     ) -> clock_tree::ClockTreeReport {
         let placement = match self.placer.place(netlist, &config.placement) {
@@ -1467,7 +1467,7 @@ impl FlowRunner {
     pub fn build_bias_grid(
         &self,
         netlist: &Netlist,
-        pdk: &Pdk,
+        _pdk: &Pdk,
         config: &FlowConfig,
     ) -> bias_grid::BiasGridReport {
         let placement = match self.placer.place(netlist, &config.placement) {

@@ -76,7 +76,7 @@ pub fn build_h_tree(
 pub fn build_h_tree_with_buffers(
     netlist: &mut Netlist,
     sinks: &[(NodeId, Point)],
-    placement: &Placement,
+    _placement: &Placement,
     config: &ClockTreeConfig,
 ) -> (ClockTreeReport, Vec<ClockBuffer>, Vec<(NodeId, PinRef)>) {
     if sinks.is_empty() {

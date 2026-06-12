@@ -4287,11 +4287,13 @@ fn parse_transmission_line_parameters(
     Ok((impedance_ohm, delay_s, attenuation))
 }
 
+type JunctionParams = (f64, f64, f64, f64, f64, f64, f64, f64);
+
 fn parse_internal_junction_parameters(
     tokens: &[&str],
     params: &BTreeMap<String, f64>,
     model_defaults: Option<InternalJunctionModelCard>,
-) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), String> {
+) -> Result<JunctionParams, String> {
     let mut critical_current_expr = None::<String>;
     let mut second_harmonic_current_expr = None::<String>;
     let mut third_harmonic_current_expr = None::<String>;
@@ -4957,7 +4959,7 @@ fn parse_internal_source_spec(
             }
             return Ok(InternalSourceSpec::Pwl(points));
         }
-        if values.len() < 4 || values.len() % 2 != 0 {
+        if values.len() < 4 || !values.len().is_multiple_of(2) {
             return Err(format!(
                 "internal_transient_unsupported_{kind}_source:{}",
                 tokens.join(" ")
@@ -5074,12 +5076,11 @@ fn resolve_waveform_source_path(include_base_dir: Option<&Path>, raw_path: &str)
 
 fn strip_wrapping_quotes(text: &str) -> String {
     let trimmed = text.trim();
-    if trimmed.len() >= 2 {
-        if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        {
-            return trimmed[1..trimmed.len() - 1].to_string();
-        }
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        return trimmed[1..trimmed.len() - 1].to_string();
     }
     trimmed.to_string()
 }
@@ -5169,12 +5170,14 @@ fn parse_internal_dc_source_value(tokens: &[&str]) -> Option<String> {
     }
 }
 
+type PulseSourceParams = (f64, f64, f64, f64, f64, f64, Option<f64>, Option<usize>);
+
 fn parse_pulse_source_arguments(
     values: &[&str],
     params: &BTreeMap<String, f64>,
     kind: &str,
     tokens: &[&str],
-) -> Result<(f64, f64, f64, f64, f64, f64, Option<f64>, Option<usize>), String> {
+) -> Result<PulseSourceParams, String> {
     let collapsed = collapse_spaced_assignments(values);
     if collapsed.iter().all(|value| value.contains('=')) {
         let mut low_expr = None::<String>;
@@ -7559,6 +7562,7 @@ fn node_voltage(voltages: &[f64], node: Option<usize>) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[allow(clippy::needless_range_loop)]
 fn solve_dense_linear_system(
     mut matrix: Vec<Vec<f64>>,
     mut rhs: Vec<f64>,
@@ -7893,6 +7897,7 @@ fn parse_engineering_number(token: &str) -> Result<f64, SimulationError> {
 }
 
 #[must_use]
+#[allow(dead_code)]
 fn write_internal_transient_vcd(
     result: &InternalTransientResult,
     requested_path: Option<&str>,
