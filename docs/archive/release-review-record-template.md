@@ -24,6 +24,9 @@ CLI contract command:
 Python API contract command:
 Report schema contract command:
 Week3 one-command baseline command:
+CLI perf baseline capture command:
+CLI perf regression gate command:
+Engine integration contract validation command:
 ```
 
 ## 3. Evidence artifacts
@@ -41,6 +44,11 @@ Week3 pipeline output root:
 Week3 review manifest:
 Week3 validation report:
 Week3 summary markdown:
+CLI perf current baseline JSON:
+CLI perf approved baseline JSON:
+CLI perf regression summary:
+Engine integration contract summary:
+CLI First blocker status (E-01..E-05):
 ```
 
 ## 4. Compatibility decision
@@ -50,6 +58,9 @@ CLI compatibility risk:
 Python API compatibility risk:
 Report schema compatibility risk:
 Default behavior risk:
+CLI First risk:
+Non-service boundary risk:
+CLI perf regression risk:
 ```
 
 ## 5. Sign-off
@@ -58,6 +69,7 @@ Default behavior risk:
 Packaging DRI:
 QA reviewer:
 Documentation reviewer:
+CLI First reviewer:
 Release policy update required: yes/no
 Support matrix update required: yes/no
 Known limitations update required: yes/no
@@ -77,3 +89,6 @@ Follow-up due date:
 - [release-artifact-readiness-checklist.md](./release-artifact-readiness-checklist.md)
 - [sim-release-readiness-checklist.md](./sim-release-readiness-checklist.md)
 - [release-policy.md](./release-policy.md)
+- [engine-integration-contract.md](./engine-integration-contract.md)
+- [phase-e-execution-checklist.md](./phase-e-execution-checklist.md)
+- [cli-performance-baseline-promotion-playbook.md](./cli-performance-baseline-promotion-playbook.md)

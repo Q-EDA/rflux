@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 import textwrap
-import zipfile
 from pathlib import Path
 
 
@@ -60,7 +59,7 @@ def test_export_python_license_inventory_reads_wheel_metadata(tmp_path: Path) ->
 
     lock_path.write_text(
         textwrap.dedent(
-            f"""\
+            """\
             version = 1
             revision = 3
             requires-python = ">=3.12"
@@ -68,9 +67,9 @@ def test_export_python_license_inventory_reads_wheel_metadata(tmp_path: Path) ->
             [[package]]
             name = "demo-pkg"
             version = "1.2.3"
-            source = {{ registry = "https://pypi.org/simple" }}
+            source = { registry = "https://pypi.org/simple" }
             wheels = [
-                {{ url = "https://files.pythonhosted.org/packages/demo/demo_pkg-1.2.3-py3-none-any.whl", hash = "sha256:test", size = 123, upload-time = "2026-05-22T00:00:00Z" }},
+                { url = "https://files.pythonhosted.org/packages/demo/demo_pkg-1.2.3-py3-none-any.whl", hash = "sha256:test", size = 123, upload-time = "2026-05-22T00:00:00Z" },
             ]
             """
         ),
@@ -131,7 +130,7 @@ def test_export_python_license_inventory_reports_missing_license_metadata(tmp_pa
 
     lock_path.write_text(
         textwrap.dedent(
-            f"""\
+            """\
             version = 1
             revision = 3
             requires-python = ">=3.12"
@@ -139,9 +138,9 @@ def test_export_python_license_inventory_reports_missing_license_metadata(tmp_pa
             [[package]]
             name = "demo-pkg"
             version = "1.2.3"
-            source = {{ registry = "https://pypi.org/simple" }}
+            source = { registry = "https://pypi.org/simple" }
             wheels = [
-                {{ url = "https://files.pythonhosted.org/packages/demo/demo_pkg-1.2.3-py3-none-any.whl", hash = "sha256:test", size = 123, upload-time = "2026-05-22T00:00:00Z" }},
+                { url = "https://files.pythonhosted.org/packages/demo/demo_pkg-1.2.3-py3-none-any.whl", hash = "sha256:test", size = 123, upload-time = "2026-05-22T00:00:00Z" },
             ]
             """
         ),

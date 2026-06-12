@@ -174,12 +174,14 @@ def _history_diff_overview(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(history, dict):
         return result
 
+    def _change_key(entry: dict[str, object]) -> float:
+        delta = entry.get("worst_max_abs_v_delta")
+        return abs(float(delta)) if delta is not None else -1.0
+
     deck_changes = [entry for entry in history.get("deck_changes", []) if isinstance(entry, dict)]
     category_changes = [entry for entry in history.get("category_changes", []) if isinstance(entry, dict)]
-    deck_key = lambda entry: abs(float(entry.get("worst_max_abs_v_delta"))) if entry.get("worst_max_abs_v_delta") is not None else -1.0
-    category_key = lambda entry: abs(float(entry.get("worst_max_abs_v_delta"))) if entry.get("worst_max_abs_v_delta") is not None else -1.0
-    top_deck = max(deck_changes, key=deck_key, default=None)
-    top_category = max(category_changes, key=category_key, default=None)
+    top_deck = max(deck_changes, key=_change_key, default=None)
+    top_category = max(category_changes, key=_change_key, default=None)
     return {
         "has_history_diff": True,
         "failure_delta": int(history.get("failure_delta", 0)),

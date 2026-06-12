@@ -2,6 +2,8 @@
 # and run library-aware design optimization on a consumer circuit.
 from __future__ import annotations
 
+import json
+
 import rflux
 
 
@@ -14,13 +16,8 @@ def main() -> None:
     char_circuit.connect(gate, 0, sink, 0)
 
     char_report = rflux.characterize_compound_cell(char_circuit, cell_name="macro_buf")
-    print(f"characterized cell: {char_report.cell_name}")
-    print(f"intrinsic delay (ps): {char_report.derived_intrinsic_delay_ps:.2f}")
-    print(f"library json bytes: {len(char_report.generated_library_json)}")
-    assert "arc_delays" in char_report.generated_library_json or "metadata" in char_report.generated_library_json
 
     merged_json = rflux.merge_characterized_library([char_report.generated_library_json])
-    print(f"merged pdk json bytes: {len(merged_json)}")
 
     consumer = rflux.Circuit("consumer")
     consumer_source = consumer.add_node("port", "consumer_source")
@@ -33,27 +30,38 @@ def main() -> None:
         consumer,
         characterized_library_entries=[char_report.generated_library_json],
     )
-    print(f"consumer critical path (ps): {timing.critical_path_delay_ps:.2f}")
 
     design = rflux.optimize_design_with_characterized_library(
         consumer,
         [char_report.generated_library_json],
     )
-    print(f"design optimization score: {design.design_optimization_score:.3f}")
-    print(
-        "baseline pessimistic setup slack (ps): "
-        f"{design.baseline_statistical.worst_pessimistic_setup_slack_ps:.2f}"
-    )
-    print(
-        "optimized pessimistic setup slack (ps): "
-        f"{design.optimized_statistical.worst_pessimistic_setup_slack_ps:.2f}"
-    )
-    print(f"routing optimization applied: {design.ac_bias.optimization_applied}")
-    print(f"placement halo scale: {design.baseline_placement_halo_scale:.2f} -> {design.optimized_placement_halo_scale:.2f}")
-    print(
-        "cell delay sigma ratio: "
-        f"{design.baseline_cell_delay_sigma_ratio:.3f} -> {design.optimized_cell_delay_sigma_ratio:.3f}"
-    )
+
+    summary = {
+        "characterization": {
+            "cell_name": char_report.cell_name,
+            "derived_intrinsic_delay_ps": char_report.derived_intrinsic_delay_ps,
+            "generated_library_json_bytes": len(char_report.generated_library_json),
+        },
+        "library_merge": {
+            "merged_json_bytes": len(merged_json),
+        },
+        "timing": {
+            "critical_path_delay_ps": timing.critical_path_delay_ps,
+            "analyzed_timing_arcs": timing.analyzed_timing_arcs,
+            "worst_setup_slack_ps": timing.worst_setup_slack_ps,
+        },
+        "design_optimization": {
+            "design_optimization_score": design.design_optimization_score,
+            "optimization_applied": design.ac_bias.optimization_applied,
+            "baseline_worst_pessimistic_setup_slack_ps": design.baseline_statistical.worst_pessimistic_setup_slack_ps,
+            "optimized_worst_pessimistic_setup_slack_ps": design.optimized_statistical.worst_pessimistic_setup_slack_ps,
+            "baseline_placement_halo_scale": design.baseline_placement_halo_scale,
+            "optimized_placement_halo_scale": design.optimized_placement_halo_scale,
+            "baseline_cell_delay_sigma_ratio": design.baseline_cell_delay_sigma_ratio,
+            "optimized_cell_delay_sigma_ratio": design.optimized_cell_delay_sigma_ratio,
+        },
+    }
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

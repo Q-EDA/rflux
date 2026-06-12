@@ -93,6 +93,8 @@ try:
         read_bench_text as _core_read_bench_text,
         verify_layout as _core_verify_layout,
         version as core_version,
+        build_clock_tree as _core_build_clock_tree,
+        build_bias_grid as _core_build_bias_grid,
     )
 except ImportError as relative_import_error:
     try:
@@ -131,6 +133,8 @@ except ImportError as relative_import_error:
             read_bench_text as _core_read_bench_text,
             verify_layout as _core_verify_layout,
             version as core_version,
+            build_clock_tree as _core_build_clock_tree,
+            build_bias_grid as _core_build_bias_grid,
         )
     except ImportError as absolute_import_error:
         # The extension may be unavailable before maturin develop is run.
@@ -139,6 +143,8 @@ except ImportError as relative_import_error:
             f"absolute import failed: {absolute_import_error}"
         )
         core_version = lambda: "unavailable"
+        _core_build_clock_tree = None
+        _core_build_bias_grid = None
         _CoreBlockedRegion = None
         _CoreClockDomainConstraint = None
         _CoreCrossingConstraint = None
@@ -484,6 +490,8 @@ check_equivalence = verify.check_equivalence
 check_single_step_sequential_equivalence = verify.check_single_step_sequential_equivalence
 check_bounded_sequential_equivalence = verify.check_bounded_sequential_equivalence
 verify_layout = verify.verify_layout
+build_clock_tree = flow.build_clock_tree
+build_bias_grid = flow.build_bias_grid
 
 
 __all__ = [
@@ -571,6 +579,8 @@ __all__ = [
     "pdk",
     "sim",
     "timing",
+    "build_clock_tree",
+    "build_bias_grid",
     "verify_layout",
     "verify",
 ]

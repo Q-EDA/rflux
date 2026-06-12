@@ -6,6 +6,8 @@
 - Phase B: in progress (J-04 closure)
 - Phase B execution checklist: `docs/phase-b-execution-checklist.md`
 - Phase B run record template: `docs/phase-b-run-record-template.md`
+- Phase E: in progress (CLI-first integration hardening)
+- Phase E execution checklist: `docs/phase-e-execution-checklist.md`
 
 ## 1. Purpose
 
@@ -50,6 +52,18 @@ Gate rule:
 | P-03 | Productization | must | 6 | Week3 one-command quality baseline pipeline remains executable with no-regression check. | `python/scripts/generate_week3_golden_results.py` | `python/tests/test_generate_week3_golden_results.py` | `checks / Quality baseline artifact prep smoke` | `docs/full-alignment-plan.md` |
 | P-04 | Productization | should | 5 | Candidate release artifact helper remains green for review bundles. | `python/scripts/prepare_release_artifacts.py`, `python/scripts/check_release_artifact_bundle.py`, `python/scripts/generate_release_review_record.py`, `python/scripts/generate_release_notes.py` | `python/tests/test_prepare_release_artifacts.py`, `python/tests/test_check_release_artifact_bundle.py`, `python/tests/test_generate_release_review_record.py`, `python/tests/test_generate_release_notes.py` | `checks / Release artifact helper smoke`, `checks / Release artifact bundle checker smoke`, `checks / Release review record generator smoke`, `checks / Release notes generator smoke` | `docs/release-artifact-readiness-checklist.md`, `docs/release-review-record-template.md`, `docs/release-notes-template.md` |
 
+## 3.1 Phase E CLI-first blocker set (must-pass, non-scored)
+
+The following blockers are mandatory for frontend-integration changes and are tracked in weekly reports. They are non-scored for the current `0-100` score model but release-blocking when failed.
+
+| ID | Blocker | Check definition | Suggested evidence anchor |
+|---|---|---|---|
+| E-01 | CLI compatibility blocker | Existing command names, core flags, exit codes, and machine-readable JSON fields remain backward-compatible unless explicitly versioned. | Contract `--check` gates + focused CLI regression jobs |
+| E-02 | CLI output blocker | Default CLI mode does not emit new progress noise to stdout that breaks script consumption. | Golden output diff or focused stdout/stderr regression tests |
+| E-03 | CLI performance blocker | Core command-path runtime does not exceed agreed regression threshold without waiver. | `uv run python python/scripts/capture_cli_perf_baseline.py --previous-baseline ... --fail-on-regression` artifact + threshold report |
+| E-04 | Non-service boundary blocker | No change introduces a mandatory always-on service dependency for existing CLI usage. | Release review checklist + docs consistency checks |
+| E-05 | Failure evidence blocker | Failure paths emit stable error code and diagnostics bundle evidence. | Diagnostics smoke + error-code mapping regression tests |
+
 ## 4. Current baseline snapshot (2026-05-28)
 
 | Domain | Estimated pass score |
@@ -77,4 +91,4 @@ Weekly report template:
 
 Latest weekly report:
 
-- `docs/alignment-scorecard-weekly-2026-05-28.md`
+- `docs/alignment-scorecard-weekly-2026-05-29.md`

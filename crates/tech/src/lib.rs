@@ -17,18 +17,26 @@ const REQUIRED_INTERCONNECT_KINDS: [InterconnectKind; 2] =
     [InterconnectKind::Jtl, InterconnectKind::Ptl];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Type of interconnect used between SFQ cells.
+///
+/// - Jtl: active Josephson transmission line
+/// - Ptl: passive transmission line
 pub enum InterconnectKind {
     Jtl,
     Ptl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// A single (length, delay) calibration point for interconnect timing.
 pub struct TimingPoint {
     pub length_um: f64,
     pub delay_ps: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Timing parameters for a cell kind or a named cell.
+///
+/// Fields: intrinsic delay, setup time, hold time.
 pub struct CellTimingModel {
     pub kind: SfCellKind,
     pub intrinsic_delay_ps: f64,
@@ -37,18 +45,23 @@ pub struct CellTimingModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Timing model overridden for a specific cell by name.
+///
+/// Takes precedence over the kind-based [`CellTimingModel`].
 pub struct NamedCellTimingModel {
     pub cell_name: String,
     pub timing: CellTimingModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A lookup table of (`length_um`, `delay_ps`) points for an interconnect kind.
 pub struct InterconnectTimingModel {
     pub kind: InterconnectKind,
     pub points: Vec<TimingPoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A named PVT corner that can override cell and interconnect timing.
 pub struct PdkTimingCorner {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +79,9 @@ pub struct PdkTimingCorner {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Enumeration of supported SFQ cell categories.
+///
+/// Used as a key for timing lookups and kind-based queries.
 pub enum SfCellKind {
     GenericGate,
     Macro,
@@ -77,6 +93,9 @@ pub enum SfCellKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A single cell entry in an [`SfCellLibrary`].
+///
+/// Includes area, pipeline depth, and kind.
 pub struct SfCell {
     pub name: String,
     pub kind: SfCellKind,
@@ -85,6 +104,9 @@ pub struct SfCell {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A named collection of [`SfCell`] entries.
+///
+/// Provides lookup by kind and by name, plus upsert.
 pub struct SfCellLibrary {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +117,7 @@ pub struct SfCellLibrary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Read-only metadata extracted from an [`SfCellLibrary`] (name, version, source).
 pub struct CellLibraryMetadata {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,12 +127,14 @@ pub struct CellLibraryMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A single named delay measurement from cell characterisation.
 pub struct CharacterizationDelayDetail {
     pub name: String,
     pub delay_ps: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A delay measurement for a specific driver-to-sink arc.
 pub struct CharacterizationArcDelay {
     pub name: String,
     pub driver_cell_name: String,
@@ -120,6 +145,10 @@ pub struct CharacterizationArcDelay {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Metadata captured during a characterisation simulation run.
+///
+/// Includes optional waveform paths, simulated vs STA-derived delays,
+/// calibration sigma, and arc delay details.
 pub struct CharacterizationArtifactMetadata {
     pub waveform_path: Option<String>,
     pub simulated_delay_ps: Option<f64>,
@@ -151,12 +180,14 @@ impl CharacterizationArtifactMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Associates a cell name with its [`CharacterizationArtifactMetadata`].
 pub struct NamedCharacterizationMetadata {
     pub cell_name: String,
     pub metadata: CharacterizationArtifactMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A characterised cell entry: cell + timing + optional metadata.
 pub struct CharacterizedCellLibraryEntry {
     pub cell: SfCell,
     pub timing: CellTimingModel,
@@ -165,11 +196,13 @@ pub struct CharacterizedCellLibraryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A bundle of [`CharacterizedCellLibraryEntry`] items.
 pub struct CharacterizedCellLibraryBundle {
     pub entries: Vec<CharacterizedCellLibraryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Flattened, human-readable entry combining cell properties and timing source.
 pub struct CellLibraryEntry {
     pub name: String,
     pub kind: SfCellKind,
@@ -183,6 +216,7 @@ pub struct CellLibraryEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Aggregated statistics over a PDK's cell library entries.
 pub struct CellLibrarySummary {
     pub cell_count: usize,
     pub kind_count: usize,
@@ -197,6 +231,7 @@ pub struct CellLibrarySummary {
 }
 
 impl SfCellLibrary {
+    #[must_use]
     pub fn minimal() -> Self {
         Self {
             name: "minimal-sfq".to_string(),
@@ -249,10 +284,12 @@ impl SfCellLibrary {
         }
     }
 
+    #[must_use]
     pub fn find_by_kind(&self, kind: SfCellKind) -> Option<&SfCell> {
         self.cells.iter().find(|cell| cell.kind == kind)
     }
 
+    #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<&SfCell> {
         self.cells.iter().find(|cell| cell.name == name)
     }
@@ -271,12 +308,17 @@ impl SfCellLibrary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A closed interval [`min_um`, `max_um`] for forbidden PTL lengths.
 pub struct LengthRange {
     pub min_um: f64,
     pub max_um: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A complete process design kit for SFQ design.
+///
+/// Bundles cell library, timing corners, interconnect models,
+/// metal-layer count, PTL forbidden ranges, and characterisation data.
 pub struct Pdk {
     pub name: String,
     pub metal_layers: u8,
@@ -293,6 +335,9 @@ pub struct Pdk {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Outcome of a PDK consistency check.
+///
+/// Errors prevent use for synthesis/placement/timing; warnings are advisory.
 pub struct PdkValidationReport {
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -300,12 +345,14 @@ pub struct PdkValidationReport {
 }
 
 impl PdkValidationReport {
+    #[must_use]
     pub fn is_ok(&self) -> bool {
         self.errors.is_empty()
     }
 }
 
 impl Pdk {
+    #[must_use]
     pub fn minimal(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -399,6 +446,7 @@ impl Pdk {
         }
     }
 
+    #[must_use]
     pub fn is_ptl_length_allowed(&self, length_um: f64) -> bool {
         !self
             .ptl_forbidden_ranges
@@ -406,12 +454,14 @@ impl Pdk {
             .any(|r| length_um >= r.min_um && length_um <= r.max_um)
     }
 
+    #[must_use]
     pub fn cell_timing(&self, kind: SfCellKind) -> Option<&CellTimingModel> {
         self.active_corner()
             .and_then(|corner| corner.cell_timing.iter().find(|model| model.kind == kind))
             .or_else(|| self.cell_timing.iter().find(|model| model.kind == kind))
     }
 
+    #[must_use]
     pub fn cell_timing_for_cell(
         &self,
         cell_name: &str,
@@ -434,6 +484,7 @@ impl Pdk {
             .or_else(|| self.cell_timing(kind))
     }
 
+    #[must_use]
     pub fn active_corner(&self) -> Option<&PdkTimingCorner> {
         let active = self.active_timing_corner.as_deref()?;
         self.timing_corners
@@ -441,6 +492,7 @@ impl Pdk {
             .find(|corner| corner.name == active)
     }
 
+    #[must_use]
     pub fn timing_corner_names(&self) -> Vec<&str> {
         self.timing_corners
             .iter()
@@ -448,30 +500,36 @@ impl Pdk {
             .collect()
     }
 
+    #[must_use]
     pub fn with_active_timing_corner(&self, name: impl Into<String>) -> Self {
         let mut updated = self.clone();
         updated.active_timing_corner = Some(name.into());
         updated
     }
 
+    #[must_use]
     pub fn cell_for_node(&self, cell_name: &str, kind: SfCellKind) -> Option<&SfCell> {
         self.cell_library
             .find_by_name(cell_name)
             .or_else(|| self.cell_library.find_by_kind(kind))
     }
 
+    #[must_use]
     pub fn cell_library_name(&self) -> &str {
         &self.cell_library.name
     }
 
+    #[must_use]
     pub fn cell_library_version(&self) -> Option<&str> {
         self.cell_library.version.as_deref()
     }
 
+    #[must_use]
     pub fn cell_library_source(&self) -> Option<&str> {
         self.cell_library.source.as_deref()
     }
 
+    #[must_use]
     pub fn cell_library_metadata(&self) -> CellLibraryMetadata {
         CellLibraryMetadata {
             name: self.cell_library.name.clone(),
@@ -480,6 +538,7 @@ impl Pdk {
         }
     }
 
+    #[must_use]
     pub fn cell_library_kinds(&self) -> Vec<SfCellKind> {
         let mut kinds = Vec::new();
         for cell in &self.cell_library.cells {
@@ -490,6 +549,7 @@ impl Pdk {
         kinds
     }
 
+    #[must_use]
     pub fn cell_library_entries(&self) -> Vec<CellLibraryEntry> {
         self.cell_library
             .cells
@@ -498,6 +558,7 @@ impl Pdk {
             .collect()
     }
 
+    #[must_use]
     pub fn cell_library_summary(&self) -> CellLibrarySummary {
         let entries = self.cell_library_entries();
         let mut kind_counts = BTreeMap::new();
@@ -538,6 +599,7 @@ impl Pdk {
         }
     }
 
+    #[must_use]
     pub fn cell_library_entries_by_kind(&self, kind: SfCellKind) -> Vec<CellLibraryEntry> {
         self.cell_library
             .cells
@@ -547,6 +609,7 @@ impl Pdk {
             .collect()
     }
 
+    #[must_use]
     pub fn cell_library_entry(&self, cell_name: &str) -> Option<CellLibraryEntry> {
         self.cell_library
             .find_by_name(cell_name)
@@ -601,6 +664,7 @@ impl Pdk {
         }
     }
 
+    #[must_use]
     pub fn characterization_metadata_for_cell(
         &self,
         cell_name: &str,
@@ -611,6 +675,7 @@ impl Pdk {
             .map(|entry| &entry.metadata)
     }
 
+    #[must_use]
     pub fn characterized_arc_delay_ps(
         &self,
         driver_cell_name: &str,
@@ -639,6 +704,7 @@ impl Pdk {
             .map(|arc| arc.delay_ps)
     }
 
+    #[must_use]
     pub fn with_characterized_cell(&self, entry: CharacterizedCellLibraryEntry) -> Self {
         let mut updated = self.clone();
         let cell_name = entry.cell.name.clone();
@@ -674,6 +740,7 @@ impl Pdk {
         updated
     }
 
+    #[must_use]
     pub fn with_characterized_library_entries(
         &self,
         entries: impl IntoIterator<Item = CharacterizedCellLibraryEntry>,
@@ -717,6 +784,7 @@ impl Pdk {
         serde_json::to_string_pretty(self)
     }
 
+    #[must_use]
     pub fn validate(&self) -> PdkValidationReport {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
@@ -756,8 +824,7 @@ impl Pdk {
                 .any(|corner| corner.name == active_corner)
             {
                 errors.push(format!(
-                    "pdk.active_timing_corner '{}' does not match any timing_corners entry",
-                    active_corner
+                    "pdk.active_timing_corner '{active_corner}' does not match any timing_corners entry"
                 ));
             }
         }
@@ -817,8 +884,7 @@ impl Pdk {
                 .any(|cell| cell.kind == required_kind)
             {
                 errors.push(format!(
-                    "pdk.cell_library is missing required cell kind {:?}",
-                    required_kind
+                    "pdk.cell_library is missing required cell kind {required_kind:?}"
                 ));
             }
         }
@@ -875,8 +941,7 @@ impl Pdk {
                 .any(|timing| timing.kind == required_kind)
             {
                 errors.push(format!(
-                    "pdk.cell_timing is missing required timing entry for kind {:?}",
-                    required_kind
+                    "pdk.cell_timing is missing required timing entry for kind {required_kind:?}"
                 ));
             }
         }
@@ -1127,8 +1192,7 @@ impl Pdk {
                 .any(|model| model.kind == required_kind)
             {
                 errors.push(format!(
-                    "pdk.interconnect_timing is missing required timing model for kind {:?}",
-                    required_kind
+                    "pdk.interconnect_timing is missing required timing model for kind {required_kind:?}"
                 ));
             }
         }
@@ -1140,6 +1204,7 @@ impl Pdk {
         serde_json::from_str(serialized)
     }
 
+    #[must_use]
     pub fn interconnect_delay_ps(&self, kind: InterconnectKind, length_um: f64) -> Option<f64> {
         let model = self
             .active_corner()

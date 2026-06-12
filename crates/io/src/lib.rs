@@ -28,12 +28,16 @@ const IR_JSON_KIND: &str = "rflux_ir_netlist";
 const PDK_JSON_KIND: &str = "rflux_pdk";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Supported input formats for netlist parsing.
 pub enum NetlistInputFormat {
     IrJson,
     Bench,
 }
 
 #[derive(Debug, Error)]
+/// Errors that can occur during file I/O, parsing, and schema validation.
+///
+/// Each variant maps to a structured error code (e.g. RFLOW-SCHEMA-001).
 pub enum IoError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -99,6 +103,7 @@ fn bench_parse_error_at_line(line: usize, detail: impl Into<String>) -> IoError 
 }
 
 impl IoError {
+    #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             IoError::Io(_) => "RFLOW-INPUT-001",
@@ -113,6 +118,7 @@ impl IoError {
         }
     }
 
+    #[must_use]
     pub fn suggestion(&self) -> &'static str {
         match self {
             IoError::Io(_) => "Check that the input path exists and is readable, then retry.",
@@ -326,13 +332,16 @@ fn parse_bench_netlist(text: &str) -> Result<Netlist, IoError> {
             ))
         })?;
         if gate.inputs.len() != expected_inputs {
-            return Err(bench_parse_error_at_line(gate.line, format!(
-                "gate '{}' op {} expects {} input(s), got {}",
-                gate.output,
-                gate.op,
-                expected_inputs,
-                gate.inputs.len()
-            )));
+            return Err(bench_parse_error_at_line(
+                gate.line,
+                format!(
+                    "gate '{}' op {} expects {} input(s), got {}",
+                    gate.output,
+                    gate.op,
+                    expected_inputs,
+                    gate.inputs.len()
+                ),
+            ));
         }
 
         let driver_node = match gate.op.as_str() {
@@ -7116,26 +7125,27 @@ fn order_bench_gates(
     let mut gate_outputs = HashSet::new();
     for gate in &gates {
         if input_set.contains(&gate.output) {
-            return Err(bench_parse_error_at_line(gate.line, format!(
-                "signal '{}' defined more than once",
-                gate.output
-            )));
+            return Err(bench_parse_error_at_line(
+                gate.line,
+                format!("signal '{}' defined more than once", gate.output),
+            ));
         }
         if !gate_outputs.insert(gate.output.clone()) {
-            return Err(bench_parse_error_at_line(gate.line, format!(
-                "signal '{}' defined more than once",
-                gate.output
-            )));
+            return Err(bench_parse_error_at_line(
+                gate.line,
+                format!("signal '{}' defined more than once", gate.output),
+            ));
         }
     }
 
     for gate in &gates {
         for input in &gate.inputs {
-            if !input_names.iter().any(|name| &name.name == input) && !gate_outputs.contains(input) {
-                return Err(bench_parse_error_at_line(gate.line, format!(
-                    "signal '{}' used before definition",
-                    input
-                )));
+            if !input_names.iter().any(|name| &name.name == input) && !gate_outputs.contains(input)
+            {
+                return Err(bench_parse_error_at_line(
+                    gate.line,
+                    format!("signal '{input}' used before definition"),
+                ));
             }
         }
     }
@@ -7186,10 +7196,10 @@ fn ensure_unique_bench_signal_names(names: &[BenchNamedSignal]) -> Result<(), Io
     let mut seen = HashSet::new();
     for name in names {
         if !seen.insert(&name.name) {
-            return Err(bench_parse_error_at_line(name.line, format!(
-                "signal '{}' defined more than once",
-                name.name
-            )));
+            return Err(bench_parse_error_at_line(
+                name.line,
+                format!("signal '{}' defined more than once", name.name),
+            ));
         }
     }
     Ok(())
@@ -7207,10 +7217,10 @@ fn parse_bench_decl<'a>(
         return Ok(None);
     }
     let Some(name) = rest.strip_suffix(')') else {
-        return Err(bench_parse_error_at_line(line_number, format!(
-            "invalid {} declaration: {}",
-            keyword, line
-        )));
+        return Err(bench_parse_error_at_line(
+            line_number,
+            format!("invalid {keyword} declaration: {line}"),
+        ));
     };
     let name = name.trim();
     validate_bench_signal_name(name)?;
@@ -7219,26 +7229,26 @@ fn parse_bench_decl<'a>(
 
 fn parse_bench_gate(line: &str, line_number: usize) -> Result<BenchGateSpec, IoError> {
     let Some((lhs, rhs)) = line.split_once('=') else {
-        return Err(bench_parse_error_at_line(line_number, format!(
-            "unsupported line format: {}",
-            line
-        )));
+        return Err(bench_parse_error_at_line(
+            line_number,
+            format!("unsupported line format: {line}"),
+        ));
     };
     let output = lhs.trim();
     validate_bench_signal_name(output)?;
 
     let rhs = rhs.trim();
     let Some(open_idx) = rhs.find('(') else {
-        return Err(bench_parse_error_at_line(line_number, format!(
-            "unsupported line format: {}",
-            line
-        )));
+        return Err(bench_parse_error_at_line(
+            line_number,
+            format!("unsupported line format: {line}"),
+        ));
     };
     let Some(arg_text) = rhs.strip_suffix(')') else {
-        return Err(bench_parse_error_at_line(line_number, format!(
-            "unsupported line format: {}",
-            line
-        )));
+        return Err(bench_parse_error_at_line(
+            line_number,
+            format!("unsupported line format: {line}"),
+        ));
     };
     let op = arg_text[..open_idx].trim();
     validate_bench_op_name(op)?;
@@ -7270,8 +7280,7 @@ fn validate_bench_signal_name(identifier: &str) -> Result<(), IoError> {
         .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '(' | ')' | ',' | '=' | '#'))
     {
         return Err(bench_parse_error(format!(
-            "invalid identifier '{}'",
-            identifier
+            "invalid identifier '{identifier}'"
         )));
     }
     Ok(())
@@ -7284,14 +7293,12 @@ fn validate_bench_op_name(identifier: &str) -> Result<(), IoError> {
     };
     if !(first.is_ascii_alphabetic() || first == '_') {
         return Err(bench_parse_error(format!(
-            "invalid identifier '{}'",
-            identifier
+            "invalid identifier '{identifier}'"
         )));
     }
     if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
         return Err(bench_parse_error(format!(
-            "invalid identifier '{}'",
-            identifier
+            "invalid identifier '{identifier}'"
         )));
     }
     Ok(())
@@ -7307,8 +7314,7 @@ fn connect_bench_gate_inputs(
     for (port, input_signal) in inputs.iter().enumerate() {
         let Some(&src_node) = signal_driver.get(input_signal) else {
             return Err(IoError::BenchParse(format!(
-                "signal '{}' used before definition",
-                input_signal
+                "signal '{input_signal}' used before definition"
             )));
         };
         let src_pin = PinRef {
@@ -7505,8 +7511,7 @@ mod tests {
     #[test]
     fn read_ir_json_reports_line_and_column_for_malformed_json() {
         let path = unique_test_path("ir-malformed-json-location");
-        fs::write(&path, "{\n  \"nodes\": [\n    \n")
-            .expect("malformed ir json should write");
+        fs::write(&path, "{\n  \"nodes\": [\n    \n").expect("malformed ir json should write");
 
         let error = read_ir_json(&path).expect_err("malformed json should be rejected");
 
@@ -7654,8 +7659,7 @@ mod tests {
                 .expect("clock should be after epoch")
                 .as_nanos()
         ));
-        fs::write(&path, "INPUT(a)\nOUTPUT(y)\ny = XAND(a, a)\n")
-            .expect("bench should write");
+        fs::write(&path, "INPUT(a)\nOUTPUT(y)\ny = XAND(a, a)\n").expect("bench should write");
 
         let error = read_bench_netlist(&path).expect_err("unsupported op should fail");
 

@@ -23,6 +23,7 @@
 为避免战略路线图停留在阶段目标层，本仓库同步维护一份 6 周执行切片：
 
 - [docs/professional-capability-roadmap-v1.md](docs/professional-capability-roadmap-v1.md)
+- [docs/capability-improvement-execution-plan-2026-05-31.md](docs/capability-improvement-execution-plan-2026-05-31.md)
 
 该文档用于把本路线图中的关键能力目标拆解为周级交付和验收标准。
 

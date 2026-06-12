@@ -57,6 +57,18 @@ Current external file contracts include:
 - Python `Circuit.to_json()` / `from_json()`
 - Python `Pdk.to_json()` / `from_json()`
 
+### 2.4 Engine integration contract
+
+Current engine-level integration contract is documented in `docs/engine-integration-contract.md`.
+
+This contract currently defines:
+
+- non-service integration boundary
+- progress event model
+- execution control semantics
+- structured error minimum fields
+- diagnostics bundle minimum fields
+
 ## 3. Frontend Capability Snapshot
 
 ### 3.1 IR JSON
@@ -120,6 +132,12 @@ Current success reports include:
 - `netlist_summary` for netlist-bearing inputs, including node/edge counts and structural kind counts
 
 Current failure reports route parse errors through typed CLI diagnostics. For malformed JSON and bench parsing failures, the detail text now includes line-aware location data when available.
+
+### 4.3 Frontend integration defaults
+
+- CLI remains the default single-machine execution surface and must not require an always-on service.
+- Integration-oriented progress/event output is contractually optional and should remain silent by default on CLI stdout.
+- Engine integrations should prefer callback/channel/file-based event emission over embedding network protocol assumptions in the core contract.
 
 ## 5. Python Runtime Availability Rules
 

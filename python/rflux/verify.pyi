@@ -2,17 +2,14 @@ from __future__ import annotations
 
 from ._types import (
     BoundedSequentialEquivalenceReport,
-    BoundedSequentialEquivalenceStepReport,
     ClockDomainConstraint,
     CombinationalEquivalenceReport,
     CompilePlan,
     CrossingConstraint,
     FixedNodePlacement,
     NodeTimingConstraint,
-    OutputMismatch,
     PinTimingConstraint,
     SingleStepSequentialEquivalenceReport,
-    StateTransitionMismatch,
     VerificationReport,
 )
 

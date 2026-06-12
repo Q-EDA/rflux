@@ -507,10 +507,10 @@ fn cli_error_detail(error: &anyhow::Error) -> String {
     error
         .chain()
         .nth(1)
-        .map(|cause| cause.to_string())
-        .unwrap_or_else(|| error.to_string())
+        .map_or_else(|| error.to_string(), std::string::ToString::to_string)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flow_config_with_cli_closure_options(
     flow_config: Option<&Path>,
     clock_period_ps: Option<f64>,
@@ -674,9 +674,7 @@ fn flow_config_payload(json: &Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("flow config envelope is missing numeric schema_version"))?;
     if schema_version != FLOW_CONFIG_SCHEMA_VERSION {
         bail!(
-            "unsupported flow config schema_version {}; expected {}",
-            schema_version,
-            FLOW_CONFIG_SCHEMA_VERSION
+            "unsupported flow config schema_version {schema_version}; expected {FLOW_CONFIG_SCHEMA_VERSION}"
         );
     }
     let kind = object
@@ -684,11 +682,7 @@ fn flow_config_payload(json: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("flow config envelope is missing string kind"))?;
     if kind != FLOW_CONFIG_KIND {
-        bail!(
-            "unexpected flow config kind '{}'; expected '{}'",
-            kind,
-            FLOW_CONFIG_KIND
-        );
+        bail!("unexpected flow config kind '{kind}'; expected '{FLOW_CONFIG_KIND}'");
     }
     object
         .get("payload")
@@ -869,9 +863,7 @@ fn timing_constraints_payload(json: &Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("timing constraints envelope is missing numeric schema_version"))?;
     if schema_version != TIMING_CONSTRAINTS_SCHEMA_VERSION {
         bail!(
-            "unsupported timing constraints schema_version {}; expected {}",
-            schema_version,
-            TIMING_CONSTRAINTS_SCHEMA_VERSION
+            "unsupported timing constraints schema_version {schema_version}; expected {TIMING_CONSTRAINTS_SCHEMA_VERSION}"
         );
     }
     let kind = object
@@ -879,11 +871,7 @@ fn timing_constraints_payload(json: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("timing constraints envelope is missing string kind"))?;
     if kind != TIMING_CONSTRAINTS_KIND {
-        bail!(
-            "unexpected timing constraints kind '{}'; expected '{}'",
-            kind,
-            TIMING_CONSTRAINTS_KIND
-        );
+        bail!("unexpected timing constraints kind '{kind}'; expected '{TIMING_CONSTRAINTS_KIND}'");
     }
     object
         .get("payload")
@@ -1166,6 +1154,10 @@ fn run_collect_diagnostics(args: CollectDiagnosticsArgs) -> Result<()> {
         "environment": collect_diagnostics_environment(),
         "configuration": configuration,
         "summary": summary,
+        "triage": {
+            "root_cause_category": "manual_collection",
+            "next_step": "Use captured artifacts for first-pass triage, then rerun with run-with-diagnostics to attach command-level failure classification when needed.",
+        },
         "structured_logs": {
             "events_path": display_path(&event_log_path),
             "event_count": event_log.len(),
@@ -2579,6 +2571,8 @@ fn diagnostics_success_outcome(
             "status": "succeeded",
             "error_code": Value::Null,
             "error_message": Value::Null,
+            "root_cause_category": Value::Null,
+            "next_step": Value::Null,
             "stdout_summary": empty_stream_summary(),
             "stderr_summary": empty_stream_summary(),
             "report_path": captured_report["bundle_path"].clone(),
@@ -2588,14 +2582,18 @@ fn diagnostics_success_outcome(
 }
 
 fn diagnostics_failure_outcome(error: anyhow::Error) -> Result<(Vec<Value>, Value, Value)> {
+    let classification = classify_cli_error(&error);
     let rendered = render_cli_error(&error);
-    let error_code = diagnostics_error_code(&error);
+    let error_code = classification.code.to_string();
+    let root_cause_category = diagnostics_root_cause_category(&error, &error_code);
     Ok((
         Vec::new(),
         json!({
             "status": "failed",
             "error_code": error_code,
             "error_message": rendered,
+            "root_cause_category": root_cause_category,
+            "next_step": classification.suggestion,
             "stdout_summary": empty_stream_summary(),
             "stderr_summary": stream_summary_from_text(&rendered),
             "report_path": Value::Null,
@@ -2605,6 +2603,7 @@ fn diagnostics_failure_outcome(error: anyhow::Error) -> Result<(Vec<Value>, Valu
             json!({
                 "status": "failed",
                 "error_code": diagnostics_error_code(&error),
+                "root_cause_category": root_cause_category,
             }),
         )?,
     ))
@@ -2838,6 +2837,7 @@ fn write_diagnostics_event_log(path: &Path, events: &[Value]) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_diagnostics_bundle_manifest(
     output_dir: &Path,
     command: &str,
@@ -2932,6 +2932,23 @@ fn diagnostics_error_code(error: &anyhow::Error) -> String {
     classify_cli_error(error).code.to_string()
 }
 
+fn diagnostics_root_cause_category(error: &anyhow::Error, code: &str) -> &'static str {
+    let error_text = error.to_string().to_ascii_lowercase();
+    if code.starts_with("RFLOW-INPUT-") || code.starts_with("RFLOW-SCHEMA-") {
+        if error_text.contains("pdk") {
+            "pdk_contract"
+        } else {
+            "input_contract"
+        }
+    } else if code.starts_with("RFLOW-SIM-") {
+        "external_simulator_or_simulation_subset"
+    } else if code.starts_with("RFLOW-FLOW-") || code.starts_with("RFLOW-VERIFY-") {
+        "algorithm_or_flow_limit"
+    } else {
+        "internal_error"
+    }
+}
+
 fn diagnostics_contract_snapshot(role: &str, source: &Path) -> Value {
     if role == "flow_config" {
         return diagnostics_flow_config_contract_snapshot(source);
@@ -2943,7 +2960,7 @@ fn diagnostics_contract_snapshot(role: &str, source: &Path) -> Value {
     let extension = source
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
+        .map(str::to_ascii_lowercase);
     let contract = match role {
         "input" | "lhs" | "rhs" if extension.as_deref() == Some("bench") => {
             Some(("bench", "quaigh_bench_subset"))
@@ -2997,13 +3014,11 @@ fn diagnostics_flow_config_contract_snapshot(source: &Path) -> Value {
                 "contract_kind": "rflux_flow_config",
                 "schema_format": contract_format
                     .as_ref()
-                    .map(|(schema_format, _)| *schema_format)
-                    .unwrap_or("legacy_raw_json"),
+                    .map_or("legacy_raw_json", |(schema_format, _)| *schema_format),
                 "input_schema_version": contract_format.as_ref().and_then(|(_, version)| *version),
                 "legacy_compatibility_used": contract_format
                     .as_ref()
-                    .map(|(schema_format, _)| *schema_format == "legacy_raw_json")
-                    .unwrap_or(false),
+                    .is_some_and(|(schema_format, _)| *schema_format == "legacy_raw_json"),
                 "inspection_error": Value::Null,
             })
         }
@@ -3029,13 +3044,11 @@ fn diagnostics_timing_constraints_contract_snapshot(source: &Path) -> Value {
             "contract_kind": "rflux_timing_constraints",
             "schema_format": contract_format
                 .as_ref()
-                .map(|(schema_format, _)| *schema_format)
-                .unwrap_or("timing_constraints_json"),
+                .map_or("timing_constraints_json", |(schema_format, _)| *schema_format),
             "input_schema_version": contract_format.as_ref().and_then(|(_, version)| *version),
             "legacy_compatibility_used": contract_format
                 .as_ref()
-                .map(|(schema_format, _)| *schema_format == "legacy_raw_json")
-                .unwrap_or(false),
+                .is_some_and(|(schema_format, _)| *schema_format == "legacy_raw_json"),
             "constraint_summary": summary.to_json(),
             "inspection_error": Value::Null,
         }),
@@ -3251,9 +3264,11 @@ fn netlist_summary_json(netlist: &rflux_ir::Netlist) -> Value {
     let mut node_kind_counts = BTreeMap::<String, usize>::new();
     let mut logic_op_counts = BTreeMap::<String, usize>::new();
     for node in netlist.nodes() {
-        *node_kind_counts.entry(format!("{:?}", node.kind)).or_default() += 1;
+        *node_kind_counts
+            .entry(format!("{:?}", node.kind))
+            .or_default() += 1;
         if let Some(logic_op) = node.logic_op.as_ref() {
-            *logic_op_counts.entry(format!("{:?}", logic_op)).or_default() += 1;
+            *logic_op_counts.entry(format!("{logic_op:?}")).or_default() += 1;
         }
     }
 
@@ -3320,14 +3335,11 @@ fn inspect_json_contract(input: &Path) -> Result<(&'static str, Option<u64>)> {
     let json: Value = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse input JSON from {}", input.display()))?;
     let schema_version = json.get("schema_version").and_then(Value::as_u64);
-    let looks_like_envelope = json
-        .as_object()
-        .map(|object| {
-            object.contains_key("schema_version")
-                || object.contains_key("kind")
-                || object.contains_key("payload")
-        })
-        .unwrap_or(false);
+    let looks_like_envelope = json.as_object().is_some_and(|object| {
+        object.contains_key("schema_version")
+            || object.contains_key("kind")
+            || object.contains_key("payload")
+    });
     if looks_like_envelope {
         Ok(("versioned_envelope", schema_version))
     } else {
@@ -3921,7 +3933,7 @@ fn timing_closure_to_json(closure: &rflux_flow::TimingClosureSummary) -> Value {
         "capture_window_violations": closure.capture_window_violations,
         "failing_checks": closure.failing_checks,
         "action_count": closure.action_count,
-        "primary_action": closure.primary_action.map(|action| timing_closure_action_to_json(&action)).unwrap_or(Value::Null),
+        "primary_action": closure.primary_action.map_or(Value::Null, |action| timing_closure_action_to_json(&action)),
         "action_summary": {
             "reduce_route_delay": closure.reduce_route_delay_actions,
             "relax_constraint_or_improve_library_timing": closure.relax_constraint_or_improve_library_timing_actions,
@@ -3944,7 +3956,7 @@ fn timing_closure_loop_to_json(loop_report: &rflux_flow::TimingClosureLoopReport
         "reduce_route_delay_candidate_available": loop_report.reduce_route_delay_candidate_available,
         "recommended_prefer_ptl_from_length_um": loop_report.recommended_prefer_ptl_from_length_um,
         "recommended_detour_margin_um": loop_report.recommended_detour_margin_um,
-        "recommended_route_mode": loop_report.recommended_route_mode.map(|mode| json!(format!("{:?}", mode))).unwrap_or(Value::Null),
+        "recommended_route_mode": loop_report.recommended_route_mode.map_or(Value::Null, |mode| json!(format!("{:?}", mode))),
         "estimated_route_length_um": loop_report.estimated_route_length_um,
         "estimated_slack_deficit_ps": loop_report.estimated_slack_deficit_ps,
         "reduce_route_delay_candidate_attempted": loop_report.reduce_route_delay_candidate_attempted,
@@ -3952,7 +3964,7 @@ fn timing_closure_loop_to_json(loop_report: &rflux_flow::TimingClosureLoopReport
         "candidate_worst_setup_slack_ps": loop_report.candidate_worst_setup_slack_ps,
         "candidate_setup_violations": loop_report.candidate_setup_violations,
         "candidate_hold_violations": loop_report.candidate_hold_violations,
-        "candidate_route_mode": loop_report.candidate_route_mode.map(|mode| json!(format!("{:?}", mode))).unwrap_or(Value::Null),
+        "candidate_route_mode": loop_report.candidate_route_mode.map_or(Value::Null, |mode| json!(format!("{:?}", mode))),
         "candidate_route_length_um": loop_report.candidate_route_length_um,
         "hold_fix_attempted": loop_report.hold_fix_attempted,
         "hold_fix_applied": loop_report.hold_fix_applied,
@@ -4181,10 +4193,10 @@ fn write_dimacs_export(
 }
 
 fn equivalence_sidecar_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|name| format!("{}.checks.json", name.to_string_lossy()))
-        .unwrap_or_else(|| "equivalence.checks.json".to_string());
+    let file_name = path.file_name().map_or_else(
+        || "equivalence.checks.json".to_string(),
+        |name| format!("{}.checks.json", name.to_string_lossy()),
+    );
     path.with_file_name(file_name)
 }
 
@@ -4293,16 +4305,13 @@ fn load_equivalence_check_selection(
                     check.get("check_ref").and_then(Value::as_str) == Some(check_ref.as_str())
                 })
                 .ok_or_else(|| {
-                    anyhow!("check ref not found in equivalence metadata: {}", check_ref)
+                    anyhow!("check ref not found in equivalence metadata: {check_ref}")
                 })?;
             let assumptions_json = matching
                 .get("assumptions")
                 .and_then(Value::as_array)
                 .ok_or_else(|| {
-                    anyhow!(
-                        "equivalence metadata check is missing assumptions: {}",
-                        check_ref
-                    )
+                    anyhow!("equivalence metadata check is missing assumptions: {check_ref}")
                 })?;
             let assumptions = assumptions_json
                 .iter()
@@ -4469,9 +4478,7 @@ fn parse_assumptions_option(raw: Option<&str>, var_count: usize) -> Result<Vec<L
         let var = literal.unsigned_abs() as usize;
         if var > var_count {
             bail!(
-                "assumption variable {} is out of range for formula with {} variables",
-                var,
-                var_count
+                "assumption variable {var} is out of range for formula with {var_count} variables"
             );
         }
         assumptions.push(if literal > 0 {
@@ -4506,6 +4513,7 @@ impl FlowRunnerCliExt for FlowRunner {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use rflux_io::read_ir_json;
@@ -5816,6 +5824,18 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "simulate-file");
         assert_eq!(manifest["execution"]["status"], "succeeded");
         assert!(manifest["execution"]["error_code"].is_null());
+        assert!(manifest["execution"]["root_cause_category"].is_null());
+        assert!(manifest["execution"]["next_step"].is_null());
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(
@@ -5902,10 +5922,9 @@ mod tests {
         })
         .expect("simulate-file should succeed");
 
-        let report: Value = serde_json::from_str(
-            &fs::read_to_string(&output_path).expect("report should exist"),
-        )
-        .expect("report should be valid json");
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(&output_path).expect("report should exist"))
+                .expect("report should be valid json");
 
         assert_eq!(report["schema_version"], json!(CLI_SCHEMA_VERSION));
         assert_eq!(report["backend"], "InternalTransientCompleted");
@@ -6060,14 +6079,37 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
+        let event_lines: Vec<&str> = event_log.lines().collect();
+        let failed_event: Value =
+            serde_json::from_str(event_lines[3]).expect("failed event should be json");
 
         assert_eq!(manifest["execution"]["status"], "failed");
         assert_eq!(manifest["execution"]["error_code"], "RFLOW-INPUT-001");
+        assert_eq!(
+            manifest["execution"]["root_cause_category"],
+            "input_contract"
+        );
+        assert!(manifest["execution"]["next_step"]
+            .as_str()
+            .is_some_and(|next| next.contains("simulate-file")));
         assert!(manifest["execution"]["error_message"]
             .as_str()
             .is_some_and(|message| message.contains("error[RFLOW-INPUT-001]")));
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
         assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 3);
+        assert_eq!(failed_event["event"], "command_failed");
+        assert_eq!(failed_event["fields"]["error_code"], "RFLOW-INPUT-001");
+        assert_eq!(
+            failed_event["fields"]["root_cause_category"],
+            "input_contract"
+        );
     }
 
     #[test]
@@ -6139,6 +6181,16 @@ mod tests {
 
         assert_eq!(manifest["invocation"]["command"], "verify-layout");
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(
@@ -6248,6 +6300,16 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "compile-layout");
         assert!(manifest["invocation"]["mode"].is_null());
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 2);
         assert_eq!(
@@ -6452,6 +6514,16 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "analyze-timing");
         assert!(manifest["invocation"]["mode"].is_null());
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 4);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(
@@ -7495,6 +7567,16 @@ mod tests {
         assert_eq!(manifest["invocation"]["command"], "compile-netlist");
         assert!(manifest["invocation"]["mode"].is_null());
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(
@@ -7974,6 +8056,16 @@ mod tests {
 
         assert_eq!(manifest["invocation"]["command"], "solve-dimacs");
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(manifest["summary"]["inspection_failure_count"], 0);
@@ -8114,6 +8206,16 @@ mod tests {
 
         assert_eq!(manifest["invocation"]["command"], "check-equivalence");
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(
@@ -8262,13 +8364,26 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
+        let event_lines: Vec<&str> = event_log.lines().collect();
+        let failed_event: Value =
+            serde_json::from_str(event_lines[4]).expect("failed event should be json");
 
         assert_eq!(manifest["execution"]["status"], "failed");
         assert_eq!(manifest["execution"]["error_code"], "RFLOW-VERIFY-002");
         assert!(manifest["execution"]["error_message"]
             .as_str()
             .is_some_and(|message| message.contains("error[RFLOW-VERIFY-002]")));
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 3);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
+        assert_eq!(failed_event["event"], "command_failed");
+        assert_eq!(failed_event["fields"]["error_code"], "RFLOW-VERIFY-002");
     }
 
     #[test]
@@ -8341,13 +8456,26 @@ mod tests {
             &fs::read_to_string(output_dir.join("manifest.json")).expect("manifest should exist"),
         )
         .expect("manifest should be valid json");
+        let event_log =
+            fs::read_to_string(output_dir.join("events.jsonl")).expect("event log should exist");
+        let event_lines: Vec<&str> = event_log.lines().collect();
+        let failed_event: Value =
+            serde_json::from_str(event_lines[4]).expect("failed event should be json");
 
         assert_eq!(manifest["execution"]["status"], "failed");
         assert_eq!(manifest["execution"]["error_code"], "RFLOW-VERIFY-001");
         assert!(manifest["execution"]["error_message"]
             .as_str()
             .is_some_and(|message| message.contains("error[RFLOW-VERIFY-001]")));
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 3);
         assert_eq!(manifest["summary"]["captured_report_count"], 0);
+        assert_eq!(failed_event["event"], "command_failed");
+        assert_eq!(failed_event["fields"]["error_code"], "RFLOW-VERIFY-001");
     }
 
     #[test]
@@ -8401,6 +8529,16 @@ mod tests {
 
         assert_eq!(manifest["invocation"]["command"], "lint-input");
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(manifest["summary"]["report_kinds"], json!(["lint_input"]));
@@ -8540,6 +8678,16 @@ mod tests {
 
         assert_eq!(manifest["invocation"]["command"], "pdk-validate");
         assert_eq!(manifest["execution"]["status"], "succeeded");
+        assert_eq!(manifest["execution"]["stdout_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stdout_summary"]["preview"],
+            json!([])
+        );
+        assert_eq!(manifest["execution"]["stderr_summary"]["line_count"], 0);
+        assert_eq!(
+            manifest["execution"]["stderr_summary"]["preview"],
+            json!([])
+        );
         assert_eq!(manifest["summary"]["captured_input_count"], 1);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
         assert_eq!(
@@ -9165,6 +9313,13 @@ mod tests {
         assert_eq!(manifest["summary"]["command"], "simulate-file");
         assert_eq!(manifest["summary"]["captured_input_count"], 2);
         assert_eq!(manifest["summary"]["captured_report_count"], 1);
+        assert_eq!(
+            manifest["triage"]["root_cause_category"],
+            "manual_collection"
+        );
+        assert!(manifest["triage"]["next_step"]
+            .as_str()
+            .is_some_and(|next| next.contains("run-with-diagnostics")));
         assert_eq!(manifest["summary"]["inspection_failure_count"], 0);
         assert_eq!(
             manifest["summary"]["report_kinds"],
@@ -9605,8 +9760,14 @@ mod tests {
         assert_eq!(report["schema_format"], "versioned_envelope");
         assert_eq!(report["input_schema_version"], 1);
         assert_eq!(report["legacy_compatibility_used"], false);
-        assert_eq!(report["schema_contract"]["contract_kind"], "rflux_ir_netlist");
-        assert_eq!(report["frontend_summary"]["reader"], "rflux_io::read_ir_json");
+        assert_eq!(
+            report["schema_contract"]["contract_kind"],
+            "rflux_ir_netlist"
+        );
+        assert_eq!(
+            report["frontend_summary"]["reader"],
+            "rflux_io::read_ir_json"
+        );
         assert_eq!(report["frontend_summary"]["roundtrip_write_support"], true);
         assert_eq!(report["netlist_summary"]["node_count"], 1);
         assert_eq!(report["netlist_summary"]["edge_count"], 0);
@@ -9673,8 +9834,14 @@ mod tests {
         assert_eq!(report["schema_format"], "bench_text");
         assert!(report["input_schema_version"].is_null());
         assert_eq!(report["legacy_compatibility_used"], false);
-        assert_eq!(report["frontend_summary"]["reader"], "rflux_io::read_bench_netlist");
-        assert_eq!(report["frontend_summary"]["source_map_support"], "line_only_diagnostics");
+        assert_eq!(
+            report["frontend_summary"]["reader"],
+            "rflux_io::read_bench_netlist"
+        );
+        assert_eq!(
+            report["frontend_summary"]["source_map_support"],
+            "line_only_diagnostics"
+        );
         assert_eq!(report["netlist_summary"]["node_count"], 4);
         assert_eq!(report["netlist_summary"]["edge_count"], 3);
         assert_eq!(report["netlist_summary"]["node_kind_counts"]["Port"], 3);
@@ -9709,7 +9876,10 @@ mod tests {
         assert_eq!(report["input_schema_version"], 1);
         assert_eq!(report["legacy_compatibility_used"], false);
         assert_eq!(report["schema_contract"]["contract_kind"], "rflux_pdk");
-        assert_eq!(report["frontend_summary"]["reader"], "rflux_io::read_pdk_json");
+        assert_eq!(
+            report["frontend_summary"]["reader"],
+            "rflux_io::read_pdk_json"
+        );
     }
 
     #[test]
@@ -10432,7 +10602,7 @@ mod tests {
         let input_path = dir.join("unsupported.cir");
         fs::write(
             &input_path,
-            ".subckt outer in out\n.subckt inner a b\nR1 a b 50\n.ends\n.ends\nX1 n1 n2 outer\n.tran 1p 10p\n.end\n",
+            ".subckt stage in out rval=50\nR1 in out rval\n.ends\nX1 n1 n2 stage extra rval=75\n.tran 1p 10p\n.end\n",
         )
         .expect("deck should write");
 
@@ -10447,9 +10617,8 @@ mod tests {
             "error[RFLOW-SIM-002]: simulate-file failed for {}",
             input_path.display()
         )));
-        assert!(
-            rendered.contains("detail: nested .subckt definition is not supported inside outer")
-        );
+        assert!(rendered
+            .contains("detail: unsupported subckt instance syntax: X1 n1 n2 stage extra rval=75"));
         assert!(rendered.contains(
             "next: Run with --mode external_josim or simplify the deck to the currently supported internal subset."
         ));

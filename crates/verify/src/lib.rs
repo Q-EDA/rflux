@@ -17,6 +17,7 @@ pub struct Verifier {
 }
 
 impl Verifier {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             compiler: Compiler::new(),

@@ -195,3 +195,4 @@
 - 长周期战略仍以 [docs/commercialization-roadmap.md](docs/commercialization-roadmap.md) 为准。
 - 本文是“可执行短周期切片”，用于把战略转为 6 周交付。
 - 发布评审继续使用 [docs/release-artifact-readiness-checklist.md](docs/release-artifact-readiness-checklist.md)。
+- 能力扩展启动清单使用 [docs/capability-improvement-execution-plan-2026-05-31.md](docs/capability-improvement-execution-plan-2026-05-31.md)。

@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_security_compliance:
+        description: "Run optional security/compliance baseline job"
+        required: false
+        default: false
+        type: boolean
+      run_release_artifacts:
+        description: "Build optional candidate CLI and Python release artifacts"
+        required: false
+        default: false
+        type: boolean
+      run_waveform_compare_linux:
+        description: "Run optional Linux waveform compare gate"
+        required: false
+        default: false
+        type: boolean
+      run_cli_perf_regression_gate:
+        description: "Run optional CLI performance regression gate against a previous baseline"
+        required: false
+        default: false
+        type: boolean
+      run_cli_perf_baseline_refresh:
+        description: "Run optional CLI performance baseline refresh job (candidate artifact only)"
+        required: false
+        default: false
+        type: boolean
+      josim_command:
+        description: "Optional override for the JoSIM command/path used by the Windows waveform gate"
+        required: false

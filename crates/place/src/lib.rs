@@ -25,6 +25,7 @@ pub struct Placement {
 }
 
 impl Placement {
+    #[must_use]
     pub fn point_of(&self, node: NodeId) -> Option<Point> {
         self.nodes
             .iter()
@@ -82,6 +83,7 @@ pub enum PlaceError {
 pub struct LevelizedPlacer;
 
 impl LevelizedPlacer {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

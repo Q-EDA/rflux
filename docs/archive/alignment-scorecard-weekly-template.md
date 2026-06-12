@@ -55,6 +55,24 @@ Blocking MUST items:
 Waivers approved by:
 ```
 
+## 5.1 Phase E CLI-first blockers (must-pass, non-scored)
+
+Rule: any failed Phase E blocker means frontend-integration change is not releasable.
+
+| Blocker ID | Status (PASS/FAIL/WAIVED) | Evidence command or job | Evidence link/path | Owner | ETA if FAIL |
+|---|---|---|---|---|---|
+| E-01 |  |  |  |  |  |
+| E-02 |  |  |  |  |  |
+| E-03 |  |  |  |  |  |
+| E-04 |  |  |  |  |  |
+| E-05 |  |  |  |  |  |
+
+E-03 evidence quick anchors (recommended):
+
+- Checks snapshot artifact: `cli-perf-baseline` (`target/cli-perf/cli_perf_baseline.current.json`)
+- Optional strict gate artifact: `cli-perf-regression-gate`
+- Optional refresh artifact: `cli-perf-baseline-candidate`
+
 ## 6. Top risks and next actions
 
 ```md
@@ -74,3 +92,4 @@ Action 3:
 - Full plan: `docs/full-alignment-plan.md`
 - PR template: `.github/PULL_REQUEST_TEMPLATE.md`
 - Baseline status artifact: `waveform-baseline-status/linux.json` and `waveform-baseline-status/windows.json`
+- CLI perf baseline playbook: `docs/cli-performance-baseline-promotion-playbook.md`

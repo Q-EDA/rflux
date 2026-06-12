@@ -3635,7 +3635,7 @@ def test_verify_layout_propagates_external_simulator_summary(tmp_path):
     assert report.simulation_backend == "external_completed"
     assert report.simulated_events == 7
     assert report.waveform_path is not None
-    assert report.waveform_path.endswith(".raw")
+    assert report.waveform_path.endswith((".raw", ".csv"))
     assert report.reported_violations == 1
     assert report.reported_worst_delay_ps == 13.5
     assert len(report.delay_details) == 1

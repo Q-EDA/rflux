@@ -237,6 +237,7 @@ pub struct PathBalanceReport {
 }
 
 impl PathBalanceReport {
+    #[must_use]
     pub fn total_insertions(&self) -> usize {
         self.needs.iter().map(|need| need.deficit).sum()
     }
@@ -265,6 +266,7 @@ pub struct BoolOptCompatibilityReport {
 }
 
 impl BoolOptCompatibilityReport {
+    #[must_use]
     pub fn is_compatible(&self) -> bool {
         self.issues.is_empty()
     }
@@ -298,10 +300,12 @@ pub struct TechMapper<'a> {
 }
 
 impl<'a> TechMapper<'a> {
+    #[must_use]
     pub fn new(pdk: &'a Pdk) -> Self {
         Self { pdk }
     }
 
+    #[must_use]
     pub fn map_kind(kind: &NodeKind) -> SfCellKind {
         match kind {
             NodeKind::CellInstance => SfCellKind::GenericGate,
@@ -314,6 +318,7 @@ impl<'a> TechMapper<'a> {
         }
     }
 
+    #[must_use]
     pub fn map_netlist(&self, netlist: &'a Netlist) -> Vec<TechMappedNode<'a>> {
         netlist
             .nodes()
@@ -332,6 +337,7 @@ impl<'a> TechMapper<'a> {
             .collect()
     }
 
+    #[must_use]
     pub fn map_report(&self, netlist: &'a Netlist) -> TechMapReport {
         let mapped = self.map_netlist(netlist);
         TechMapReport {
@@ -348,6 +354,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -624,9 +631,8 @@ impl Compiler {
                     sat_stats: aggregated_stats,
                     sat_elapsed_ns: aggregated_elapsed_ns,
                 });
-            } else {
-                continue;
             }
+            continue;
         }
 
         Ok(SatEquivalenceReport {
@@ -876,7 +882,7 @@ fn sequential_report_from_bounded_model(
     }
 
     let mut output_mismatch = BTreeMap::new();
-    for (name, lhs_var) in frame.lhs_outputs.iter() {
+    for (name, lhs_var) in &frame.lhs_outputs {
         let rhs_var = frame.rhs_outputs.get(name).expect("rhs output must exist");
         output_mismatch.insert(
             name.clone(),
@@ -888,7 +894,7 @@ fn sequential_report_from_bounded_model(
     }
 
     let mut state_mismatch = BTreeMap::new();
-    for (name, lhs_state) in frame.lhs_states.iter() {
+    for (name, lhs_state) in &frame.lhs_states {
         let rhs_state = frame.rhs_states.get(name).expect("rhs state must exist");
         state_mismatch.insert(
             name.clone(),

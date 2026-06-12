@@ -35,6 +35,7 @@ fn fixture_metrics_csv_path() -> PathBuf {
         .join("quaigh_fixture_sat_metrics.csv")
 }
 
+#[allow(clippy::type_complexity)]
 fn write_fixture_metrics_csv(
     rows: &[(String, u128, usize, usize, usize, usize, usize, usize)],
     total_recursive_calls: usize,
@@ -78,6 +79,7 @@ fn write_fixture_metrics_csv(
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn quaigh_alignment_fixture_cases() {
     let cases = vec![
         FixtureCase {
@@ -558,12 +560,7 @@ fn quaigh_alignment_fixture_cases() {
     .expect("fixture sat metrics csv should be writable");
 
     println!(
-        "quaigh_fixture_sat_summary total_recursive_calls={} total_decisions={} total_backtracks={} total_restarts={} max_elapsed_ns={}",
-        total_recursive_calls,
-        total_decisions,
-        total_backtracks,
-        total_restarts,
-        max_elapsed_ns,
+        "quaigh_fixture_sat_summary total_recursive_calls={total_recursive_calls} total_decisions={total_decisions} total_backtracks={total_backtracks} total_restarts={total_restarts} max_elapsed_ns={max_elapsed_ns}",
     );
     println!("quaigh_fixture_sat_metrics_csv path={}", csv_path.display());
 }

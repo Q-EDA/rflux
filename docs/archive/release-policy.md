@@ -82,6 +82,7 @@
 - PDK JSON schema。
 - report JSON schema。
 - 对外错误码。
+- 引擎集成契约中的公共字段（进度事件、执行控制默认语义、诊断包最小字段）。
 
 ### 4.2 兼容等级
 
@@ -130,6 +131,7 @@
 - JSON report kind/schema surface 变更必须附带 `python/tests/contracts/report_schema_surface.json` 契约基线差异结论；若更新基线，必须在发布说明中记录新增/删除/版本变化并说明兼容影响。
 - 若发布涉及 PDK schema、PDK 默认行为或新接入 PDK，必须附带 `pdk-validate` 结果或等价结构校验记录。
 - 主 CI 与进入发布评审的可选 workflow 必须复用仓库内共享的环境 bootstrap 路径，避免 Rust/Python/uv 初始化在不同 job 之间发生未审查漂移。
+- 若发布触及 `docs/engine-integration-contract.md` 中定义的公共字段或默认行为，必须附带 CLI First 不降级结论，并说明是否影响默认 CLI 输出、退出码或无服务依赖路径。
 
 ### 5.2 Alpha 额外要求
 
@@ -222,6 +224,11 @@
 11. 触及 CLI 命令/参数面的候选版本，评审前必须运行 `uv run python python/scripts/export_cli_command_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 12. 触及 JSON report kind/schema surface 的候选版本，评审前必须运行 `uv run python python/scripts/export_report_schema_surface.py --check`，并在需要更新契约基线时把差异摘要写入 release notes。
 13. 若候选版本触及 Week 3 质量基线输入（timing/verify/sim）或阈值/汇总逻辑，评审前必须运行 `uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0`，并附带生成的 review bundle 作为评审证据。
+14. 若候选版本触及引擎集成契约（进度事件、取消/超时、诊断包最小字段、默认输出语义），评审前必须给出：
+  - `docs/engine-integration-contract.md` 变更摘要；
+  - CLI First 不降级结论；
+  - 对应测试或 CI 锚点；
+  - 若存在兼容破坏，明确版本化或豁免记录。
 
 当前候选发布构建也已有显式 CI smoke anchor：
 

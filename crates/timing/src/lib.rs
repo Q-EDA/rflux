@@ -6,6 +6,7 @@ use rflux_tech::{CharacterizationArtifactMetadata, InterconnectKind, Pdk, SfCell
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Timing constraint attached to a specific node.
 pub struct NodeTimingConstraint {
     pub node: NodeId,
     pub input_arrival_ps: Option<f64>,
@@ -14,6 +15,7 @@ pub struct NodeTimingConstraint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Timing constraint attached to a specific pin.
 pub struct PinTimingConstraint {
     pub pin: PinRef,
     pub input_arrival_ps: Option<f64>,
@@ -22,12 +24,14 @@ pub struct PinTimingConstraint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Constraint defining a single clock domain.
 pub struct ClockDomainConstraint {
     pub id: usize,
     pub period_ps: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Kind of clock-domain crossing constraint.
 pub enum CrossingConstraintKind {
     FalsePath,
     MaxDelay,
@@ -35,6 +39,7 @@ pub enum CrossingConstraintKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Constraint for paths that cross clock domains.
 pub struct CrossingConstraint {
     pub from_domain: usize,
     pub to_domain: usize,
@@ -44,6 +49,7 @@ pub struct CrossingConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Configuration for static timing analysis.
 pub struct TimingConfig {
     pub clock_period_ps: f64,
     pub input_arrival_ps: f64,
@@ -71,6 +77,7 @@ impl Default for TimingConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Per-arc deterministic timing result.
 pub struct TimingArcReport {
     pub from: PinRef,
     pub to: PinRef,
@@ -96,10 +103,13 @@ pub struct TimingArcReport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Complete deterministic STA result for a netlist.
 pub struct TimingReport {
     pub arcs: Vec<TimingArcReport>,
     pub worst_setup_slack_ps: f64,
     pub worst_hold_slack_ps: f64,
+    pub total_negative_setup_slack_ps: f64,
+    pub total_negative_hold_slack_ps: f64,
     pub critical_path_delay_ps: f64,
     pub setup_violations: usize,
     pub hold_violations: usize,
@@ -109,6 +119,7 @@ pub struct TimingReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Configuration for statistical static timing analysis (SSTA).
 pub struct StatisticalTimingConfig {
     pub cell_delay_sigma_ratio: f64,
     pub wire_delay_sigma_ratio: f64,
@@ -138,6 +149,7 @@ impl Default for StatisticalTimingConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Per-arc statistical timing result with mean and sigma.
 pub struct StatisticalTimingArcReport {
     pub from: PinRef,
     pub to: PinRef,
@@ -164,6 +176,7 @@ pub struct StatisticalTimingArcReport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Complete SSTA result for a netlist.
 pub struct StatisticalTimingReport {
     pub arcs: Vec<StatisticalTimingArcReport>,
     pub worst_pessimistic_setup_slack_ps: f64,
@@ -175,6 +188,7 @@ pub struct StatisticalTimingReport {
 }
 
 #[derive(Debug, Error)]
+/// Errors from the timing analysis engine.
 pub enum TimingError {
     #[error("timing analysis requires an acyclic netlist")]
     CyclicNetlist,
@@ -187,9 +201,14 @@ pub enum TimingError {
 }
 
 #[derive(Debug, Default)]
+/// The main STA engine.
+///
+/// Builds a timing graph from a netlist and PDK, then computes
+/// arrival/required times and slack for all endpoints.
 pub struct StaticTimingAnalyzer;
 
 impl StaticTimingAnalyzer {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -371,6 +390,18 @@ impl StaticTimingAnalyzer {
             });
         }
 
+        // Compute total negative slack (TNS) ? sum of all negative slacks
+        let total_negative_setup_slack_ps: f64 = arcs
+            .iter()
+            .filter(|arc| arc.setup_slack_ps < 0.0 && !arc.is_false_path)
+            .map(|arc| arc.setup_slack_ps)
+            .sum();
+        let total_negative_hold_slack_ps: f64 = arcs
+            .iter()
+            .filter(|arc| arc.hold_slack_ps < 0.0 && !arc.is_false_path)
+            .map(|arc| arc.hold_slack_ps)
+            .sum();
+
         Ok(TimingReport {
             arcs,
             worst_setup_slack_ps: if worst_setup_slack_ps.is_finite() {
@@ -383,6 +414,8 @@ impl StaticTimingAnalyzer {
             } else {
                 0.0
             },
+            total_negative_setup_slack_ps,
+            total_negative_hold_slack_ps,
             critical_path_delay_ps: arrival.into_iter().fold(0.0, f64::max),
             setup_violations,
             hold_violations,
@@ -660,7 +693,8 @@ fn statistical_cell_sensitivity(driver_kind: SfCellKind, driver_cell: Option<&Sf
         (driver_cell.area_um2 / default_area_um2).max(0.25)
     };
     let area_factor = 1.0 + (area_ratio - 1.0) * 0.12;
-    let pipeline_delta = driver_cell.pipeline_stages as f64 - default_pipeline_stages as f64;
+    let pipeline_delta =
+        f64::from(driver_cell.pipeline_stages) - f64::from(default_pipeline_stages);
     let pipeline_factor = 1.0 + pipeline_delta * 0.06;
 
     (base * area_factor * pipeline_factor).clamp(base * 0.75, base * 1.50)
@@ -903,8 +937,7 @@ fn sfq_phase_for_pin(config: &TimingConfig, pin: PinRef) -> usize {
         .clock_domains
         .iter()
         .position(|domain| domain.id == domain_id)
-        .map(|index| index % phase_count)
-        .unwrap_or(0)
+        .map_or(0, |index| index % phase_count)
 }
 
 fn sfq_phase_window_ps(config: &TimingConfig, pin: PinRef, phase: usize) -> (f64, f64) {
@@ -928,6 +961,7 @@ fn sfq_phase_offset_ps(config: &TimingConfig, pin: PinRef, arrival_ps: f64) -> f
     arrival_ps.rem_euclid(period_ps)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_crossing_constraint(
     config: &TimingConfig,
     from: PinRef,

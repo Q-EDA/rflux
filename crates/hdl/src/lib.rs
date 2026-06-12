@@ -10,6 +10,7 @@ pub struct CircuitBuilder {
 }
 
 impl CircuitBuilder {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             netlist: Netlist::new(),
@@ -52,12 +53,13 @@ impl CircuitBuilder {
         self.netlist.connect(from.pin, to.pin)?;
         Ok(self)
     }
-
+    #[must_use]
     pub fn add_port(mut self, name: impl Into<String>) -> Self {
         self.port(name);
         self
     }
 
+    #[must_use]
     pub fn finish(self) -> Netlist {
         self.netlist
     }

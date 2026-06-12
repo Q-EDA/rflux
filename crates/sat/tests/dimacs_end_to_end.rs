@@ -30,6 +30,7 @@ fn metrics_csv_path() -> PathBuf {
         .join("dimacs_sat_metrics.csv")
 }
 
+#[allow(clippy::type_complexity)]
 fn write_metrics_csv(
     rows: &[(String, bool, usize, usize, u128, usize, usize, usize, usize)],
     total_recursive_calls: usize,
@@ -74,6 +75,7 @@ fn write_metrics_csv(
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn dimacs_classic_examples_end_to_end() {
     let cases = vec![
         DimacsCase {
@@ -171,12 +173,7 @@ fn dimacs_classic_examples_end_to_end() {
     .expect("dimacs metrics csv should be writable");
 
     println!(
-        "dimacs_sat_summary total_recursive_calls={} total_decisions={} total_backtracks={} total_restarts={} max_elapsed_ns={}",
-        total_recursive_calls,
-        total_decisions,
-        total_backtracks,
-        total_restarts,
-        max_elapsed_ns,
+        "dimacs_sat_summary total_recursive_calls={total_recursive_calls} total_decisions={total_decisions} total_backtracks={total_backtracks} total_restarts={total_restarts} max_elapsed_ns={max_elapsed_ns}",
     );
     println!("dimacs_sat_metrics_csv path={}", csv_path.display());
 }

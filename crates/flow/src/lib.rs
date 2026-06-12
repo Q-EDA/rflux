@@ -17,6 +17,9 @@ use rflux_timing::{
 };
 use thiserror::Error;
 
+pub mod bias_grid;
+pub mod clock_tree;
+
 pub use rflux_sim::{
     parse_simulator_output, SimulationBackend, SimulationConfig, SimulationDelayDetail,
     SimulationEndpointRef, SimulationMode, SimulationReport, SimulationViolationDetail,
@@ -5399,5 +5402,59 @@ mod tests {
                 .and_then(|endpoint| endpoint.port),
             Some(0)
         );
+    }
+
+    /// Generate an H-tree clock distribution network.
+    pub fn build_clock_tree(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+    ) -> ClockTreeReport {
+        let placement = match self.placer.place(netlist, &config.placement) {
+            Ok(p) => p,
+            Err(_) => {
+                return ClockTreeReport {
+                    sink_count: 0,
+                    buffer_count: 0,
+                    levels: 0,
+                    total_wire_length_um: 0.0,
+                    estimated_skew_ps: 0.0,
+                    phase_count: config.clock_phase_count,
+                    phases: Vec::new(),
+                }
+            }
+        };
+        let sinks = clock_tree::find_clock_sinks(netlist, &placement);
+        clock_tree::build_h_tree(
+            netlist,
+            &sinks,
+            &placement,
+            &clock_tree::ClockTreeConfig {
+                phase_count: config.clock_phase_count,
+                ..clock_tree::ClockTreeConfig::default()
+            },
+        )
+    }
+
+    /// Generate a bias distribution grid estimate.
+    pub fn build_bias_grid(
+        &self,
+        netlist: &Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+    ) -> BiasGridReport {
+        let placement = match self.placer.place(netlist, &config.placement) {
+            Ok(p) => p,
+            Err(_) => {
+                return BiasGridReport {
+                    grid_cells: 0,
+                    total_wire_length_um: 0.0,
+                    connected_nodes: 0,
+                    estimated_total_bias_current_ma: 0.0,
+                }
+            }
+        };
+        bias_grid::build_bias_grid(netlist, &placement, &bias_grid::BiasGridConfig::default())
     }
 }

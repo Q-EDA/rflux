@@ -41,6 +41,15 @@ If compatibility changed, describe it here.
 - [ ] Considered benchmark or QoR impact
 - [ ] Considered error reporting and diagnostics
 - [ ] If sim / waveform compare behavior changed, considered baseline, history diff, and no-regression impact
+- [ ] If CLI performance path changed, updated candidate baseline evidence and documented E-03 impact
+
+## E-03 CLI Performance Gate (when applicable)
+
+- [ ] Ran candidate baseline capture (artifact path recorded)
+- [ ] Compared against approved baseline or stated why comparison is deferred
+- [ ] If approved baseline is updated, linked reviewer decision and rationale
+
+Baseline playbook: [docs/cli-performance-baseline-promotion-playbook.md](../docs/cli-performance-baseline-promotion-playbook.md)
 
 ## Follow-up
 

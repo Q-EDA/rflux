@@ -1,0 +1,16 @@
+{
+  "root": ".",
+  "include": [
+    "python/rflux",
+    "python/scripts"
+  ],
+  "exclude": [
+    "python/tests/**",
+    "**/__pycache__/**"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.12",
+  "pythonPlatform": "All"
+}

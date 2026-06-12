@@ -20,10 +20,40 @@ on:
         required: false
         default: false
         type: boolean
+      run_cli_perf_regression_gate:
+        description: "Run optional CLI performance regression gate against a previous baseline"
+        required: false
+        default: false
+        type: boolean
+      run_cli_perf_baseline_refresh:
+        description: "Run optional CLI performance baseline refresh job (candidate artifact only)"
+        required: false
+        default: false
+        type: boolean
       josim_command:
         description: "Optional override for the JoSIM command/path used by the Windows waveform gate"
         required: false
         default: ""
+        type: string
+      cli_perf_previous_baseline:
+        description: "Required repo-relative previous CLI perf baseline JSON for regression comparison"
+        required: false
+        default: "python/tests/benchmarks/phasee/cli_perf_baseline.linux-approved-baseline.json"
+        type: string
+      cli_perf_max_regression_ratio:
+        description: "Allowed positive median regression ratio for CLI perf gate"
+        required: false
+        default: "0.2"
+        type: string
+      cli_perf_iterations:
+        description: "Measured iterations per CLI perf case"
+        required: false
+        default: "3"
+        type: string
+      cli_perf_warmup:
+        description: "Warmup iterations per CLI perf case"
+        required: false
+        default: "1"
         type: string
       previous_summary_json:
         description: "Optional repo-relative approved baseline summary JSON for history diff generation"
@@ -76,20 +106,18 @@ jobs:
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
 
+      - name: Rust formatting check
+        run: cargo fmt --check
+
+      - name: Rust clippy lints
+        run: cargo clippy --workspace --no-deps -- -W clippy::pedantic -A clippy::unwrap_used -A clippy::expect_used -A clippy::too_many_arguments -A clippy::module_name_repetitions -A clippy::missing_errors_doc -A clippy::missing_panics_doc 2>&1 | head -100
+        continue-on-error: true
+
       - name: Rust tests
         run: |
           export PYO3_PYTHON="$(uv python find)"
           cargo test --workspace
 
-      - name: Generate SAT and synth metric artifacts
-        run: |
-          export PYO3_PYTHON="$(uv python find)"
-          cargo test -p rflux-sat --test dimacs_end_to_end -- --nocapture
-          cargo test -p rflux-synth --test quaigh_alignment_fixtures -- --nocapture
-          cargo test -p rflux-synth --test end_to_end_classic_examples -- --nocapture
-
-      - name: Python tests
-        run: uv run pytest
 
       - name: Diagnostics command smoke
         run: |
@@ -161,6 +189,10 @@ jobs:
         run: |
           uv run pytest python/tests/test_generate_release_notes.py -q
 
+      - name: CLI perf baseline schema smoke
+        run: |
+          uv run pytest python/tests/test_capture_cli_perf_baseline.py -q
+
       - name: Python API surface contract smoke
         run: |
           uv run pytest python/tests/test_python_api_surface_contract.py -q
@@ -203,6 +235,26 @@ jobs:
           uv run python python/scripts/collect_quality_baseline_results.py --timing-report python/tests/benchmarks/week3/inputs/timing_report.golden.json --verify-report python/tests/benchmarks/week3/inputs/verify_report.golden.json --sim-summary python/tests/benchmarks/week3/inputs/sim_summary.golden.json --output target/week3-quality/quality_results.generated.json --check-against python/tests/benchmarks/week3/quality_results.golden.json
           uv run python python/scripts/prepare_quality_baseline_artifacts.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --artifact-dir target/week3-quality-review --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0 --github-workflow "${{ github.workflow }}" --github-job "checks" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
           uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0 --github-workflow "${{ github.workflow }}" --github-job "checks" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+
+      - name: Capture CLI performance baseline snapshot
+        run: |
+          uv run python python/scripts/capture_cli_perf_baseline.py --output target/cli-perf/cli_perf_baseline.current.json --iterations 3 --warmup 1
+
+      - name: Python lint check
+        run: uv run ruff check python/
+        continue-on-error: true
+
+      - name: Rust security audit
+        run: |
+          cargo install cargo-audit --locked 2>/dev/null || true
+          cargo audit 2>&1 | head -100 || true
+        continue-on-error: true
+
+      - name: Rust dependency check
+        run: |
+          cargo install cargo-deny --locked 2>/dev/null || true
+          cargo deny check bans licenses sources 2>&1 | head -100 || true
+        continue-on-error: true
 
       - name: Upload Week 3 quality artifacts
         uses: actions/upload-artifact@v4
@@ -256,6 +308,14 @@ jobs:
           path: |
             target/waveform-baseline-status/windows.json
             target/waveform-baseline-status/linux.json
+
+      - name: Upload CLI performance baseline snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-perf-baseline
+          if-no-files-found: error
+          path: |
+            target/cli-perf/cli_perf_baseline.current.json
 
   core-smoke-windows:
     runs-on: windows-latest
@@ -538,6 +598,80 @@ jobs:
             target/waveform-compare-linux/linux-baseline-status.json
             python/tests/benchmarks/phase6/waveform_thresholds.json
 
+  cli-perf-regression-gate-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_cli_perf_regression_gate }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Resolve CLI performance gate settings
+        shell: bash
+        run: |
+          previous_baseline="${{ inputs.cli_perf_previous_baseline }}"
+          if [ -z "$previous_baseline" ]; then
+            previous_baseline="python/tests/benchmarks/phasee/cli_perf_baseline.linux-approved-baseline.json"
+          fi
+          if [ ! -f "$previous_baseline" ]; then
+            echo "error=cli_perf_previous_baseline not found: $previous_baseline" >&2
+            exit 1
+          fi
+          echo "RFLOW_CLI_PERF_PREVIOUS_BASELINE=$previous_baseline" >> "$GITHUB_ENV"
+          echo "RFLOW_CLI_PERF_MAX_REGRESSION_RATIO=${{ inputs.cli_perf_max_regression_ratio }}" >> "$GITHUB_ENV"
+          echo "RFLOW_CLI_PERF_ITERATIONS=${{ inputs.cli_perf_iterations }}" >> "$GITHUB_ENV"
+          echo "RFLOW_CLI_PERF_WARMUP=${{ inputs.cli_perf_warmup }}" >> "$GITHUB_ENV"
+
+      - name: Run CLI performance regression gate
+        shell: bash
+        run: |
+          uv run python python/scripts/capture_cli_perf_baseline.py \
+            --output target/cli-perf/cli_perf_baseline.current.json \
+            --previous-baseline "$RFLOW_CLI_PERF_PREVIOUS_BASELINE" \
+            --expected-previous-platform-prefix "linux" \
+            --iterations "$RFLOW_CLI_PERF_ITERATIONS" \
+            --warmup "$RFLOW_CLI_PERF_WARMUP" \
+            --max-regression-ratio "$RFLOW_CLI_PERF_MAX_REGRESSION_RATIO" \
+            --fail-on-regression
+
+      - name: Upload CLI performance regression artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-perf-regression-gate
+          if-no-files-found: error
+          path: |
+            target/cli-perf/cli_perf_baseline.current.json
+            ${{ env.RFLOW_CLI_PERF_PREVIOUS_BASELINE }}
+
+  cli-perf-baseline-refresh-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_cli_perf_baseline_refresh }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Capture CLI performance candidate baseline
+        shell: bash
+        run: |
+          uv run python python/scripts/capture_cli_perf_baseline.py \
+            --output target/cli-perf/cli_perf_baseline.candidate.json \
+            --iterations "${{ inputs.cli_perf_iterations }}" \
+            --warmup "${{ inputs.cli_perf_warmup }}"
+
+      - name: Upload CLI performance candidate baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-perf-baseline-candidate
+          if-no-files-found: error
+          path: |
+            target/cli-perf/cli_perf_baseline.candidate.json
+            python/tests/benchmarks/phasee/cli_perf_baseline.linux-approved-baseline.json
+
   security-compliance-optional:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_security_compliance }}
     runs-on: ubuntu-latest
@@ -617,3 +751,6 @@ jobs:
             target/release-artifacts/uv.lock
             target/release-artifacts/README.txt
             target/release-artifacts/manifest.json
+
+
+

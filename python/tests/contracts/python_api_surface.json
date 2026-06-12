@@ -70,6 +70,7 @@
         "read_bench_file",
         "read_bench_text",
         "simulate_file",
+        "is_supported_external_command",
         "simulate_text",
         "compile",
         "compile_layout",
@@ -89,7 +90,7 @@
         "verify_layout",
         "verify"
       ],
-      "exported_count": 85,
+      "exported_count": 86,
       "module": "rflux",
       "symbols": [
         {
@@ -298,7 +299,7 @@
           "name": "CombinationalEquivalenceReport"
         },
         {
-          "init_signature": "(checked_routes: 'int', checked_ptl_routes: 'int', structural_violations: 'int', ptl_macro_boundary_violations: 'int', ptl_forbidden_length_violations: 'int', simulation_backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "init_signature": "(checked_routes: 'int', checked_ptl_routes: 'int', structural_violations: 'int', ptl_macro_boundary_violations: 'int', ptl_forbidden_length_violations: 'int', simulation_backend: 'str', requested_mode: 'str', josim_alignment_level: 'str', josim_alignment_available: 'bool', josim_next_step: 'str', josim_quality_passed: 'bool', josim_quality_status: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', waveform_format: 'str | None', external_summary_contract: 'str | None', diagnostic_code: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
           "kind": "class",
           "name": "VerificationReport"
         },
@@ -343,7 +344,7 @@
           "name": "SimulationMeasurementWarning"
         },
         {
-          "init_signature": "(backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "init_signature": "(backend: 'str', requested_mode: 'str', josim_alignment_level: 'str', josim_alignment_available: 'bool', josim_next_step: 'str', josim_quality_passed: 'bool', josim_quality_status: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', waveform_format: 'str | None', external_summary_contract: 'str | None', diagnostic_code: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
           "kind": "class",
           "name": "SimulationReport"
         },
@@ -426,6 +427,11 @@
           "kind": "callable",
           "name": "simulate_file",
           "signature": "(file_path: str | pathlib.Path, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.SimulationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "is_supported_external_command",
+          "signature": "(command: str) -> bool"
         },
         {
           "kind": "callable",
@@ -761,10 +767,11 @@
         "SimulationMeasurementWarning",
         "SimulationReport",
         "SimulationViolationDetail",
+        "is_supported_external_command",
         "simulate_file",
         "simulate_text"
       ],
-      "exported_count": 9,
+      "exported_count": 10,
       "module": "rflux.sim",
       "symbols": [
         {
@@ -793,7 +800,7 @@
           "name": "SimulationMeasurementWarning"
         },
         {
-          "init_signature": "(backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "init_signature": "(backend: 'str', requested_mode: 'str', josim_alignment_level: 'str', josim_alignment_available: 'bool', josim_next_step: 'str', josim_quality_passed: 'bool', josim_quality_status: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', waveform_format: 'str | None', external_summary_contract: 'str | None', diagnostic_code: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
           "kind": "class",
           "name": "SimulationReport"
         },
@@ -801,6 +808,11 @@
           "init_signature": "(kind: 'str', detail: 'str', at_ref: 'SimulationEndpointRef | None' = None) -> None",
           "kind": "class",
           "name": "SimulationViolationDetail"
+        },
+        {
+          "kind": "callable",
+          "name": "is_supported_external_command",
+          "signature": "(command: str) -> bool"
         },
         {
           "kind": "callable",
@@ -990,7 +1002,7 @@
           "name": "StateTransitionMismatch"
         },
         {
-          "init_signature": "(checked_routes: 'int', checked_ptl_routes: 'int', structural_violations: 'int', ptl_macro_boundary_violations: 'int', ptl_forbidden_length_violations: 'int', simulation_backend: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
+          "init_signature": "(checked_routes: 'int', checked_ptl_routes: 'int', structural_violations: 'int', ptl_macro_boundary_violations: 'int', ptl_forbidden_length_violations: 'int', simulation_backend: 'str', requested_mode: 'str', josim_alignment_level: 'str', josim_alignment_available: 'bool', josim_next_step: 'str', josim_quality_passed: 'bool', josim_quality_status: 'str', simulated_events: 'int', generated_deck_lines: 'int', generated_deck_path: 'str | None', waveform_path: 'str | None', waveform_format: 'str | None', external_summary_contract: 'str | None', diagnostic_code: 'str | None', reported_violations: 'int', reported_worst_delay_ps: 'float | None', delay_details: 'list[SimulationDelayDetail]', measurement_details: 'list[SimulationMeasurementDetail]', measurement_warnings: 'list[SimulationMeasurementWarning]', violation_details: 'list[SimulationViolationDetail]', external_status_code: 'int | None', external_result: 'str | None') -> None",
           "kind": "class",
           "name": "VerificationReport"
         },

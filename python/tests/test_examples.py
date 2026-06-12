@@ -72,6 +72,69 @@ def test_benchmark_file_example_reports_internal_transient_summary() -> None:
     assert payload["waveform_path"]
 
 
+def test_characterize_merge_optimize_example_reports_design_loop_summary() -> None:
+    payload = run_example("characterize_merge_optimize.py")
+
+    characterization = payload["characterization"]
+    assert characterization["cell_name"] == "macro_buf"
+    assert characterization["derived_intrinsic_delay_ps"] > 0.0
+    assert characterization["generated_library_json_bytes"] > 0
+
+    library_merge = payload["library_merge"]
+    assert library_merge["merged_json_bytes"] > 0
+
+    timing = payload["timing"]
+    assert timing["critical_path_delay_ps"] > 0.0
+    assert timing["analyzed_timing_arcs"] >= 1
+
+    design = payload["design_optimization"]
+    assert design["design_optimization_score"] > 0.0
+    assert isinstance(design["optimization_applied"], bool)
+    assert design["baseline_placement_halo_scale"] > 0.0
+    assert design["optimized_placement_halo_scale"] > 0.0
+
+
+def test_bench_cli_flow_example_reports_compile_and_equivalence_summary() -> None:
+    payload = run_example("example_bench_cli_flow.py")
+
+    assert payload["bench_fixture"].endswith("crates\\synth\\tests\\fixtures\\quaigh_alignment\\bench\\dedup_and_pair.bench")
+
+    compile_report = payload["compile"]
+    assert compile_report["schema_version"] == 1
+    assert compile_report["node_count"] > 0
+    assert compile_report["edge_count"] > 0
+    assert compile_report["gate_count_before"] >= compile_report["gate_count_after"]
+    assert compile_report["mapped_nodes"] > 0
+
+    equivalence_report = payload["equivalence"]
+    assert equivalence_report["schema_version"] == 1
+    assert equivalence_report["kind"] == "combinational"
+    assert equivalence_report["equivalent"] is True
+    assert equivalence_report["checked_outputs"]
+    assert equivalence_report["sat_recursive_calls"] > 0
+
+
+def test_run_with_diagnostics_example_reports_bundle_and_report_summary() -> None:
+    payload = run_example("example_run_with_diagnostics.py")
+
+    assert payload["bench_fixture"].endswith("crates\\synth\\tests\\fixtures\\quaigh_alignment\\bench\\dedup_and_pair.bench")
+
+    bundle = payload["bundle"]
+    assert bundle["schema_version"] == 1
+    assert bundle["kind"] == "diagnostics_bundle"
+    assert bundle["invocation_command"] == "compile-netlist"
+    assert bundle["status"] == "succeeded"
+    assert bundle["captured_input_count"] >= 1
+    assert bundle["captured_report_count"] >= 1
+    assert bundle["events_recorded"] >= 3
+
+    compile_report = payload["compile_report"]
+    assert compile_report["schema_version"] == 1
+    assert compile_report["kind"] == "compile_netlist"
+    assert compile_report["node_count"] > 0
+    assert compile_report["edge_count"] > 0
+
+
 def test_equivalence_cli_replay_example_exports_and_replays() -> None:
     payload = run_example("example_equivalence_cli_replay.py")
 

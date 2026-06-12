@@ -1,3 +1,4 @@
+#![allow(clippy::float_cmp)]
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 
@@ -78,6 +79,7 @@ pub enum RouteError {
 pub struct SimpleRouter;
 
 impl SimpleRouter {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -253,7 +255,9 @@ fn shortest_grid_path(
             break;
         }
 
-        for &(next, weight) in adjacency.get(&node).map(Vec::as_slice).unwrap_or(&[]) {
+        #[allow(clippy::map_unwrap_or)]
+        let adjacent_nodes = adjacency.get(&node).map(Vec::as_slice).unwrap_or(&[]);
+        for &(next, weight) in adjacent_nodes {
             let next_cost = cost + weight;
             if next_cost < dist[next] {
                 dist[next] = next_cost;

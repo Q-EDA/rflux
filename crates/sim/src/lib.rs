@@ -2477,12 +2477,9 @@ fn extract_library_section_text(
                 extracted.push('\n');
                 continue;
             }
-            let current_section = rest
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let current_section = parse_library_section_from_text(&current_section)
-                .unwrap_or_default();
+            let current_section = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+            let current_section =
+                parse_library_section_from_text(&current_section).unwrap_or_default();
             if current_section.eq_ignore_ascii_case(section) {
                 collecting = true;
                 found_section = true;
@@ -2819,13 +2816,8 @@ fn expand_subckt_lines(
         }
 
         if starts_with_instance(line) {
-            let instance = parse_subckt_instance(
-                line,
-                defs,
-                scope_symbols,
-                scope_parent,
-                declaration_scope,
-            )?;
+            let instance =
+                parse_subckt_instance(line, defs, scope_symbols, scope_parent, declaration_scope)?;
             let nested_prefix = match instance_prefix {
                 Some(prefix) => format!("{}__{}", prefix, instance.instance_name),
                 None => instance.instance_name.clone(),
@@ -2928,13 +2920,9 @@ fn parse_subckt_instance(
 
     let instance_name = tokens[0].to_string();
     let subckt_name = tokens[subckt_index].to_string();
-    let subckt_key = resolve_subckt_name(
-        &subckt_name,
-        declaration_scope,
-        scope_symbols,
-        scope_parent,
-    )
-    .ok_or_else(|| SimulationError::UnknownSubckt(subckt_name.clone()))?;
+    let subckt_key =
+        resolve_subckt_name(&subckt_name, declaration_scope, scope_symbols, scope_parent)
+            .ok_or_else(|| SimulationError::UnknownSubckt(subckt_name.clone()))?;
     let def = defs
         .get(&subckt_key)
         .ok_or_else(|| SimulationError::UnknownSubckt(subckt_name.clone()))?;
@@ -7899,6 +7887,95 @@ fn parse_engineering_number(token: &str) -> Result<f64, SimulationError> {
     Ok(base * scale)
 }
 
+#[must_use]
+fn write_internal_transient_vcd(
+    result: &InternalTransientResult,
+    requested_path: Option<&str>,
+) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (result, requested_path);
+        None
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        if result.captured_samples.is_empty() || result.node_names.is_empty() {
+            return None;
+        }
+
+        let vcd_path = if let Some(path) = requested_path {
+            PathBuf::from(path)
+        } else {
+            std::env::temp_dir().join(format!(
+                "rflux-internal-{}-{}.vcd",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or_default()
+            ))
+        };
+
+        // VCD header
+        let mut vcd = String::from("$timescale 1 ps $end\n");
+        vcd.push_str("$scope module top $end\n");
+
+        // Assign single-char identifiers
+        let mut identifiers: Vec<(String, char)> = Vec::new();
+        for (i, name) in result.node_names.iter().enumerate() {
+            let id = char::from_u32(33 + (i % 94) as u32).unwrap_or('!');
+            identifiers.push((name.clone(), id));
+            vcd.push_str(&format!("$var wire 1 {id} {name} $end\n"));
+        }
+
+        vcd.push_str("$upscope $end\n");
+        vcd.push_str("$enddefinitions $end\n");
+        vcd.push_str("$dumpvars\n");
+
+        // Initial values (all 0)
+        for (_, id) in &identifiers {
+            vcd.push_str(&format!("0{id}\n"));
+        }
+        vcd.push_str("$end\n");
+
+        // Track previous values to avoid redundant transitions
+        let mut previous: Vec<bool> = vec![false; result.node_names.len()];
+
+        // Convert analog voltages to digital with threshold
+        for sample in &result.captured_samples {
+            vcd.push_str(&format!("#{}\n", sample.time_ps as u64));
+            for (node_index, voltage) in sample.node_voltages.iter().enumerate() {
+                if node_index >= result.node_names.len() {
+                    break;
+                }
+                let digital = *voltage > 1.25; // ~0.5 * 2.5V VDD threshold
+                if digital != previous[node_index] {
+                    let (_, id) = &identifiers[node_index];
+                    if digital {
+                        vcd.push_str(&format!("1{id}\n"));
+                    } else {
+                        vcd.push_str(&format!("0{id}\n"));
+                    }
+                    previous[node_index] = digital;
+                }
+            }
+        }
+
+        if let Some(parent) = vcd_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+
+        fs::write(&vcd_path, vcd)
+            .ok()
+            .map(|()| vcd_path.display().to_string())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{
@@ -8134,12 +8211,12 @@ mod tests {
         assert!(staged_deck_path.is_file());
         assert!(staged_waveform_path.is_file());
         assert!(!run_dir.exists());
-        assert!(staged_deck_path.to_string_lossy().contains("rflux-ext-1234-5678-input.sp"));
-        assert!(
-            staged_waveform_path
-                .to_string_lossy()
-                .contains("rflux-ext-1234-5678-external_output.csv")
-        );
+        assert!(staged_deck_path
+            .to_string_lossy()
+            .contains("rflux-ext-1234-5678-input.sp"));
+        assert!(staged_waveform_path
+            .to_string_lossy()
+            .contains("rflux-ext-1234-5678-external_output.csv"));
 
         let _ = fs::remove_dir_all(&base_dir);
         let _ = fs::remove_file(staged_deck_path);
@@ -8383,9 +8460,8 @@ mod tests {
             None,
         );
 
-        assert!(prepared.contains(
-            ".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0,0,0.001m/0.5m})"
-        ));
+        assert!(prepared
+            .contains(".model jjmod jj(icrit=0.5m rn=20 cap=0.5p cpr={1,0,0,0,0,0.001m/0.5m})"));
         assert!(!prepared.to_ascii_lowercase().contains("icrit6=0.001m"));
     }
 
@@ -9057,12 +9133,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let inc_path = dir.join("defs.inc");
         let top_path = dir.join("top.cir");
-        fs::write(&inc_path, ".lib TT\n.param tstep=0.5p tstop=20p\n.endl TT\n").unwrap();
         fs::write(
-            &top_path,
-            ".lib \"defs.inc\" FF\n.tran 1p 10p\n.end\n",
+            &inc_path,
+            ".lib TT\n.param tstep=0.5p tstop=20p\n.endl TT\n",
         )
         .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" FF\n.tran 1p 10p\n.end\n").unwrap();
 
         let err = parse_deck_file(&top_path).unwrap_err();
 
@@ -9084,11 +9160,7 @@ mod tests {
         let inc_path = dir.join("defs.inc");
         let top_path = dir.join("top.cir");
         fs::write(&inc_path, ".lib TT\n.param tstep=0.5p tstop=20p\n").unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n").unwrap();
 
         let err = parse_deck_file(&top_path).unwrap_err();
 
@@ -9114,11 +9186,7 @@ mod tests {
             ".lib TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT\n.lib FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib 'defs.inc' tt\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib 'defs.inc' tt\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -9140,11 +9208,7 @@ mod tests {
             ".lib TT\n.param tstep=0.5p tstop=20p\n.endl FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n").unwrap();
 
         let err = parse_deck_file(&top_path).unwrap_err();
 
@@ -9197,11 +9261,7 @@ mod tests {
             ".lib TT\n.param tstep=0.5p tstop=20p\n.endl \"FF\"\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran 1p 10p\n.end\n").unwrap();
 
         let err = parse_deck_file(&top_path).unwrap_err();
 
@@ -9254,11 +9314,7 @@ mod tests {
             ".lib TT,\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl TT,\n.lib FF,\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl FF,\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -9332,11 +9388,7 @@ mod tests {
             ".lib section=TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl section=TT\n.lib section=FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl section=FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -9384,11 +9436,7 @@ mod tests {
             ".lib section = TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl section = TT\n.lib section = FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl section = FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -9488,11 +9536,7 @@ mod tests {
             ".lib sec=TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl sec=TT\n.lib sec=FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl sec=FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -9514,11 +9558,7 @@ mod tests {
             ".lib section= TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl section= TT\n.lib section= FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl section= FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 
@@ -9540,11 +9580,7 @@ mod tests {
             ".lib sec =TT\n.param tstep=0.5p tstop=20p\nR1 n1 0 50\n.endl sec =TT\n.lib sec =FF\n.param tstep=1p tstop=10p\nR2 n2 0 75\n.endl sec =FF\n",
         )
         .unwrap();
-        fs::write(
-            &top_path,
-            ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n",
-        )
-        .unwrap();
+        fs::write(&top_path, ".lib \"defs.inc\" TT\n.tran tstep tstop\n.end\n").unwrap();
 
         let parsed = parse_deck_file(&top_path).unwrap();
 

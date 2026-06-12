@@ -4,8 +4,8 @@ use std::time::Instant;
 fn analyze_conflict(
     _formula: &mut CnfFormula,
     _values: &Vec<Option<bool>>,
-    trail: &Vec<usize>,
-    decision_levels: &Vec<usize>,
+    trail: &[usize],
+    decision_levels: &[usize],
 ) -> LearnedClause {
     let learned_clause = vec![Lit::neg(trail.last().copied().unwrap_or(1))];
     let backtrack_level = decision_levels
@@ -30,6 +30,7 @@ pub struct Lit {
 }
 
 impl Lit {
+    #[must_use]
     pub fn pos(var: usize) -> Self {
         Self {
             var,
@@ -37,6 +38,7 @@ impl Lit {
         }
     }
 
+    #[must_use]
     pub fn neg(var: usize) -> Self {
         Self { var, negated: true }
     }
@@ -57,6 +59,7 @@ pub struct CnfFormula {
 }
 
 impl CnfFormula {
+    #[must_use]
     pub fn new(var_count: usize) -> Self {
         Self {
             var_count,
@@ -69,14 +72,17 @@ impl CnfFormula {
         self.var_count
     }
 
+    #[must_use]
     pub fn var_count(&self) -> usize {
         self.var_count
     }
 
+    #[must_use]
     pub fn clauses(&self) -> &[Vec<Lit>] {
         &self.clauses
     }
 
+    #[must_use]
     pub fn to_dimacs(&self) -> String {
         let mut rendered = String::new();
         rendered.push_str(&format!(
@@ -91,7 +97,7 @@ impl CnfFormula {
                 } else {
                     lit.var as i64
                 };
-                rendered.push_str(&format!("{} ", value));
+                rendered.push_str(&format!("{value} "));
             }
             rendered.push_str("0\n");
         }
@@ -199,6 +205,7 @@ pub struct Model {
 }
 
 impl Model {
+    #[must_use]
     pub fn value(&self, var: usize) -> Option<bool> {
         self.values.get(var).copied().flatten()
     }
@@ -244,6 +251,7 @@ pub struct LearnedClause {
 }
 
 impl LearnedClause {
+    #[must_use]
     pub fn new(clause: Vec<Lit>, backtrack_level: usize) -> Self {
         Self {
             clause,
@@ -258,12 +266,14 @@ pub struct IncrementalSolver {
 }
 
 impl IncrementalSolver {
+    #[must_use]
     pub fn new(var_count: usize) -> Self {
         Self {
             formula: CnfFormula::new(var_count),
         }
     }
 
+    #[must_use]
     pub fn from_formula(formula: CnfFormula) -> Self {
         Self { formula }
     }
@@ -276,22 +286,27 @@ impl IncrementalSolver {
         self.formula.add_clause(clause)
     }
 
+    #[must_use]
     pub fn var_count(&self) -> usize {
         self.formula.var_count()
     }
 
+    #[must_use]
     pub fn base_formula(&self) -> &CnfFormula {
         &self.formula
     }
 
+    #[must_use]
     pub fn solve(&self) -> SolveResult {
         self.solve_with_assumptions(&[])
     }
 
+    #[must_use]
     pub fn solve_with_assumptions(&self, assumptions: &[Lit]) -> SolveResult {
         self.solve_with_assumptions_and_metrics(assumptions).0
     }
 
+    #[must_use]
     pub fn solve_with_assumptions_and_stats(
         &self,
         assumptions: &[Lit],
@@ -300,6 +315,7 @@ impl IncrementalSolver {
         (result, metrics.stats)
     }
 
+    #[must_use]
     pub fn solve_with_assumptions_and_metrics(
         &self,
         assumptions: &[Lit],
@@ -310,9 +326,10 @@ impl IncrementalSolver {
                 .add_clause(vec![*assumption])
                 .expect("assumptions should use in-range variables");
         }
-        solve_with_metrics(&mut formula)
+        solve_with_metrics(&formula)
     }
 
+    #[must_use]
     pub fn unsat_core_of_assumptions(&self, assumptions: &[Lit]) -> Option<Vec<Lit>> {
         let (result, _) = self.solve_with_assumptions_and_metrics(assumptions);
         if !matches!(result, SolveResult::Unsatisfiable) {
@@ -348,15 +365,18 @@ impl IncrementalSolver {
     }
 }
 
+#[must_use]
 pub fn solve(formula: &CnfFormula) -> SolveResult {
     solve_with_stats(formula).0
 }
 
+#[must_use]
 pub fn solve_with_stats(formula: &CnfFormula) -> (SolveResult, SolveStats) {
     let (result, metrics) = solve_with_metrics(formula);
     (result, metrics.stats)
 }
 
+#[must_use]
 pub fn solve_with_metrics(formula: &CnfFormula) -> (SolveResult, SolveMetrics) {
     let started = Instant::now();
     let mut working_formula = formula.clone();
@@ -444,7 +464,7 @@ fn dpll(
     if !propagate(formula, values, phase_hints, stats) {
         let conflict = analyze_conflict(formula, values, &trail, &decision_levels);
         if let Err(e) = add_learned_clause(formula, conflict) {
-            eprintln!("Error adding learned clause: {:?}", e);
+            eprintln!("Error adding learned clause: {e:?}");
             return SearchOutcome::Unsatisfiable;
         }
         stats.backtracks += 1;
@@ -500,7 +520,7 @@ fn dpll(
 
 fn propagate(
     formula: &mut CnfFormula,
-    values: &mut Vec<Option<bool>>,
+    values: &mut [Option<bool>],
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
 ) -> bool {
@@ -527,7 +547,7 @@ fn propagate(
 
 fn unit_propagate_once(
     formula: &mut CnfFormula,
-    values: &mut Vec<Option<bool>>,
+    values: &mut [Option<bool>],
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
 ) -> Result<bool, ()> {
@@ -575,7 +595,7 @@ fn unit_propagate_once(
 
 fn pure_literal_eliminate_once(
     formula: &mut CnfFormula,
-    values: &mut Vec<Option<bool>>,
+    values: &mut [Option<bool>],
     phase_hints: &mut [bool],
     stats: &mut SolveStats,
 ) -> Result<bool, ()> {
@@ -644,12 +664,11 @@ fn assign_with_phase(
 }
 
 fn assign(values: &mut [Option<bool>], var: usize, value: bool) -> bool {
-    match values[var] {
-        Some(existing) => existing == value,
-        None => {
-            values[var] = Some(value);
-            true
-        }
+    if let Some(existing) = values[var] {
+        existing == value
+    } else {
+        values[var] = Some(value);
+        true
     }
 }
 
@@ -672,16 +691,23 @@ fn choose_unassigned_var(formula: &mut CnfFormula, values: &[Option<bool>]) -> O
 }
 
 #[cfg(test)]
-fn unit_propagate(formula: &CnfFormula, values: &mut Vec<Option<bool>>) -> bool {
-    for clause in &formula.clauses {
-        if clause
-            .iter()
-            .all(|lit| lit.eval(values[lit.var]) == Some(false))
-        {
-            return false;
+fn unit_propagate(formula: &CnfFormula, values: &mut [Option<bool>]) -> bool {
+    let mut formula = formula.clone();
+    let mut phase_hints = vec![false; values.len()];
+    for (var, value) in values.iter().enumerate().skip(1) {
+        if let Some(value) = value {
+            phase_hints[var] = *value;
         }
     }
-    true
+    let mut stats = SolveStats::default();
+
+    loop {
+        match unit_propagate_once(&mut formula, values, &mut phase_hints, &mut stats) {
+            Ok(true) => {}
+            Ok(false) => return true,
+            Err(()) => return false,
+        }
+    }
 }
 
 #[cfg(test)]

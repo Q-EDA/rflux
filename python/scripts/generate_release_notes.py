@@ -58,7 +58,6 @@ def _week3_fields(week3_output_root: Path) -> tuple[str, str, str, str, str]:
     review_manifest = week3_output_root / "review" / "manifest.json"
     validation_report = week3_output_root / "review" / "quality_summary.validation.json"
     summary_md = week3_output_root / "review" / "quality_summary.current.md"
-    current_json = week3_output_root / "quality_summary.current.json"
     if review_manifest.is_file() and validation_report.is_file() and summary_md.is_file():
         return (
             "yes",
@@ -90,7 +89,6 @@ def build_release_notes(
     output_path: Path,
 ) -> str:
     bundle_check = _load_json_if_exists(release_bundle_check_json)
-    release_bundle_ready = _bool_text(bundle_check.get("release_bundle_ready")) if isinstance(bundle_check, dict) else "pending"
     cli_contract_diff = "none"
     python_api_contract_diff = "none"
     report_schema_contract_diff = "none"

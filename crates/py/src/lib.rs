@@ -1,8 +1,11 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rflux_flow::{
-    AcBiasOptimizationReport, AcBiasReport, AdvancedConstraintConfig, AdvancedConstraintReport,
-    AdvancedConstraintViolation, CompoundCellCharacterizationConfig,
+    bias_grid, clock_tree, AcBiasOptimizationReport, AcBiasReport, AdvancedConstraintConfig,
+    AdvancedConstraintReport, AdvancedConstraintViolation, CompoundCellCharacterizationConfig,
     CompoundCellCharacterizationReport, FlowConfig, FlowRunner, LayoutReport,
     LibraryAwareAcBiasOptimizationReport, LibraryAwareDesignOptimizationReport,
     MultiCornerTimingAnalysisReport, SimulationBackend, SimulationConfig, SimulationMode,
@@ -10,13 +13,14 @@ use rflux_flow::{
     TimingCornerAnalysisReport, VerificationReport,
 };
 use rflux_io::{read_bench_netlist, read_netlist_as, NetlistInputFormat};
+use std::collections::HashMap;
+
 use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
-use rflux_place::{FixedNodePlacement, Point};
+use rflux_place::{FixedNodePlacement, LevelizedPlacer, PlacementConfig, Point};
 use rflux_route::{BlockedRegion, RouteMode};
 use rflux_sim::{
     is_supported_external_command as is_supported_external_command_core,
-    simulate_file as simulate_file_core,
-    simulate_text as simulate_text_core,
+    simulate_file as simulate_file_core, simulate_text as simulate_text_core,
 };
 use rflux_synth::{
     BalanceStrategy, BoolOptConfig, CompilePlan, CompileReport, Compiler, ConnectionSpec,
@@ -3377,6 +3381,49 @@ fn check_bounded_sequential_equivalence(
     Ok(report.into())
 }
 
+#[pyfunction]
+fn build_clock_tree(mut circuit: PyRefMut<'_, Circuit>) -> PyResult<HashMap<String, f64>> {
+    let placer = LevelizedPlacer::new();
+    let placement = placer
+        .place(&circuit.netlist, &PlacementConfig::default())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let sinks = clock_tree::find_clock_sinks(&circuit.netlist, &placement);
+    let config = clock_tree::ClockTreeConfig::default();
+    let report = clock_tree::build_h_tree(&mut circuit.netlist, &sinks, &placement, &config);
+    let mut result = HashMap::new();
+    result.insert("sink_count".to_string(), report.sink_count as f64);
+    result.insert("buffer_count".to_string(), report.buffer_count as f64);
+    result.insert("levels".to_string(), report.levels as f64);
+    result.insert(
+        "total_wire_length_um".to_string(),
+        report.total_wire_length_um,
+    );
+    result.insert("estimated_skew_ps".to_string(), report.estimated_skew_ps);
+    result.insert("phase_count".to_string(), report.phase_count as f64);
+    Ok(result)
+}
+
+#[pyfunction]
+fn build_bias_grid(circuit: PyRef<'_, Circuit>) -> PyResult<HashMap<String, f64>> {
+    let placer = LevelizedPlacer::new();
+    let placement = placer
+        .place(&circuit.netlist, &PlacementConfig::default())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let config = bias_grid::BiasGridConfig::default();
+    let report = bias_grid::build_bias_grid(&circuit.netlist, &placement, &config);
+    let mut result = HashMap::new();
+    result.insert("grid_cells".to_string(), report.grid_cells as f64);
+    result.insert(
+        "total_wire_length_um".to_string(),
+        report.total_wire_length_um,
+    );
+    result.insert("connected_nodes".to_string(), report.connected_nodes as f64);
+    result.insert(
+        "estimated_total_bias_current_ma".to_string(),
+        report.estimated_total_bias_current_ma,
+    );
+    Ok(result)
+}
 #[pymodule]
 fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Circuit>()?;
@@ -3457,6 +3504,10 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(check_bounded_sequential_equivalence, m)?)?;
     m.add_function(wrap_pyfunction!(read_bench_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_bench_text, m)?)?;
+    m.add_function(wrap_pyfunction!(build_clock_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(build_bias_grid, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(build_clock_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(build_bias_grid, m)?)?;
     Ok(())
 }

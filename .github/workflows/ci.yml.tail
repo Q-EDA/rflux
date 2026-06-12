@@ -1,0 +1,705 @@
+        required: false
+        default: ""
+        type: string
+      cli_perf_previous_baseline:
+        description: "Required repo-relative previous CLI perf baseline JSON for regression comparison"
+        required: false
+        default: "python/tests/benchmarks/phasee/cli_perf_baseline.linux-approved-baseline.json"
+        type: string
+      cli_perf_max_regression_ratio:
+        description: "Allowed positive median regression ratio for CLI perf gate"
+        required: false
+        default: "0.2"
+        type: string
+      cli_perf_iterations:
+        description: "Measured iterations per CLI perf case"
+        required: false
+        default: "3"
+        type: string
+      cli_perf_warmup:
+        description: "Warmup iterations per CLI perf case"
+        required: false
+        default: "1"
+        type: string
+      previous_summary_json:
+        description: "Optional repo-relative approved baseline summary JSON for history diff generation"
+        required: false
+        default: ""
+        type: string
+      baseline_platform:
+        description: "Platform key used to auto-stage a repo-tracked approved baseline when previous_summary_json is empty"
+        required: false
+        default: "windows"
+        type: string
+      validate_no_regression:
+        description: "Fail when the current summary regresses relative to previous_summary_json"
+        required: false
+        default: true
+        type: boolean
+      regression_tolerance_v:
+        description: "Allowed positive worst_max_abs_v drift during no-regression validation"
+        required: false
+        default: "0.0"
+        type: string
+      josim_command_linux:
+        description: "Required JoSIM command/path for the optional Linux waveform gate"
+        required: false
+        default: ""
+        type: string
+      previous_summary_json_linux:
+        description: "Optional repo-relative approved baseline summary JSON for Linux waveform history diff"
+        required: false
+        default: ""
+        type: string
+      validate_no_regression_linux:
+        description: "Fail Linux waveform gate when current summary regresses relative to baseline"
+        required: false
+        default: true
+        type: boolean
+      regression_tolerance_v_linux:
+        description: "Allowed positive worst_max_abs_v drift for Linux waveform no-regression checks"
+        required: false
+        default: "0.0"
+        type: string
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Rust tests
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test --workspace
+
+      - name: Generate SAT and synth metric artifacts
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test -p rflux-sat --test dimacs_end_to_end -- --nocapture
+          cargo test -p rflux-synth --test quaigh_alignment_fixtures -- --nocapture
+          cargo test -p rflux-synth --test end_to_end_classic_examples -- --nocapture
+
+      - name: Python tests
+        run: uv run pytest
+
+      - name: Diagnostics command smoke
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test -p rflux-cli run_collect_diagnostics_writes_manifest_and_copies_inputs -- --nocapture
+          cargo test -p rflux-cli run_with_diagnostics_ -- --nocapture
+
+      - name: PDK command smoke
+        run: |
+          export PYO3_PYTHON="$(uv python find)"
+          cargo test -p rflux-cli run_pdk_validate_reports_ -- --nocapture
+
+      - name: Phase 5 workflow smoke
+        run: |
+          uv run pytest python/tests/test_basic.py -k "merge_characterized_library_round_trip or optimize_design_with_characterized_library_workflow" -q
+
+      - name: Waveform summary helper smoke
+        run: |
+          uv run pytest python/tests/test_waveform_compare_summary_utils.py -q
+
+      - name: Waveform manifest runner smoke
+        run: |
+          uv run pytest python/tests/test_waveform_compare_manifest_runner.py -q
+
+      - name: Waveform baseline promotion helper smoke
+        run: |
+          uv run pytest python/tests/test_promote_waveform_approved_baseline.py -q
+
+      - name: Waveform baseline readiness helper smoke
+        run: |
+          uv run pytest python/tests/test_check_waveform_baseline_status.py -q
+
+      - name: Phase B artifact bundle helper smoke
+        run: |
+          uv run pytest python/tests/test_check_phase_b_artifact_bundle.py -q
+
+      - name: Snapshot waveform baseline readiness status
+        run: |
+          uv run python python/scripts/check_waveform_baseline_status.py --platform windows --json-output target/waveform-baseline-status/windows.json
+          uv run python python/scripts/check_waveform_baseline_status.py --platform linux --json-output target/waveform-baseline-status/linux.json
+
+      - name: External warning helper smoke
+        run: |
+          uv run pytest python/tests/test_external_warning_manifest_runner.py -q
+          uv run pytest python/tests/test_external_warning_summary_utils.py -q
+          uv run pytest python/tests/test_prepare_external_warning_artifacts.py -q
+
+      - name: Quaigh converter smoke
+        run: |
+          uv run pytest python/tests/test_quaigh_bench_converter.py -q
+
+      - name: Security compliance exporter smoke
+        run: |
+          uv run pytest python/tests/test_security_compliance_utils.py -q
+
+      - name: Release artifact helper smoke
+        run: |
+          uv run pytest python/tests/test_prepare_release_artifacts.py -q
+
+      - name: Release artifact bundle checker smoke
+        run: |
+          uv run pytest python/tests/test_check_release_artifact_bundle.py -q
+
+      - name: Release review record generator smoke
+        run: |
+          uv run pytest python/tests/test_generate_release_review_record.py -q
+
+      - name: Release notes generator smoke
+        run: |
+          uv run pytest python/tests/test_generate_release_notes.py -q
+
+      - name: CLI perf baseline schema smoke
+        run: |
+          uv run pytest python/tests/test_capture_cli_perf_baseline.py -q
+
+      - name: Python API surface contract smoke
+        run: |
+          uv run pytest python/tests/test_python_api_surface_contract.py -q
+
+      - name: Python API surface contract gate
+        run: |
+          uv run python python/scripts/export_python_api_surface.py --check
+
+      - name: CLI command surface contract smoke
+        run: |
+          uv run pytest python/tests/test_cli_command_surface_contract.py -q
+
+      - name: CLI command surface contract gate
+        run: |
+          uv run python python/scripts/export_cli_command_surface.py --check
+
+      - name: Report schema surface contract smoke
+        run: |
+          uv run pytest python/tests/test_report_schema_surface_contract.py -q
+
+      - name: Report schema surface contract gate
+        run: |
+          uv run python python/scripts/export_report_schema_surface.py --check
+
+      - name: Quality baseline summary helper smoke
+        run: |
+          uv run pytest python/tests/test_quality_baseline_summary_utils.py -q
+
+      - name: Quality baseline summary runner smoke
+        run: |
+          uv run pytest python/tests/test_quality_baseline_summary_runner.py -q
+          uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.json --summary-md target/week3-quality/quality_summary.current.md --validate-pass
+          uv run python python/scripts/summarize_quality_baseline_results.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --summary-json target/week3-quality/quality_summary.current.with-history.json --summary-md target/week3-quality/quality_summary.current.with-history.md --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0
+
+      - name: Quality baseline artifact prep smoke
+        run: |
+          uv run pytest python/tests/test_prepare_quality_baseline_artifacts.py -q
+          uv run pytest python/tests/test_quality_baseline_result_collector.py -q
+          uv run pytest python/tests/test_generate_week3_golden_results.py -q
+          uv run python python/scripts/collect_quality_baseline_results.py --timing-report python/tests/benchmarks/week3/inputs/timing_report.golden.json --verify-report python/tests/benchmarks/week3/inputs/verify_report.golden.json --sim-summary python/tests/benchmarks/week3/inputs/sim_summary.golden.json --output target/week3-quality/quality_results.generated.json --check-against python/tests/benchmarks/week3/quality_results.golden.json
+          uv run python python/scripts/prepare_quality_baseline_artifacts.py --results-json python/tests/benchmarks/week3/quality_results.golden.json --artifact-dir target/week3-quality-review --previous-summary-json python/tests/benchmarks/week3/quality_summary.approved-baseline.json --validate-no-regression --regression-tolerance 0.0 --github-workflow "${{ github.workflow }}" --github-job "checks" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+          uv run python python/scripts/generate_week3_golden_results.py --validate-pass --validate-no-regression --regression-tolerance 0.0 --github-workflow "${{ github.workflow }}" --github-job "checks" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+
+      - name: Capture CLI performance baseline snapshot
+        run: |
+          uv run python python/scripts/capture_cli_perf_baseline.py --output target/cli-perf/cli_perf_baseline.current.json --iterations 3 --warmup 1
+
+      - name: Upload Week 3 quality artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: week3-quality-baseline
+          if-no-files-found: error
+          path: |
+            target/week3-quality/quality_summary.current.json
+            target/week3-quality/quality_summary.current.md
+            target/week3-quality/quality_summary.current.with-history.json
+            target/week3-quality/quality_summary.current.with-history.md
+            target/week3-quality/quality_results.generated.json
+            target/week3-quality-review/quality_summary.current.json
+            target/week3-quality-review/quality_summary.current.md
+            target/week3-quality-review/quality_summary.approved-baseline.json
+            target/week3-quality-review/quality_summary.candidate-baseline.json
+            target/week3-quality-review/quality_summary.validation.json
+            target/week3-quality-review/manifest.json
+            target/week3-quality-review/README.txt
+            target/week3-quality-pipeline/quality_results.generated.json
+            target/week3-quality-pipeline/quality_summary.current.json
+            target/week3-quality-pipeline/quality_summary.current.md
+            target/week3-quality-pipeline/review/quality_summary.current.json
+            target/week3-quality-pipeline/review/quality_summary.current.md
+            target/week3-quality-pipeline/review/quality_summary.approved-baseline.json
+            target/week3-quality-pipeline/review/quality_summary.candidate-baseline.json
+            target/week3-quality-pipeline/review/quality_summary.validation.json
+            target/week3-quality-pipeline/review/manifest.json
+            target/week3-quality-pipeline/review/README.txt
+            python/tests/benchmarks/week3/quality_thresholds.json
+            python/tests/benchmarks/week3/quality_results.golden.json
+            python/tests/benchmarks/week3/quality_summary.approved-baseline.json
+            python/tests/benchmarks/week3/inputs/timing_report.golden.json
+            python/tests/benchmarks/week3/inputs/verify_report.golden.json
+            python/tests/benchmarks/week3/inputs/sim_summary.golden.json
+
+      - name: Upload SAT and synth metric artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sat-and-synth-metrics
+          if-no-files-found: error
+          path: |
+            target/dimacs_sat_metrics.csv
+            target/quaigh_fixture_sat_metrics.csv
+
+      - name: Upload waveform baseline status snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveform-baseline-status
+          if-no-files-found: error
+          path: |
+            target/waveform-baseline-status/windows.json
+            target/waveform-baseline-status/linux.json
+
+      - name: Upload CLI performance baseline snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-perf-baseline
+          if-no-files-found: error
+          path: |
+            target/cli-perf/cli_perf_baseline.current.json
+
+  core-smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: CLI minimal chain smoke on Windows
+        shell: pwsh
+        run: |
+          $env:PYO3_PYTHON = (uv python find).Trim()
+          cargo test -p rflux-cli run_lint_input_reports_versioned_ir_contract -- --nocapture
+          cargo test -p rflux-cli run_with_diagnostics_executes_compile_netlist_and_writes_bundle -- --nocapture
+          cargo test -p rflux-cli run_check_equivalence_accepts_checked_in_sequential_bench_fixtures -- --nocapture
+
+      - name: Python minimal chain smoke on Windows
+        run: |
+          uv run pytest python/tests/test_basic.py -k "python_package_version or structured_submodules_reexport_top_level_api or simulate_file_accepts_path_objects" -q
+
+  waveform-compare-gate:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Install JoSIM for Windows parity gate
+        shell: pwsh
+        run: |
+          $version = 'v2.7'
+          $archiveName = 'JoSIM-v2.7-windows-x64.zip'
+          $downloadUrl = "https://github.com/JoeyDelp/JoSIM/releases/download/$version/$archiveName"
+          $toolsDir = Join-Path $env:GITHUB_WORKSPACE 'tools'
+          $archivePath = Join-Path $toolsDir $archiveName
+          $installDir = Join-Path $toolsDir 'JoSIM-v2.7-windows-x64'
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+          if (Test-Path $installDir) {
+            Remove-Item -Recurse -Force $installDir
+          }
+          Expand-Archive -Path $archivePath -DestinationPath $toolsDir -Force
+          $binaryPath = Join-Path $installDir 'bin\josim-cli.exe'
+          if (-not (Test-Path $binaryPath)) {
+            throw "Expected JoSIM binary at $binaryPath"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $installDir 'bin')
+
+      - name: Resolve waveform gate settings
+        shell: pwsh
+        run: |
+          $defaultJosimCommand = Join-Path $env:GITHUB_WORKSPACE 'tools\JoSIM-v2.7-windows-x64\bin\josim-cli.exe'
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $josimCommand = if ('${{ inputs.josim_command }}') { '${{ inputs.josim_command }}' } else { $defaultJosimCommand }
+            $previousSummaryJson = '${{ inputs.previous_summary_json }}'
+            $baselinePlatform = '${{ inputs.baseline_platform }}'
+            $validateNoRegression = '${{ inputs.validate_no_regression }}'
+            $regressionTolerance = '${{ inputs.regression_tolerance_v }}'
+          } else {
+            $josimCommand = $defaultJosimCommand
+            $previousSummaryJson = ''
+            $baselinePlatform = 'windows'
+            $validateNoRegression = 'true'
+            $regressionTolerance = '0.0'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_JOSIM_COMMAND=$josimCommand"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_PREVIOUS_SUMMARY_JSON=$previousSummaryJson"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_BASELINE_PLATFORM=$baselinePlatform"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_VALIDATE_NO_REGRESSION=$validateNoRegression"
+          Add-Content -Path $env:GITHUB_ENV -Value "RFLOW_REGRESSION_TOLERANCE_V=$regressionTolerance"
+
+      - name: Build Python extension
+        run: uv run maturin develop -m crates/py/Cargo.toml
+
+      - name: Run default external waveform compare manifest
+        shell: pwsh
+        run: |
+          $compareArgs = @(
+            'python/scripts/run_waveform_compare_manifest.py',
+            '--josim-command', $env:RFLOW_JOSIM_COMMAND,
+            '--result-dir', 'target/waveform-compare/results',
+            '--baseline-platform', $env:RFLOW_BASELINE_PLATFORM,
+            '--regression-tolerance-v', $env:RFLOW_REGRESSION_TOLERANCE_V,
+            '--validate-pass'
+          )
+          if ($env:RFLOW_PREVIOUS_SUMMARY_JSON) {
+            $compareArgs += @('--previous-summary-json', $env:RFLOW_PREVIOUS_SUMMARY_JSON)
+          }
+          if ($env:RFLOW_VALIDATE_NO_REGRESSION -eq 'true') {
+            $compareArgs += '--validate-no-regression'
+          }
+          uv run python @compareArgs
+
+      - name: Run default external warning manifest
+        shell: pwsh
+        run: |
+          uv run python python/scripts/run_external_warning_manifest.py --josim-command "$env:RFLOW_JOSIM_COMMAND" --result-dir target/external-warning-manifest --validate-pass
+
+      - name: Prepare waveform compare review artifacts
+        shell: pwsh
+        run: |
+          $artifactArgs = @(
+            'python/scripts/prepare_waveform_compare_artifacts.py',
+            '--thresholds', 'python/tests/benchmarks/phase6/waveform_thresholds.json',
+            '--benchmark-dir', 'python/tests/benchmarks/phase6',
+            '--result-dir', 'target/waveform-compare/results',
+            '--artifact-dir', 'target/waveform-compare',
+            '--baseline-platform', $env:RFLOW_BASELINE_PLATFORM,
+            '--regression-tolerance-v', $env:RFLOW_REGRESSION_TOLERANCE_V,
+            '--josim-command', $env:RFLOW_JOSIM_COMMAND,
+            '--github-workflow', '${{ github.workflow }}',
+            '--github-job', 'waveform-compare-gate',
+            '--github-event-name', '${{ github.event_name }}',
+            '--github-run-id', '${{ github.run_id }}',
+            '--github-run-attempt', '${{ github.run_attempt }}',
+            '--github-sha', '${{ github.sha }}',
+            '--github-ref-name', '${{ github.ref_name }}'
+          )
+          if ($env:RFLOW_PREVIOUS_SUMMARY_JSON) {
+            $artifactArgs += @('--previous-summary-json', $env:RFLOW_PREVIOUS_SUMMARY_JSON)
+          }
+          if ($env:RFLOW_VALIDATE_NO_REGRESSION -eq 'true') {
+            $artifactArgs += '--validate-no-regression'
+          }
+          uv run python @artifactArgs
+
+      - name: Prepare external warning review artifacts
+        shell: pwsh
+        run: |
+          uv run python python/scripts/prepare_external_warning_artifacts.py --result-dir target/external-warning-manifest --artifact-dir target/external-warning-review --josim-command "$env:RFLOW_JOSIM_COMMAND" --github-workflow "${{ github.workflow }}" --github-job "waveform-compare-gate" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload waveform compare artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveform-compare-results
+          if-no-files-found: error
+          path: |
+            target/waveform-compare/results/*.compare.json
+            target/waveform-compare/waveform_compare_summary.current.md
+            target/waveform-compare/waveform_compare_summary.current.json
+            target/waveform-compare/waveform_compare_summary.approved-baseline.json
+            target/waveform-compare/waveform_compare_summary.candidate-baseline.md
+            target/waveform-compare/waveform_compare_summary.candidate-baseline.json
+            target/waveform-compare/waveform_compare_summary.validation.json
+            target/waveform-compare/manifest.json
+            target/waveform-compare/README.txt
+            target/external-warning-review/*.warning.json
+            target/external-warning-review/external_warning_summary.current.md
+            target/external-warning-review/external_warning_summary.current.json
+            target/external-warning-review/selected_external_warning_contracts.json
+            target/external-warning-review/manifest.json
+            target/external-warning-review/README.txt
+            python/tests/benchmarks/phase6/waveform_thresholds.json
+
+  waveform-compare-gate-linux-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_waveform_compare_linux }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Resolve Linux waveform gate settings
+        shell: bash
+        run: |
+          if [ -z "${{ inputs.josim_command_linux }}" ]; then
+            echo "error=josim_command_linux is required for Linux waveform gate" >&2
+            exit 1
+          fi
+
+          previous_summary="${{ inputs.previous_summary_json_linux }}"
+          validate_no_regression="${{ inputs.validate_no_regression_linux }}"
+          repo_linux_baseline="python/tests/benchmarks/phase6/waveform_compare_summary.linux-approved-baseline.json"
+
+          # Keep strict mode as default, but auto-downgrade on first Linux bootstrap runs
+          # when no explicit or repo-tracked baseline exists yet.
+          if [ "$validate_no_regression" = "true" ] && [ -z "$previous_summary" ] && [ ! -f "$repo_linux_baseline" ]; then
+            echo "notice=Linux no-regression auto-disabled because no baseline is available yet" >&2
+            validate_no_regression="false"
+          fi
+
+          echo "RFLOW_JOSIM_COMMAND=${{ inputs.josim_command_linux }}" >> "$GITHUB_ENV"
+          echo "RFLOW_PREVIOUS_SUMMARY_JSON=$previous_summary" >> "$GITHUB_ENV"
+          echo "RFLOW_BASELINE_PLATFORM=linux" >> "$GITHUB_ENV"
+          echo "RFLOW_VALIDATE_NO_REGRESSION=$validate_no_regression" >> "$GITHUB_ENV"
+          echo "RFLOW_REGRESSION_TOLERANCE_V=${{ inputs.regression_tolerance_v_linux }}" >> "$GITHUB_ENV"
+
+      - name: Build Python extension
+        run: uv run maturin develop -m crates/py/Cargo.toml
+
+      - name: Run Linux external waveform compare manifest
+        shell: bash
+        run: |
+          compare_args=(
+            "python/scripts/run_waveform_compare_manifest.py"
+            "--josim-command" "$RFLOW_JOSIM_COMMAND"
+            "--result-dir" "target/waveform-compare-linux/results"
+            "--baseline-platform" "$RFLOW_BASELINE_PLATFORM"
+            "--regression-tolerance-v" "$RFLOW_REGRESSION_TOLERANCE_V"
+            "--validate-pass"
+          )
+          if [ -n "$RFLOW_PREVIOUS_SUMMARY_JSON" ]; then
+            compare_args+=("--previous-summary-json" "$RFLOW_PREVIOUS_SUMMARY_JSON")
+          fi
+          if [ "$RFLOW_VALIDATE_NO_REGRESSION" = "true" ]; then
+            compare_args+=("--validate-no-regression")
+          fi
+          uv run python "${compare_args[@]}"
+
+      - name: Run Linux external warning manifest
+        shell: bash
+        run: |
+          uv run python python/scripts/run_external_warning_manifest.py --josim-command "$RFLOW_JOSIM_COMMAND" --result-dir target/external-warning-manifest-linux --validate-pass
+
+      - name: Prepare Linux waveform compare review artifacts
+        shell: bash
+        run: |
+          artifact_args=(
+            "python/scripts/prepare_waveform_compare_artifacts.py"
+            "--thresholds" "python/tests/benchmarks/phase6/waveform_thresholds.json"
+            "--benchmark-dir" "python/tests/benchmarks/phase6"
+            "--result-dir" "target/waveform-compare-linux/results"
+            "--artifact-dir" "target/waveform-compare-linux"
+            "--baseline-platform" "$RFLOW_BASELINE_PLATFORM"
+            "--regression-tolerance-v" "$RFLOW_REGRESSION_TOLERANCE_V"
+            "--josim-command" "$RFLOW_JOSIM_COMMAND"
+            "--github-workflow" "${{ github.workflow }}"
+            "--github-job" "waveform-compare-gate-linux-optional"
+            "--github-event-name" "${{ github.event_name }}"
+            "--github-run-id" "${{ github.run_id }}"
+            "--github-run-attempt" "${{ github.run_attempt }}"
+            "--github-sha" "${{ github.sha }}"
+            "--github-ref-name" "${{ github.ref_name }}"
+          )
+          if [ -n "$RFLOW_PREVIOUS_SUMMARY_JSON" ]; then
+            artifact_args+=("--previous-summary-json" "$RFLOW_PREVIOUS_SUMMARY_JSON")
+          fi
+          if [ "$RFLOW_VALIDATE_NO_REGRESSION" = "true" ]; then
+            artifact_args+=("--validate-no-regression")
+          fi
+          uv run python "${artifact_args[@]}"
+
+      - name: Snapshot Linux baseline readiness status
+        shell: bash
+        run: |
+          uv run python python/scripts/check_waveform_baseline_status.py --platform linux --json-output target/waveform-compare-linux/linux-baseline-status.json
+
+      - name: Prepare Linux external warning review artifacts
+        shell: bash
+        run: |
+          uv run python python/scripts/prepare_external_warning_artifacts.py --result-dir target/external-warning-manifest-linux --artifact-dir target/external-warning-review-linux --josim-command "$RFLOW_JOSIM_COMMAND" --github-workflow "${{ github.workflow }}" --github-job "waveform-compare-gate-linux-optional" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload Linux waveform compare artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveform-compare-results-linux
+          if-no-files-found: error
+          path: |
+            target/waveform-compare-linux/results/*.compare.json
+            target/waveform-compare-linux/waveform_compare_summary.current.md
+            target/waveform-compare-linux/waveform_compare_summary.current.json
+            target/waveform-compare-linux/waveform_compare_summary.approved-baseline.json
+            target/waveform-compare-linux/waveform_compare_summary.candidate-baseline.md
+            target/waveform-compare-linux/waveform_compare_summary.candidate-baseline.json
+            target/waveform-compare-linux/waveform_compare_summary.validation.json
+            target/waveform-compare-linux/manifest.json
+            target/waveform-compare-linux/README.txt
+            target/external-warning-review-linux/*.warning.json
+            target/external-warning-review-linux/external_warning_summary.current.md
+            target/external-warning-review-linux/external_warning_summary.current.json
+            target/external-warning-review-linux/selected_external_warning_contracts.json
+            target/external-warning-review-linux/manifest.json
+            target/external-warning-review-linux/README.txt
+            target/waveform-compare-linux/linux-baseline-status.json
+            python/tests/benchmarks/phase6/waveform_thresholds.json
+
+  cli-perf-regression-gate-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_cli_perf_regression_gate }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Resolve CLI performance gate settings
+        shell: bash
+        run: |
+          previous_baseline="${{ inputs.cli_perf_previous_baseline }}"
+          if [ -z "$previous_baseline" ]; then
+            previous_baseline="python/tests/benchmarks/phasee/cli_perf_baseline.linux-approved-baseline.json"
+          fi
+          if [ ! -f "$previous_baseline" ]; then
+            echo "error=cli_perf_previous_baseline not found: $previous_baseline" >&2
+            exit 1
+          fi
+          echo "RFLOW_CLI_PERF_PREVIOUS_BASELINE=$previous_baseline" >> "$GITHUB_ENV"
+          echo "RFLOW_CLI_PERF_MAX_REGRESSION_RATIO=${{ inputs.cli_perf_max_regression_ratio }}" >> "$GITHUB_ENV"
+          echo "RFLOW_CLI_PERF_ITERATIONS=${{ inputs.cli_perf_iterations }}" >> "$GITHUB_ENV"
+          echo "RFLOW_CLI_PERF_WARMUP=${{ inputs.cli_perf_warmup }}" >> "$GITHUB_ENV"
+
+      - name: Run CLI performance regression gate
+        shell: bash
+        run: |
+          uv run python python/scripts/capture_cli_perf_baseline.py \
+            --output target/cli-perf/cli_perf_baseline.current.json \
+            --previous-baseline "$RFLOW_CLI_PERF_PREVIOUS_BASELINE" \
+            --expected-previous-platform-prefix "linux" \
+            --iterations "$RFLOW_CLI_PERF_ITERATIONS" \
+            --warmup "$RFLOW_CLI_PERF_WARMUP" \
+            --max-regression-ratio "$RFLOW_CLI_PERF_MAX_REGRESSION_RATIO" \
+            --fail-on-regression
+
+      - name: Upload CLI performance regression artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-perf-regression-gate
+          if-no-files-found: error
+          path: |
+            target/cli-perf/cli_perf_baseline.current.json
+            ${{ env.RFLOW_CLI_PERF_PREVIOUS_BASELINE }}
+
+  cli-perf-baseline-refresh-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_cli_perf_baseline_refresh }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Capture CLI performance candidate baseline
+        shell: bash
+        run: |
+          uv run python python/scripts/capture_cli_perf_baseline.py \
+            --output target/cli-perf/cli_perf_baseline.candidate.json \
+            --iterations "${{ inputs.cli_perf_iterations }}" \
+            --warmup "${{ inputs.cli_perf_warmup }}"
+
+      - name: Upload CLI performance candidate baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-perf-baseline-candidate
+          if-no-files-found: error
+          path: |
+            target/cli-perf/cli_perf_baseline.candidate.json
+            python/tests/benchmarks/phasee/cli_perf_baseline.linux-approved-baseline.json
+
+  security-compliance-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_security_compliance }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Install compliance tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-license --locked
+
+      - name: Generate compliance artifacts
+        run: |
+          uv run python python/scripts/prepare_security_compliance_artifacts.py \
+            --output-dir target/compliance \
+            --github-workflow "${{ github.workflow }}" \
+            --github-job "security-compliance-optional" \
+            --github-event-name "${{ github.event_name }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt "${{ github.run_attempt }}" \
+            --github-sha "${{ github.sha }}" \
+            --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload compliance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-compliance-baseline
+          if-no-files-found: error
+          path: |
+            target/compliance/rust-dependency-inventory.json
+            target/compliance/rust-licenses.json
+            target/compliance/python-dependency-inventory.json
+            target/compliance/python-license-inventory.json
+            target/compliance/cargo-audit.txt
+            target/compliance/pyproject.toml
+            target/compliance/uv.lock
+            target/compliance/manifest.json
+            target/compliance/README.txt
+
+  release-artifacts-optional:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_release_artifacts }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Build candidate release artifacts
+        run: |
+          uv run python python/scripts/prepare_release_artifacts.py \
+            --output-dir target/release-artifacts \
+            --github-workflow "${{ github.workflow }}" \
+            --github-job "release-artifacts-optional" \
+            --github-event-name "${{ github.event_name }}" \
+            --github-run-id "${{ github.run_id }}" \
+            --github-run-attempt "${{ github.run_attempt }}" \
+            --github-sha "${{ github.sha }}" \
+            --github-ref-name "${{ github.ref_name }}"
+
+      - name: Upload release artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-artifacts
+          if-no-files-found: error
+          path: |
+            target/release-artifacts/bin/**
+            target/release-artifacts/wheels/**
+            target/release-artifacts/README.md
+            target/release-artifacts/Cargo.toml
+            target/release-artifacts/pyproject.toml
+            target/release-artifacts/uv.lock
+            target/release-artifacts/README.txt
+            target/release-artifacts/manifest.json

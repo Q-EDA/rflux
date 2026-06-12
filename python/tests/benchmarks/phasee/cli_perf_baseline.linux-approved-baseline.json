@@ -1,0 +1,95 @@
+{
+  "kind": "cli_perf_baseline",
+  "schema_version": 1,
+  "notes": "Bootstrap Linux baseline for workflow-dispatch gating. Promote reviewed Ubuntu candidate baselines to keep threshold checks meaningful.",
+  "platform": "linux-bootstrap",
+  "python_version": "bootstrap",
+  "iterations": 3,
+  "warmup": 1,
+  "case_count": 3,
+  "cases": [
+    {
+      "name": "cli_help",
+      "command": [
+        "uv",
+        "run",
+        "cargo",
+        "run",
+        "-p",
+        "rflux-cli",
+        "--",
+        "--help"
+      ],
+      "iterations": 3,
+      "warmup": 1,
+      "samples_ms": [
+        60000.0,
+        60000.0,
+        60000.0
+      ],
+      "summary": {
+        "min_ms": 60000.0,
+        "max_ms": 60000.0,
+        "mean_ms": 60000.0,
+        "median_ms": 60000.0,
+        "p95_ms": 60000.0
+      }
+    },
+    {
+      "name": "lint_input_help",
+      "command": [
+        "uv",
+        "run",
+        "cargo",
+        "run",
+        "-p",
+        "rflux-cli",
+        "--",
+        "lint-input",
+        "--help"
+      ],
+      "iterations": 3,
+      "warmup": 1,
+      "samples_ms": [
+        60000.0,
+        60000.0,
+        60000.0
+      ],
+      "summary": {
+        "min_ms": 60000.0,
+        "max_ms": 60000.0,
+        "mean_ms": 60000.0,
+        "median_ms": 60000.0,
+        "p95_ms": 60000.0
+      }
+    },
+    {
+      "name": "run_with_diagnostics_help",
+      "command": [
+        "uv",
+        "run",
+        "cargo",
+        "run",
+        "-p",
+        "rflux-cli",
+        "--",
+        "run-with-diagnostics",
+        "--help"
+      ],
+      "iterations": 3,
+      "warmup": 1,
+      "samples_ms": [
+        60000.0,
+        60000.0,
+        60000.0
+      ],
+      "summary": {
+        "min_ms": 60000.0,
+        "max_ms": 60000.0,
+        "mean_ms": 60000.0,
+        "median_ms": 60000.0,
+        "p95_ms": 60000.0
+      }
+    }
+  ]
+}

@@ -75,11 +75,12 @@
 
 ## 7. 仿真限制
 
-- 当前内部 transient 只覆盖受限器件与语法子集。
-- 当前与 JoSIM 的对齐仍是 partial，而非完整语义兼容；虽然 native `.model ... jj(... cpr={...})` 与实例侧 `J... cpr={...}` 的五系数子集现已进入支持面，但更高阶 CPR 和更完整模型语义仍未完成。
+- 当前内部 transient 只覆盖受限器件与语法子集；其中 SPICE 风格的 `+` continuation 行已在 deck 解析阶段归并，但更高阶语义仍未完成。
+- 当前与 JoSIM 的对齐仍是 partial，而非完整语义兼容；虽然 native `.model ... jj(... cpr={...})` 与实例侧 `J... cpr={...}` 的六系数子集现已进入支持面，但更高阶 CPR 和更完整模型语义仍未完成。
 - 当前噪声、JJ、传输线等支持路径虽然已有进展，但仍不应表述为 JoSIM 级完整能力。
 - 当前外部仿真调用已收口为最小 allowlist 和最小路径信任规则，仅接受 `josim` / `josim-cli` 及其受限 wrapper 后缀（`.exe` / `.cmd` / `.bat` / `.sh`）；尚未提供更通用的外部仿真器配置策略。
-- 当前已具备默认启用的 Windows manifest-based JoSIM 数值对齐 CI 路径（`waveform-compare-gate`）；现有 phase-6 基准中的 pure second-harmonic JJ、pure third-harmonic JJ、pure fourth-harmonic JJ 与 pure fifth-harmonic JJ 都已进入数值对齐资产。warning-contract review bundle 仍保留为流程能力，但当前基准合同可以为空。Ubuntu runner 仍缺 same-platform Linux approved baseline，因此严格 no-regression gate 还不能在 Linux 默认开启。
+- 当前已具备默认启用的 Windows manifest-based JoSIM 数值对齐 CI 路径（`waveform-compare-gate`）；现有 phase-6 基准中的 pure second-harmonic JJ、pure third-harmonic JJ、pure fourth-harmonic JJ、pure fifth-harmonic JJ 与 pure sixth-harmonic JJ 都已进入数值对齐资产。warning-contract review bundle 仍保留为流程能力，但当前基准合同可以为空。Ubuntu runner 仍缺 same-platform Linux approved baseline，因此严格 no-regression gate 还不能在 Linux 默认开启。
+- 2026-05-29 本地 machine precheck 结果仍显示 Linux baseline 未就绪（缺 `waveform_compare_summary.linux-approved-baseline.json`），且 Phase B promotion precheck 因缺 Linux waveform compare candidate/manifest 工件未通过；对应证据见 `docs/phase-b-run-record-2026-05-29.md`。
 
 建议：
 

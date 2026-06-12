@@ -475,6 +475,26 @@ def optimize_design_with_characterized_library(
         statistical_candidates_evaluated=report.statistical_candidates_evaluated,
     )
 
+
+
+def build_clock_tree(circuit):
+    """Build an H-tree clock distribution network for a circuit.
+
+    Returns a dict with clock tree metrics: sink_count, buffer_count,
+    levels, total_wire_length_um, estimated_skew_ps, phase_count.
+    """
+    return _api._core_build_clock_tree(circuit)
+
+
+def build_bias_grid(circuit):
+    """Build a bias distribution grid estimate for a circuit.
+
+    Returns a dict with bias grid metrics: grid_cells,
+    total_wire_length_um, connected_nodes, estimated_total_bias_current_ma.
+    """
+    return _api._core_build_bias_grid(circuit)
+
+
 __all__ = [
     "DEFAULT_CLOCK_PERIOD_PS",
     "DEFAULT_INPUT_ARRIVAL_PS",
@@ -509,4 +529,6 @@ __all__ = [
     "optimize_ac_bias",
     "optimize_ac_bias_with_characterized_library",
     "optimize_design_with_characterized_library",
+    "build_clock_tree",
+    "build_bias_grid",
 ]
