@@ -851,4 +851,141 @@ mod tests {
         assert!(report.routes[0].segments.len() >= 3);
         assert!(report.routes[0].length_um > report.routes[0].direct_length_um);
     }
+
+    #[test]
+    fn empty_netlist_produces_empty_report() {
+        let netlist = Netlist::new();
+        let placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        let report = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+        assert!(report.routes.is_empty());
+        assert_eq!(report.total_length_um, 0.0);
+        assert_eq!(report.jtl_routes, 0);
+        assert_eq!(report.ptl_routes, 0);
+    }
+
+    #[test]
+    fn default_routing_config_has_expected_values() {
+        let config = RoutingConfig::default();
+        assert_eq!(config.prefer_ptl_from_length_um, 60.0);
+        assert_eq!(config.jtl_layer, 1);
+        assert_eq!(config.ptl_layer, 2);
+        assert!(config.blocked_regions.is_empty());
+        assert_eq!(config.detour_margin_um, 12.0);
+    }
+
+    #[test]
+    fn router_default_creates_valid_instance() {
+        let router = SimpleRouter::default();
+        let netlist = Netlist::new();
+        let placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        let report = router
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+        assert!(report.routes.is_empty());
+    }
+
+    #[test]
+    fn uses_custom_layer_indices() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+
+        let placement = LevelizedPlacer::new()
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement");
+        let report = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig {
+                    jtl_layer: 5,
+                    ptl_layer: 7,
+                    ..RoutingConfig::default()
+                },
+            )
+            .expect("route");
+
+        assert_eq!(report.routes[0].segments[0].layer, 5);
+    }
+
+    #[test]
+    fn reports_correct_route_counts_for_multi_net() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: d, port: 0 })
+            .expect("c to d");
+
+        let placement = LevelizedPlacer::new()
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement");
+        let report = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+
+        assert_eq!(report.routes.len(), 2);
+        assert_eq!(report.jtl_routes, 2);
+        assert_eq!(report.ptl_routes, 0);
+        assert!(report.total_length_um > 0.0);
+    }
+
+    #[test]
+    fn reports_missing_placement_for_unplaced_node() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+
+        let placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        let err = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .unwrap_err();
+        assert_eq!(err, RouteError::MissingPlacement);
+    }
 }

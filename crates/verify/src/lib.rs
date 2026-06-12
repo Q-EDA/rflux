@@ -412,4 +412,378 @@ mod tests {
         assert_eq!(problem.checks[0].name, "out");
         assert!(problem.formula.to_dimacs().starts_with("p cnf "));
     }
+
+    #[test]
+    fn verifier_default_creates_valid_instance() {
+        let verifier = Verifier::default();
+        let mut lhs = Netlist::new();
+        let a = lhs.add_node(NodeKind::Port, "a");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef { node: a, port: 0 },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        let mut rhs = Netlist::new();
+        let b = rhs.add_node(NodeKind::Port, "a");
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef { node: b, port: 0 },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        let report = verifier
+            .check_boolean_equivalence(&lhs, &rhs)
+            .expect("single-port passthrough should be equivalent");
+        assert!(report.equivalent);
+    }
+
+    #[test]
+    fn verifier_detects_non_equivalent_combinational_circuits() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let b_l = lhs.add_node(NodeKind::Port, "b");
+        let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let b_r = rhs.add_node(NodeKind::Port, "b");
+        let or_r = rhs.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: or_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: or_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: or_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_boolean_equivalence(&lhs, &rhs)
+            .expect("equivalence check should run");
+        assert!(!report.equivalent);
+        assert!(report.sat_stats.recursive_calls >= 1);
+    }
+
+    #[test]
+    fn verifier_sequential_equivalent_circuits_report_equivalent() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node(NodeKind::Dff, "state");
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_single_step_sequential_equivalence(&lhs, &rhs)
+            .expect("single-step sequential equivalence should run");
+        assert!(report.equivalent);
+    }
+
+    #[test]
+    fn verifier_builds_sequential_equivalence_problem() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node(NodeKind::Dff, "state");
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let problem = verifier
+            .build_single_step_sequential_equivalence_problem(&lhs, &rhs)
+            .expect("export should succeed");
+        assert!(!problem.checks.is_empty());
+        assert!(problem.formula.to_dimacs().starts_with("p cnf "));
+    }
+
+    #[test]
+    fn bounded_equivalent_circuits_pass() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node(NodeKind::Dff, "state");
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_bounded_sequential_equivalence(&lhs, &rhs, 3)
+            .expect("bounded sequential equivalence should run");
+        assert!(report.equivalent);
+        assert_eq!(report.depth, 3);
+    }
 }
