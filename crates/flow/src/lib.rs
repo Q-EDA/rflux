@@ -5366,4 +5366,114 @@ mod tests {
             .suggestion()
             .is_empty());
     }
+
+    #[test]
+    fn build_clock_tree_returns_report_for_valid_netlist() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+        let dff = netlist.add_node(NodeKind::Dff, "dff");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef { node: gate, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: gate, port: 0 },
+                PinRef { node: dff, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: dff, port: 0 },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let mut runner = FlowRunner::new();
+        let config = FlowConfig::default();
+        let report = runner.build_clock_tree(&mut netlist, &Pdk::minimal("test"), &config);
+        assert!(report.sink_count >= 1);
+        assert!(report.phase_count >= 1);
+    }
+
+    #[test]
+    fn build_clock_tree_returns_empty_on_placement_failure() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef { node: b, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef { node: a, port: 1 },
+            )
+            .unwrap();
+
+        let mut runner = FlowRunner::new();
+        let config = FlowConfig::default();
+        let report = runner.build_clock_tree(&mut netlist, &Pdk::minimal("test"), &config);
+        assert_eq!(report.sink_count, 0);
+        assert_eq!(report.buffer_count, 0);
+    }
+
+    #[test]
+    fn build_bias_grid_returns_report_for_valid_netlist() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef { node: gate, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: gate, port: 0 },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let runner = FlowRunner::new();
+        let config = FlowConfig::default();
+        let report = runner.build_bias_grid(&netlist, &Pdk::minimal("test"), &config);
+        assert!(report.grid_cells >= 1);
+        assert!(report.connected_nodes >= 1);
+        assert!(report.total_wire_length_um > 0.0);
+    }
+
+    #[test]
+    fn build_bias_grid_returns_empty_on_placement_failure() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef { node: b, port: 0 },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef { node: b, port: 0 },
+                PinRef { node: a, port: 1 },
+            )
+            .unwrap();
+
+        let runner = FlowRunner::new();
+        let config = FlowConfig::default();
+        let report = runner.build_bias_grid(&netlist, &Pdk::minimal("test"), &config);
+        assert_eq!(report.grid_cells, 0);
+        assert_eq!(report.connected_nodes, 0);
+    }
 }
