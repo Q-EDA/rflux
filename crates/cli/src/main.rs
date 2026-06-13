@@ -9,12 +9,11 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use rflux_flow::{FlowConfig, FlowRunner, SimulationConfig, SimulationMode};
+use rflux_flow::{FlowConfig, FlowError, FlowRunner, SimulationConfig, SimulationMode};
 use rflux_io::{
     detect_netlist_input_format, read_netlist, read_netlist_as, read_pdk_json, write_pdk_json,
     IoError, NetlistInputFormat,
 };
-use rflux_ir::NodeKind;
 use rflux_sat::{solve_with_metrics, CnfFormula, IncrementalSolver, Lit, SolveResult, SolveStats};
 use rflux_sim::{simulate_file, SimulationError, SimulationReport};
 use rflux_tech::Pdk;
@@ -403,6 +402,12 @@ fn find_synth_error(error: &anyhow::Error) -> Option<&SynthError> {
         .find_map(|cause| cause.downcast_ref::<SynthError>())
 }
 
+fn find_flow_error(error: &anyhow::Error) -> Option<&FlowError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FlowError>())
+}
+
 struct CliErrorClassification {
     code: &'static str,
     suggestion: &'static str,
@@ -416,11 +421,25 @@ fn classify_cli_error(error: &anyhow::Error) -> CliErrorClassification {
         };
     }
 
-    if let Some(simulation_error) = find_simulation_error(error) {
-        return classify_simulation_error(simulation_error);
+    if let Some(flow_error) = find_flow_error(error) {
+        return CliErrorClassification {
+            code: flow_error.code(),
+            suggestion: flow_error.suggestion(),
+        };
     }
+
+    if let Some(simulation_error) = find_simulation_error(error) {
+        return CliErrorClassification {
+            code: simulation_error.code(),
+            suggestion: simulation_error.suggestion(),
+        };
+    }
+
     if let Some(synth_error) = find_synth_error(error) {
-        return classify_synth_error(synth_error);
+        return CliErrorClassification {
+            code: synth_error.code(),
+            suggestion: synth_error.suggestion(),
+        };
     }
 
     match error.to_string().as_str() {
@@ -436,66 +455,6 @@ fn classify_cli_error(error: &anyhow::Error) -> CliErrorClassification {
             code: "RFLOW-VERIFY-003",
             suggestion: "Inspect the verification report or rerun with diagnostics to identify the violated structural or simulation-backed layout checks.",
         },
-        _ => CliErrorClassification {
-            code: "RFLOW-INTERNAL-001",
-            suggestion: "Retry with run-with-diagnostics or collect-diagnostics and attach the bundle when reporting the issue.",
-        },
-    }
-}
-
-fn classify_simulation_error(error: &SimulationError) -> CliErrorClassification {
-    match error {
-        SimulationError::Io { .. } => CliErrorClassification {
-            code: "RFLOW-INPUT-001",
-            suggestion: "Check that the deck path exists and is readable, then retry simulate-file.",
-        },
-        SimulationError::MissingTran
-        | SimulationError::InvalidSubcktHeader(_)
-        | SimulationError::MissingEnds(_)
-        | SimulationError::MismatchedEnds { .. }
-        | SimulationError::UnknownSubckt(_)
-        | SimulationError::InvalidSubcktInstance(_)
-        | SimulationError::InvalidParamAssignment(_)
-        | SimulationError::InvalidNumericValue(_)
-        | SimulationError::UnknownParameter(_)
-        | SimulationError::InvalidTran(_) => CliErrorClassification {
-            code: "RFLOW-SIM-001",
-            suggestion: "Validate the deck syntax against the supported SPICE/JoSIM subset, then retry simulate-file.",
-        },
-        SimulationError::IncludeWithoutBase(_)
-        | SimulationError::DuplicateSubcktDefinition { .. }
-        | SimulationError::MissingLibrarySection { .. }
-        | SimulationError::UnterminatedLibrarySection { .. }
-        | SimulationError::MismatchedLibrarySectionEnd { .. }
-        | SimulationError::UnsupportedSubcktControl { .. }
-        | SimulationError::UnsupportedSubcktInstanceSyntax(_)
-        | SimulationError::UnsupportedExpression(_) => CliErrorClassification {
-            code: "RFLOW-SIM-002",
-            suggestion: "Run with --mode external_josim or simplify the deck to the currently supported internal subset.",
-        },
-    }
-}
-fn classify_synth_error(error: &SynthError) -> CliErrorClassification {
-    match error {
-        SynthError::SatInterfaceMismatch(_) => CliErrorClassification {
-            code: "RFLOW-VERIFY-001",
-            suggestion: "Align the compared netlists so they expose the same named inputs, outputs, and state interface before retrying check-equivalence.",
-        },
-        SynthError::SatUnsupportedNodeKind {
-            kind: NodeKind::Dff,
-            ..
-        } => CliErrorClassification {
-            code: "RFLOW-VERIFY-002",
-            suggestion: "Use --kind single_step_sequential for sequential netlists, or reduce the check to a combinational subset.",
-        },
-        SynthError::SatEncoding(message)
-            if message == "DffEnable is sequential and not supported in combinational SAT check" =>
-        {
-            CliErrorClassification {
-                code: "RFLOW-VERIFY-002",
-                suggestion: "Use --kind single_step_sequential for sequential netlists, or reduce the check to a combinational subset.",
-            }
-        }
         _ => CliErrorClassification {
             code: "RFLOW-INTERNAL-001",
             suggestion: "Retry with run-with-diagnostics or collect-diagnostics and attach the bundle when reporting the issue.",
@@ -6093,7 +6052,7 @@ mod tests {
         );
         assert!(manifest["execution"]["next_step"]
             .as_str()
-            .is_some_and(|next| next.contains("simulate-file")));
+            .is_some_and(|next| next.contains("deck file")));
         assert!(manifest["execution"]["error_message"]
             .as_str()
             .is_some_and(|message| message.contains("error[RFLOW-INPUT-001]")));
@@ -10591,7 +10550,7 @@ mod tests {
         );
         assert!(rendered.contains("detail: io error at missing-input.cir:"));
         assert!(rendered.contains(
-            "next: Check that the deck path exists and is readable, then retry simulate-file."
+            "next: Check that the deck file exists and is readable."
         ));
     }
 
@@ -10620,7 +10579,7 @@ mod tests {
         assert!(rendered
             .contains("detail: unsupported subckt instance syntax: X1 n1 n2 stage extra rval=75"));
         assert!(rendered.contains(
-            "next: Run with --mode external_josim or simplify the deck to the currently supported internal subset."
+            "next: This subckt instance syntax is not supported in the current parser subset."
         ));
     }
 
@@ -10718,7 +10677,7 @@ mod tests {
         );
         assert!(rendered.contains("detail: sat check does not support node"));
         assert!(rendered.contains(
-            "next: Use --kind single_step_sequential for sequential netlists, or reduce the check to a combinational subset."
+            "next: Equivalence checking only supports Dff and DffEnable node kinds for sequential."
         ));
     }
 
@@ -10762,7 +10721,7 @@ mod tests {
         );
         assert!(rendered.contains("detail: sat interface mismatch: output sets differ"));
         assert!(rendered.contains(
-            "next: Align the compared netlists so they expose the same named inputs, outputs, and state interface before retrying check-equivalence."
+            "next: Ensure both LHS and RHS have matching named input/output port sets."
         ));
     }
 
