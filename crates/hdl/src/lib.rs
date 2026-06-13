@@ -247,4 +247,41 @@ mod tests {
         assert_eq!(netlist.node_count(), 7);
         assert_eq!(netlist.edge_count(), 6);
     }
+
+    #[test]
+    fn remaining_logic_op_variants_build() {
+        let mut builder = CircuitBuilder::new();
+        let _buf = builder.logic_cell("buf0", LogicOp::Buf);
+        let _mux = builder.logic_cell("mux0", LogicOp::Mux2);
+        let _dffe = builder.logic_cell("dffe0", LogicOp::DffEnable);
+        let out = builder.port("o");
+        builder.connect(_buf, out).unwrap();
+        let netlist = builder.finish();
+        assert_eq!(netlist.node_count(), 4);
+        assert!(netlist.nodes()[0].logic_op.is_some());
+        assert!(netlist.nodes()[1].logic_op.is_some());
+        assert!(netlist.nodes()[2].logic_op.is_some());
+    }
+
+    #[test]
+    fn multiple_outputs_rejected_without_splitter() {
+        let mut builder = CircuitBuilder::new();
+        let src = builder.port("src");
+        let a = builder.cell("a");
+        let b = builder.cell("b");
+        builder.connect(src, a).unwrap();
+        let result = builder.connect(src, b);
+        assert!(matches!(result, Err(IrError::SourceAlreadyConnected)));
+    }
+
+    #[test]
+    fn duplicate_input_rejected() {
+        let mut builder = CircuitBuilder::new();
+        let a = builder.port("a");
+        let b = builder.port("b");
+        let gate = builder.cell("gate");
+        builder.connect(a, gate).unwrap();
+        let result = builder.connect(b, gate);
+        assert!(matches!(result, Err(IrError::DestinationAlreadyDriven)));
+    }
 }
