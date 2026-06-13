@@ -79,6 +79,24 @@ pub enum PlaceError {
     Cycle,
 }
 
+impl PlaceError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            PlaceError::Cycle => "RFLOW-FLOW-002",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            PlaceError::Cycle => {
+                "The netlist contains a cycle. Placement requires a directed acyclic graph."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LevelizedPlacer;
 
@@ -917,5 +935,11 @@ mod tests {
             .expect("placement should succeed");
         assert_eq!(placement.point_of(input).expect("input").x_um, 0.0);
         assert_eq!(placement.width_um, 120.0);
+    }
+
+    #[test]
+    fn place_error_codes_are_stable() {
+        assert_eq!(PlaceError::Cycle.code(), "RFLOW-FLOW-002");
+        assert!(!PlaceError::Cycle.suggestion().is_empty());
     }
 }

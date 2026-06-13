@@ -439,6 +439,32 @@ pub enum FlowError {
     CharacterizedLibraryJson(#[from] serde_json::Error),
 }
 
+impl FlowError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            FlowError::Synthesis(e) => e.code(),
+            FlowError::Placement(e) => e.code(),
+            FlowError::Routing(e) => e.code(),
+            FlowError::Timing(e) => e.code(),
+            FlowError::CharacterizedLibraryJson(_) => "RFLOW-PDK-004",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            FlowError::Synthesis(e) => e.suggestion(),
+            FlowError::Placement(e) => e.suggestion(),
+            FlowError::Routing(e) => e.suggestion(),
+            FlowError::Timing(e) => e.suggestion(),
+            FlowError::CharacterizedLibraryJson(_) => {
+                "Validate the characterized library JSON against the expected schema."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryAwareAcBiasOptimizationReport {
     pub ac_bias: AcBiasOptimizationReport,
@@ -5316,5 +5342,28 @@ mod tests {
                 .and_then(|endpoint| endpoint.port),
             Some(0)
         );
+    }
+
+    #[test]
+    fn flow_error_codes_are_stable() {
+        assert_eq!(
+            FlowError::Synthesis(SynthError::CombinationalCycle).code(),
+            "RFLOW-FLOW-001"
+        );
+        assert_eq!(
+            FlowError::Placement(PlaceError::Cycle).code(),
+            "RFLOW-FLOW-002"
+        );
+        assert_eq!(
+            FlowError::Routing(RouteError::MissingPlacement).code(),
+            "RFLOW-FLOW-003"
+        );
+        assert_eq!(
+            FlowError::Timing(TimingError::CyclicNetlist).code(),
+            "RFLOW-FLOW-004"
+        );
+        assert!(!FlowError::Synthesis(SynthError::CombinationalCycle)
+            .suggestion()
+            .is_empty());
     }
 }

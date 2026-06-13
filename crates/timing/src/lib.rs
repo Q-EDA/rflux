@@ -200,6 +200,36 @@ pub enum TimingError {
     MissingInterconnectTiming(RouteMode),
 }
 
+impl TimingError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            TimingError::CyclicNetlist => "RFLOW-FLOW-004",
+            TimingError::MissingRoute(..) => "RFLOW-FLOW-004",
+            TimingError::MissingCellTiming(..) => "RFLOW-PDK-003",
+            TimingError::MissingInterconnectTiming(..) => "RFLOW-PDK-003",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            TimingError::CyclicNetlist => {
+                "Timing analysis requires a directed acyclic netlist."
+            }
+            TimingError::MissingRoute(_from, _to) => {
+                "Run placement and routing before timing analysis."
+            }
+            TimingError::MissingCellTiming(_kind) => {
+                "Provide a PDK with cell timing models for the required cell kinds."
+            }
+            TimingError::MissingInterconnectTiming(_mode) => {
+                "Provide interconnect timing data for the required route mode in the PDK."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 /// The main STA engine.
 ///
@@ -2994,5 +3024,33 @@ mod tests {
             .expect_err("cycles must fail");
 
         assert!(matches!(err, TimingError::CyclicNetlist));
+    }
+
+    #[test]
+    fn timing_error_codes_are_stable() {
+        assert_eq!(TimingError::CyclicNetlist.code(), "RFLOW-FLOW-004");
+        assert_eq!(
+            TimingError::MissingRoute(
+                PinRef {
+                    node: rflux_ir::NodeId(0),
+                    port: 0
+                },
+                PinRef {
+                    node: rflux_ir::NodeId(1),
+                    port: 0
+                }
+            )
+            .code(),
+            "RFLOW-FLOW-004"
+        );
+        assert_eq!(
+            TimingError::MissingCellTiming(rflux_ir::NodeKind::CellInstance).code(),
+            "RFLOW-PDK-003"
+        );
+        assert_eq!(
+            TimingError::MissingInterconnectTiming(rflux_route::RouteMode::Jtl).code(),
+            "RFLOW-PDK-003"
+        );
+        assert!(!TimingError::CyclicNetlist.suggestion().is_empty());
     }
 }

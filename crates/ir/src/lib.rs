@@ -85,6 +85,28 @@ pub enum IrError {
     DestinationAlreadyDriven,
 }
 
+impl IrError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            IrError::SourceAlreadyConnected => "RFLOW-FLOW-001",
+            IrError::DestinationAlreadyDriven => "RFLOW-FLOW-001",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            IrError::SourceAlreadyConnected => {
+                "Insert a Splitter node before the destination to enable fan-out."
+            }
+            IrError::DestinationAlreadyDriven => {
+                "Each input pin may only be driven by one source. Check for duplicate connections."
+            }
+        }
+    }
+}
+
 /// A directed graph representing an SFQ netlist.
 ///
 /// Each node has one or more **pins** (input / output ports).
@@ -274,5 +296,16 @@ mod tests {
         let err = netlist.connect(output, b_in).expect_err("fanout must fail");
 
         assert!(matches!(err, IrError::SourceAlreadyConnected));
+    }
+
+    #[test]
+    fn ir_error_codes_are_stable() {
+        assert_eq!(IrError::SourceAlreadyConnected.code(), "RFLOW-FLOW-001");
+        assert_eq!(
+            IrError::DestinationAlreadyDriven.code(),
+            "RFLOW-FLOW-001"
+        );
+        assert!(!IrError::SourceAlreadyConnected.suggestion().is_empty());
+        assert!(!IrError::DestinationAlreadyDriven.suggestion().is_empty());
     }
 }

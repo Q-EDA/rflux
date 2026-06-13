@@ -75,6 +75,24 @@ pub enum RouteError {
     MissingPlacement,
 }
 
+impl RouteError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            RouteError::MissingPlacement => "RFLOW-FLOW-003",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            RouteError::MissingPlacement => {
+                "Ensure all nodes have placement coordinates before routing."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SimpleRouter;
 
@@ -987,5 +1005,14 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, RouteError::MissingPlacement);
+    }
+
+    #[test]
+    fn route_error_codes_are_stable() {
+        assert_eq!(
+            RouteError::MissingPlacement.code(),
+            "RFLOW-FLOW-003"
+        );
+        assert!(!RouteError::MissingPlacement.suggestion().is_empty());
     }
 }

@@ -198,6 +198,96 @@ pub enum SimulationError {
     },
 }
 
+impl SimulationError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            SimulationError::MissingTran => "RFLOW-SIM-001",
+            SimulationError::Io { .. } => "RFLOW-INPUT-001",
+            SimulationError::IncludeWithoutBase(..) => "RFLOW-SIM-001",
+            SimulationError::InvalidSubcktHeader(..) => "RFLOW-SIM-001",
+            SimulationError::DuplicateSubcktDefinition { .. } => "RFLOW-SIM-001",
+            SimulationError::MissingEnds(..) => "RFLOW-SIM-001",
+            SimulationError::MismatchedEnds { .. } => "RFLOW-SIM-001",
+            SimulationError::UnsupportedSubcktControl { .. } => "RFLOW-SIM-002",
+            SimulationError::UnknownSubckt(..) => "RFLOW-SIM-001",
+            SimulationError::InvalidSubcktInstance(..) => "RFLOW-SIM-001",
+            SimulationError::UnsupportedSubcktInstanceSyntax(..) => "RFLOW-SIM-002",
+            SimulationError::InvalidParamAssignment(..) => "RFLOW-SIM-001",
+            SimulationError::InvalidNumericValue(..) => "RFLOW-SIM-001",
+            SimulationError::UnknownParameter(..) => "RFLOW-SIM-002",
+            SimulationError::UnsupportedExpression(..) => "RFLOW-SIM-002",
+            SimulationError::InvalidTran(..) => "RFLOW-SIM-001",
+            SimulationError::MissingLibrarySection { .. } => "RFLOW-SIM-001",
+            SimulationError::UnterminatedLibrarySection { .. } => "RFLOW-SIM-001",
+            SimulationError::MismatchedLibrarySectionEnd { .. } => "RFLOW-SIM-001",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            SimulationError::MissingTran => {
+                "Add a .tran control card to the deck before simulation."
+            }
+            SimulationError::Io { .. } => {
+                "Check that the deck file exists and is readable."
+            }
+            SimulationError::IncludeWithoutBase(..) => {
+                "Use simulate-file (deck-backed) for .include directives."
+            }
+            SimulationError::InvalidSubcktHeader(..) => {
+                "Verify the .subckt header matches the supported SPICE subset."
+            }
+            SimulationError::DuplicateSubcktDefinition { .. } => {
+                "Rename or remove the duplicate .subckt definition."
+            }
+            SimulationError::MissingEnds(..) => {
+                "Add a matching .ends statement for the .subckt."
+            }
+            SimulationError::MismatchedEnds { .. } => {
+                "Ensure the .ends name matches the .subckt name."
+            }
+            SimulationError::UnsupportedSubcktControl { .. } => {
+                "This control card is not supported inside .subckt. Move it outside or remove it."
+            }
+            SimulationError::UnknownSubckt(..) => {
+                "Define the subckt before instantiating it, or check for typos."
+            }
+            SimulationError::InvalidSubcktInstance(..) => {
+                "Verify the subckt instance syntax matches the expected format."
+            }
+            SimulationError::UnsupportedSubcktInstanceSyntax(..) => {
+                "This subckt instance syntax is not supported in the current parser subset."
+            }
+            SimulationError::InvalidParamAssignment(..) => {
+                "Check the parameter assignment syntax (expected name=value)."
+            }
+            SimulationError::InvalidNumericValue(..) => {
+                "Verify the numeric value is in a supported format."
+            }
+            SimulationError::UnknownParameter(..) => {
+                "This parameter is not recognized. Check for typos or unsupported parameters."
+            }
+            SimulationError::UnsupportedExpression(..) => {
+                "This expression syntax is not supported in the current parser subset."
+            }
+            SimulationError::InvalidTran(..) => {
+                "Verify the .tran card format matches the supported syntax."
+            }
+            SimulationError::MissingLibrarySection { .. } => {
+                "Ensure the referenced .lib section exists in the library file."
+            }
+            SimulationError::UnterminatedLibrarySection { .. } => {
+                "Add a matching .endl statement for the .lib section."
+            }
+            SimulationError::MismatchedLibrarySectionEnd { .. } => {
+                "Ensure the .endl section name matches the .lib section name."
+            }
+        }
+    }
+}
+
 pub type ParsedSimulatorOutput = (
     Option<usize>,
     Option<String>,
@@ -7992,7 +8082,7 @@ mod tests {
         apply_external_env_sanitization, create_external_run_dir, is_allowed_external_command,
         parse_deck, parse_deck_file, run_generated_deck, should_strip_external_env_var,
         simulate_file, simulate_text, ParsedDeck, SimulationBackend, SimulationConfig,
-        SimulationMode, SimulationReport,
+        SimulationError, SimulationMode, SimulationReport,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -13617,6 +13707,32 @@ mod tests {
                 .map(|duration| duration.as_nanos())
                 .unwrap_or_default()
         ))
+    }
+
+    #[test]
+    fn simulation_error_codes_are_stable() {
+        assert_eq!(SimulationError::MissingTran.code(), "RFLOW-SIM-001");
+        assert_eq!(
+            SimulationError::Io {
+                path: "x".into(),
+                message: "y".into()
+            }
+            .code(),
+            "RFLOW-INPUT-001"
+        );
+        assert_eq!(
+            SimulationError::UnsupportedSubcktControl {
+                subckt: "x".into(),
+                line: "y".into()
+            }
+            .code(),
+            "RFLOW-SIM-002"
+        );
+        assert_eq!(
+            SimulationError::UnknownParameter("x".into()).code(),
+            "RFLOW-SIM-002"
+        );
+        assert!(!SimulationError::MissingTran.suggestion().is_empty());
     }
 }
 

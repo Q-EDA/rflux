@@ -45,6 +45,66 @@ pub enum SynthError {
     SatEncoding(String),
 }
 
+impl SynthError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            SynthError::Ir(e) => e.code(),
+            SynthError::MissingExistingSink(..) => "RFLOW-FLOW-001",
+            SynthError::MissingSinkForDffInsertion(..) => "RFLOW-FLOW-001",
+            SynthError::UnsupportedBoolOptNodeKind(..) => "RFLOW-FLOW-001",
+            SynthError::MissingBoolOptDriver(..) => "RFLOW-FLOW-001",
+            SynthError::UnexpectedBoolOptInputCount { .. } => "RFLOW-FLOW-001",
+            SynthError::CombinationalCycle => "RFLOW-FLOW-001",
+            SynthError::CycleOrUnsupportedDependency => "RFLOW-FLOW-001",
+            SynthError::SatInterfaceMismatch(..) => "RFLOW-VERIFY-001",
+            SynthError::SatUnsupportedNodeKind { .. } => "RFLOW-VERIFY-002",
+            SynthError::SatUnexpectedInputCount { .. } => "RFLOW-VERIFY-001",
+            SynthError::SatEncoding(..) => "RFLOW-VERIFY-001",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            SynthError::Ir(e) => e.suggestion(),
+            SynthError::MissingExistingSink(..) => {
+                "Check that the netlist has valid connections before splitter insertion."
+            }
+            SynthError::MissingSinkForDffInsertion(..) => {
+                "Ensure the combinational path has a valid sink for balancing DFF insertion."
+            }
+            SynthError::UnsupportedBoolOptNodeKind(..) => {
+                "Boolean optimization only supports CellInstance nodes."
+            }
+            SynthError::MissingBoolOptDriver(..) => {
+                "Every node in the boolean network needs a driving source."
+            }
+            SynthError::UnexpectedBoolOptInputCount { .. } => {
+                "The node has an unexpected number of inputs for boolean optimization."
+            }
+            SynthError::CombinationalCycle => {
+                "The netlist contains a combinational cycle. Resolve feedback paths before synthesis."
+            }
+            SynthError::CycleOrUnsupportedDependency => {
+                "Resolve cyclic dependencies in the netlist before synthesis."
+            }
+            SynthError::SatInterfaceMismatch(..) => {
+                "Ensure both LHS and RHS have matching named input/output port sets."
+            }
+            SynthError::SatUnsupportedNodeKind { .. } => {
+                "Equivalence checking only supports Dff and DffEnable node kinds for sequential."
+            }
+            SynthError::SatUnexpectedInputCount { .. } => {
+                "Check that nodes have the expected number of inputs for equivalence checking."
+            }
+            SynthError::SatEncoding(..) => {
+                "Report this as a bug. SAT encoding encountered an internal error."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SatEquivalenceReport {
     pub equivalent: bool,
@@ -5947,5 +6007,23 @@ mod tests {
         assert_eq!(report.edge_count, 2);
         assert!(report.bool_opt_compatibility.is_compatible());
         assert_eq!(report.path_balance.total_insertions(), 0);
+    }
+
+    #[test]
+    fn synth_error_codes_are_stable() {
+        assert_eq!(SynthError::CombinationalCycle.code(), "RFLOW-FLOW-001");
+        assert_eq!(
+            SynthError::SatInterfaceMismatch("test".into()).code(),
+            "RFLOW-VERIFY-001"
+        );
+        assert_eq!(
+            SynthError::SatUnsupportedNodeKind {
+                node: 0,
+                kind: NodeKind::Dff
+            }
+            .code(),
+            "RFLOW-VERIFY-002"
+        );
+        assert!(!SynthError::CombinationalCycle.suggestion().is_empty());
     }
 }

@@ -244,6 +244,48 @@ pub enum SatError {
     UnterminatedDimacsClause,
 }
 
+impl SatError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            SatError::VariableOutOfRange { .. } => "RFLOW-SIM-001",
+            SatError::EmptyClause => "RFLOW-SIM-001",
+            SatError::MissingDimacsHeader => "RFLOW-INPUT-002",
+            SatError::InvalidDimacsHeader(..) => "RFLOW-INPUT-002",
+            SatError::InvalidDimacsLiteral(..) => "RFLOW-INPUT-002",
+            SatError::InvalidDimacsClauseCount { .. } => "RFLOW-INPUT-002",
+            SatError::UnterminatedDimacsClause => "RFLOW-INPUT-002",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            SatError::VariableOutOfRange { .. } => {
+                "The DIMACS variable index exceeds the declared variable count."
+            }
+            SatError::EmptyClause => {
+                "An empty clause makes the formula unsatisfiable by definition."
+            }
+            SatError::MissingDimacsHeader => {
+                "DIMACS files must start with a 'p cnf <vars> <clauses>' header."
+            }
+            SatError::InvalidDimacsHeader(..) => {
+                "Verify the DIMACS header format: 'p cnf <num_vars> <num_clauses>'."
+            }
+            SatError::InvalidDimacsLiteral(..) => {
+                "DIMACS literals must be non-zero integers."
+            }
+            SatError::InvalidDimacsClauseCount { .. } => {
+                "The declared clause count does not match the actual number of clauses."
+            }
+            SatError::UnterminatedDimacsClause => {
+                "Each DIMACS clause must end with a 0 terminator."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedClause {
     pub clause: Vec<Lit>,
@@ -1098,5 +1140,24 @@ mod tests {
         solver.add_clause(vec![Lit::pos(1)]).expect("valid clause");
 
         assert_eq!(solver.unsat_core_of_assumptions(&[Lit::pos(1)]), None);
+    }
+
+    #[test]
+    fn sat_error_codes_are_stable() {
+        assert_eq!(
+            SatError::VariableOutOfRange {
+                var: 0,
+                var_count: 0
+            }
+            .code(),
+            "RFLOW-SIM-001"
+        );
+        assert_eq!(SatError::EmptyClause.code(), "RFLOW-SIM-001");
+        assert_eq!(SatError::MissingDimacsHeader.code(), "RFLOW-INPUT-002");
+        assert_eq!(
+            SatError::InvalidDimacsHeader("x".into()).code(),
+            "RFLOW-INPUT-002"
+        );
+        assert!(!SatError::MissingDimacsHeader.suggestion().is_empty());
     }
 }
