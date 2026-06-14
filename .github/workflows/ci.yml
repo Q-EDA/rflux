@@ -245,16 +245,19 @@ jobs:
         continue-on-error: true
 
       - name: Rust security audit
+        # Hard gate: any RUSTSEC advisory fails the build. The install step is
+        # idempotent (|| true) so a cached binary is reused without error; the
+        # audit itself MUST propagate its real exit code.
         run: |
           cargo install cargo-audit --locked 2>/dev/null || true
-          cargo audit 2>&1 | head -100 || true
-        continue-on-error: true
+          cargo audit
 
       - name: Rust dependency check
+        # Hard gate: cargo-deny enforces license allow-list, duplicate-crate
+        # bans, and source registry policy from deny.toml.
         run: |
           cargo install cargo-deny --locked 2>/dev/null || true
-          cargo deny check bans licenses sources 2>&1 | head -100 || true
-        continue-on-error: true
+          cargo deny check advisories bans licenses sources
 
       - name: Upload Week 3 quality artifacts
         uses: actions/upload-artifact@v4
@@ -751,6 +754,39 @@ jobs:
             target/release-artifacts/uv.lock
             target/release-artifacts/README.txt
             target/release-artifacts/manifest.json
+
+  coverage:
+    # Informational coverage reporting via cargo-llvm-cov + Codecov. Runs on
+    # every push and pull_request so coverage trends are tracked continuously,
+    # but does NOT gate the build: a coverage dip surfaces as a red check on
+    # the PR, not a merge blocker. rflux-py is excluded because its cdylib test
+    # target cannot be linked against the host interpreter in the coverage
+    # harness (extension-module feature); its behavior is covered by the
+    # python/tests/ pytest suite instead.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        env:
+          # Tests in rflux-cli shell out to the built binary; keep it on PATH.
+          PYO3_PYTHON: "$(uv python find)"
+        run: |
+          cargo llvm-cov --workspace --exclude rflux-py --lcov --output-path target/coverage/lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: target/coverage/lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
 
 

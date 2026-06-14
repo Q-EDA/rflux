@@ -1,0 +1,40 @@
+# Codecov configuration for Q-EDA/rflux
+#
+# Coverage is informational, not a merge blocker. The goal is to surface
+# coverage trends on pull requests and protect high-value crates from silent
+# erosion; we deliberately do not set a hard project-wide threshold yet
+# (coverage today is uneven across crates — see AGENTS.md maturity notes).
+
+coverage:
+  status:
+    project:
+      default:
+        # Allow up to 1% relative drop on a PR before flagging; absolute
+        # thresholds per-crate are intentionally absent until each crate's
+        # baseline stabilizes.
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      # New code on a PR should aim for 80% coverage, but only as a hint —
+      # the informational flag keeps it from blocking merges.
+      default:
+        target: 80%
+        informational: true
+
+ignore:
+  # Bench harnesses and integration-test glue are not unit-under-test.
+  - "crates/synth/benches/"
+  # FFI shim crate; behavior is exercised through python/tests/.
+  - "crates/py/"
+  # Generated build output.
+  - "target/"
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  show_carryforward: true
+
+github_checks:
+  annotations: true

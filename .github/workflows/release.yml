@@ -1,0 +1,105 @@
+name: release
+
+# Tag-driven release pipeline. Pushing a `v*` tag builds the CLI binary and the
+# Python wheel on three platforms, then publishes a GitHub Release with all
+# artifacts attached. Publishing to crates.io / PyPI is intentionally NOT wired
+# up here yet: the project is pre-1.0 (0.1.x), the crates are not registered on
+# crates.io, and the Python package has no PyPI name reservation. When either
+# becomes true, add the corresponding publish step gated on a secret.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build a release for (must already exist)"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # required for softprops/action-gh-release to create the Release
+
+jobs:
+  build:
+    name: Build artifacts (${{ matrix.os }} / ${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: linux-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_suffix: macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_suffix: macos-x64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            artifact_suffix: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shared CI environment (Rust + uv)
+        uses: ./.github/actions/setup-rflux-ci
+
+      - name: Install target toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build CLI release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rflux-cli
+
+      - name: Stage CLI binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/rflux staging/rflux-${{ matrix.artifact_suffix }}
+      - name: Stage CLI binary (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/rflux.exe" "staging/rflux-${{ matrix.artifact_suffix }}.exe"
+
+      - name: Build Python wheel
+        run: uv run maturin build --release --target ${{ matrix.target }} -m crates/py/Cargo.toml --out staging
+
+      - name: Upload artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_suffix }}
+          if-no-files-found: error
+          path: staging/*
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifact bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: release-*
+          merge-multiple: true
+
+      - name: List staged assets
+        run: ls -lR release-assets
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Tag name: prefer the triggering git tag; fall back to the dispatch input.
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          name: ${{ github.ref_name || inputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*
