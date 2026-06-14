@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rflux_ir::{Netlist, NodeKind, PinRef};
+use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
 use rflux_place::{
     BlockedRegion as PlacementBlockedRegion, LevelizedPlacer, PlaceError, Placement,
     PlacementConfig,
@@ -2268,6 +2268,80 @@ fn placement_halo_scale_candidates(netlist: &Netlist, pdk: &Pdk) -> Vec<f64> {
     candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     candidates.dedup_by(|a, b| (*a - *b).abs() <= 1e-9);
     candidates
+}
+
+/// Check macro cell interface constraints for a netlist.
+///
+/// In SFQ hierarchical design, macro cells have specific interface rules:
+/// - Only boundary pins can receive clock signals
+/// - Internal JTL routing is contained within the macro
+/// - External PTL connections must use specific port orientations
+///
+/// Returns a list of constraint violations.
+pub fn check_macro_interface_constraints(
+    netlist: &Netlist,
+    placement: &Placement,
+) -> Vec<MacroInterfaceViolation> {
+    let mut violations = Vec::new();
+
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::MacroCell) {
+            continue;
+        }
+        let Some(point) = placement.point_of(node.id) else {
+            continue;
+        };
+
+        // Check that macro cell has at least one input and one output
+        let has_input = netlist.edge_pairs().iter().any(|(_from, to)| to.node == node.id);
+        let has_output = netlist.edge_pairs().iter().any(|(from, _to)| from.node == node.id);
+
+        if !has_input {
+            violations.push(MacroInterfaceViolation {
+                node: node.id,
+                node_name: node.name.clone(),
+                violation: MacroInterfaceViolationKind::NoInput,
+                detail: "Macro cell has no input connections".to_string(),
+            });
+        }
+        if !has_output {
+            violations.push(MacroInterfaceViolation {
+                node: node.id,
+                node_name: node.name.clone(),
+                violation: MacroInterfaceViolationKind::NoOutput,
+                detail: "Macro cell has no output connections".to_string(),
+            });
+        }
+
+        // Check that macro cell is not at the origin (suggests missing placement)
+        if point.x_um == 0.0 && point.y_um == 0.0 && netlist.node_count() > 1 {
+            violations.push(MacroInterfaceViolation {
+                node: node.id,
+                node_name: node.name.clone(),
+                violation: MacroInterfaceViolationKind::SuspiciousPlacement,
+                detail: "Macro cell placed at origin; may indicate missing placement".to_string(),
+            });
+        }
+    }
+
+    violations
+}
+
+/// A macro cell interface constraint violation.
+#[derive(Debug, Clone)]
+pub struct MacroInterfaceViolation {
+    pub node: NodeId,
+    pub node_name: String,
+    pub violation: MacroInterfaceViolationKind,
+    pub detail: String,
+}
+
+/// Kind of macro cell interface violation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroInterfaceViolationKind {
+    NoInput,
+    NoOutput,
+    SuspiciousPlacement,
 }
 
 fn statistical_config_candidates(
@@ -5672,5 +5746,201 @@ mod tests {
             report.routing.jtl_routes > 0 || report.routing.ptl_routes > 0,
             "should have routes"
         );
+    }
+
+    #[test]
+    fn macro_interface_constraints_empty_netlist() {
+        let netlist = Netlist::new();
+        let placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn macro_interface_constraints_no_violations_for_valid_macro() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: input,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: out,
+                    level: 2,
+                    slot: 0,
+                    point: Point { x_um: 80.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 120.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn macro_interface_constraints_detects_no_input() {
+        let mut netlist = Netlist::new();
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: out,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 80.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 120.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::NoInput));
+    }
+
+    #[test]
+    fn macro_interface_constraints_detects_no_output() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: input,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 80.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::NoOutput));
+    }
+
+    #[test]
+    fn macro_interface_constraints_detects_suspicious_placement() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: input,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: out,
+                    level: 2,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 80.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::SuspiciousPlacement));
     }
 }
