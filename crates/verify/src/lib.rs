@@ -150,7 +150,7 @@ mod tests {
 
         assert!(report.equivalent);
         assert_eq!(report.checked_outputs, vec!["out".to_string()]);
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
     }
 
     #[test]
@@ -248,13 +248,23 @@ mod tests {
         )
         .expect("dffe->out");
 
+        // DEBUG: dump the equivalence problem DIMACS for offline CDCL diagnosis.
+        let problem = verifier.build_single_step_sequential_equivalence_problem(&lhs, &rhs).expect("build problem");
+        eprintln!("SEQ_MITER vars={} clauses={}", problem.formula.var_count(), problem.formula.clauses().len());
+        eprintln!("SEQ_MITER checks={}", problem.checks.len());
+        for (i, c) in problem.checks.iter().enumerate() {
+            eprintln!("SEQ_CHECK[{}] kind={:?} name={} assumptions={:?}", i, c.kind, c.name, c.assumptions);
+        }
+        std::fs::write("/tmp/seq_miter.cnf", problem.formula.to_dimacs()).expect("write dimacs");
+        eprintln!("SEQ_DIMACS_START\n{}\nSEQ_DIMACS_END", problem.formula.to_dimacs());
+
         let report = verifier
             .check_single_step_sequential_equivalence(&lhs, &rhs)
             .expect("single-step sequential equivalence should run");
 
         assert!(!report.equivalent);
         assert!(report.counterexample_states.is_some());
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
     }
 
     #[test]
@@ -360,7 +370,7 @@ mod tests {
         assert!(!report.equivalent);
         assert_eq!(report.first_failing_step, Some(0));
         assert_eq!(report.steps.len(), 1);
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
     }
 
     #[test]
@@ -518,7 +528,7 @@ mod tests {
             .check_boolean_equivalence(&lhs, &rhs)
             .expect("equivalence check should run");
         assert!(!report.equivalent);
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
     }
 
     #[test]
@@ -602,6 +612,16 @@ mod tests {
             },
         )
         .unwrap();
+
+        // DEBUG: dump the equivalence problem DIMACS for offline CDCL diagnosis.
+        let problem = verifier.build_single_step_sequential_equivalence_problem(&lhs, &rhs).expect("build problem");
+        eprintln!("SEQ_MITER vars={} clauses={}", problem.formula.var_count(), problem.formula.clauses().len());
+        eprintln!("SEQ_MITER checks={}", problem.checks.len());
+        for (i, c) in problem.checks.iter().enumerate() {
+            eprintln!("SEQ_CHECK[{}] kind={:?} name={} assumptions={:?}", i, c.kind, c.name, c.assumptions);
+        }
+        std::fs::write("/tmp/seq_miter.cnf", problem.formula.to_dimacs()).expect("write dimacs");
+        eprintln!("SEQ_DIMACS_START\n{}\nSEQ_DIMACS_END", problem.formula.to_dimacs());
 
         let report = verifier
             .check_single_step_sequential_equivalence(&lhs, &rhs)

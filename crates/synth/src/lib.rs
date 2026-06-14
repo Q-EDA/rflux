@@ -5235,7 +5235,7 @@ mod tests {
         assert_eq!(report.checked_outputs, vec!["out".to_string()]);
         assert!(report.counterexample_inputs.is_none());
         assert!(report.counterexample_outputs.is_none());
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
         assert!(report.sat_elapsed_ns > 0);
     }
 
@@ -5324,7 +5324,7 @@ mod tests {
             .expect("counterexample output values should be present");
         let out = output_values.get("out").expect("out mismatch should exist");
         assert_ne!(out.lhs, out.rhs);
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
         assert!(report.sat_elapsed_ns > 0);
     }
 
@@ -5472,7 +5472,7 @@ mod tests {
             .expect("out_xor mismatch should be tracked");
         assert_eq!(and_out.lhs, and_out.rhs);
         assert_ne!(xor_out.lhs, xor_out.rhs);
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
         assert!(report.sat_elapsed_ns > 0);
     }
 
@@ -5585,7 +5585,7 @@ mod tests {
             .and_then(|states| states.get("state"))
             .expect("state transition mismatch should exist");
         assert!(state.lhs_next != state.rhs_next || state.lhs_clock != state.rhs_clock);
-        assert!(report.sat_stats.recursive_calls >= 1);
+        assert!(report.sat_stats.decisions + report.sat_stats.unit_assignments >= 1);
         assert!(report.sat_elapsed_ns > 0);
     }
 

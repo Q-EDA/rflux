@@ -99,7 +99,7 @@ fn classic_examples_end_to_end_sat_equivalence() {
             case.file_name
         );
         assert!(
-            eq.sat_stats.recursive_calls >= 1,
+            eq.sat_stats.decisions + eq.sat_stats.unit_assignments >= 1,
             "sat stats should be populated for fixture {}",
             case.file_name
         );
