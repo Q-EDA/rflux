@@ -55,6 +55,7 @@ pub struct RoutingConfig {
     pub ptl_layer: u8,
     pub blocked_regions: Vec<BlockedRegion>,
     pub detour_margin_um: f64,
+    pub congestion_weight: f64,
 }
 
 impl Default for RoutingConfig {
@@ -65,7 +66,34 @@ impl Default for RoutingConfig {
             ptl_layer: 2,
             blocked_regions: Vec::new(),
             detour_margin_um: 12.0,
+            congestion_weight: 0.0,
         }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct CongestionMap {
+    edge_usage: HashMap<(i64, i64, i64, i64), usize>,
+}
+
+impl CongestionMap {
+    fn increment(&mut self, start: Point, end: Point) {
+        let key = Self::edge_key(start, end);
+        *self.edge_usage.entry(key).or_insert(0) += 1;
+    }
+
+    fn usage(&self, start: Point, end: Point) -> usize {
+        let key = Self::edge_key(start, end);
+        *self.edge_usage.get(&key).unwrap_or(&0)
+    }
+
+    fn edge_key(a: Point, b: Point) -> (i64, i64, i64, i64) {
+        (
+            axis_key(a.x_um),
+            axis_key(a.y_um),
+            axis_key(b.x_um),
+            axis_key(b.y_um),
+        )
     }
 }
 
@@ -115,6 +143,7 @@ impl SimpleRouter {
         let mut detoured_routes = 0usize;
         let mut jtl_routes = 0usize;
         let mut ptl_routes = 0usize;
+        let mut congestion = CongestionMap::default();
 
         for (from, to) in netlist.edge_pairs() {
             let source = placement
@@ -123,7 +152,7 @@ impl SimpleRouter {
             let sink = placement
                 .point_of(to.node)
                 .ok_or(RouteError::MissingPlacement)?;
-            let path = choose_route_path(source, sink, config);
+            let path = choose_route_path(source, sink, config, &congestion);
             let direct_length_um = manhattan_length(source, sink);
             let length_um = path_length(&path);
             let touches_boundary_port =
@@ -141,9 +170,16 @@ impl SimpleRouter {
             } else {
                 config.jtl_layer
             };
-            let segments = path
-                .into_iter()
-                .map(|(start, end)| RouteSegment { start, end, layer })
+            let segments: Vec<RouteSegment> = path
+                .iter()
+                .map(|(start, end)| {
+                    congestion.increment(*start, *end);
+                    RouteSegment {
+                        start: *start,
+                        end: *end,
+                        layer,
+                    }
+                })
                 .collect();
 
             match mode {
@@ -181,8 +217,13 @@ fn manhattan_length(a: Point, b: Point) -> f64 {
     (a.x_um - b.x_um).abs() + (a.y_um - b.y_um).abs()
 }
 
-fn choose_route_path(source: Point, sink: Point, config: &RoutingConfig) -> Vec<(Point, Point)> {
-    shortest_grid_path(source, sink, config)
+fn choose_route_path(
+    source: Point,
+    sink: Point,
+    config: &RoutingConfig,
+    congestion: &CongestionMap,
+) -> Vec<(Point, Point)> {
+    shortest_grid_path(source, sink, config, congestion)
         .or_else(|| {
             let mut candidates = base_route_candidates(source, sink);
             for region in &config.blocked_regions {
@@ -195,12 +236,17 @@ fn choose_route_path(source: Point, sink: Point, config: &RoutingConfig) -> Vec<
             }
 
             let mut best_clear = None::<Vec<(Point, Point)>>;
-            let mut best_length = f64::INFINITY;
+            let mut best_cost = f64::INFINITY;
             for candidate in candidates {
                 if path_is_clear(&candidate, &config.blocked_regions) {
                     let length = path_length(&candidate);
-                    if length < best_length {
-                        best_length = length;
+                    let congestion_cost: f64 = candidate
+                        .iter()
+                        .map(|(start, end)| congestion.usage(*start, *end) as f64 * config.congestion_weight)
+                        .sum();
+                    let cost = length + congestion_cost;
+                    if cost < best_cost {
+                        best_cost = cost;
                         best_clear = Some(candidate);
                     }
                 }
@@ -249,6 +295,7 @@ fn shortest_grid_path(
     source: Point,
     sink: Point,
     config: &RoutingConfig,
+    congestion: &CongestionMap,
 ) -> Option<Vec<(Point, Point)>> {
     let points = grid_points(source, sink, config);
     let source_index = points.iter().position(|point| *point == source)?;
@@ -276,7 +323,9 @@ fn shortest_grid_path(
         #[allow(clippy::map_unwrap_or)]
         let adjacent_nodes = adjacency.get(&node).map(Vec::as_slice).unwrap_or(&[]);
         for &(next, weight) in adjacent_nodes {
-            let next_cost = cost + weight;
+            let congestion_penalty =
+                congestion.usage(points[node], points[next]) as f64 * config.congestion_weight;
+            let next_cost = cost + weight + congestion_penalty;
             if next_cost < dist[next] {
                 dist[next] = next_cost;
                 prev[next] = Some(node);
@@ -1014,5 +1063,95 @@ mod tests {
             "RFLOW-FLOW-003"
         );
         assert!(!RouteError::MissingPlacement.suggestion().is_empty());
+    }
+
+    #[test]
+    fn congestion_weight_defaults_to_zero() {
+        let config = RoutingConfig::default();
+        assert_eq!(config.congestion_weight, 0.0);
+    }
+
+    #[test]
+    fn congestion_aware_routing_avoids_shared_path() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+        let e = netlist.add_node(NodeKind::CellInstance, "e");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: d, port: 0 })
+            .expect("c to d");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: e, port: 0 })
+            .expect("b to e");
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 80.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .expect("placement");
+
+        let report_no_congestion = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+
+        let report_with_congestion = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig {
+                    congestion_weight: 50.0,
+                    ..RoutingConfig::default()
+                },
+            )
+            .expect("route");
+
+        assert_eq!(report_no_congestion.routes.len(), 3);
+        assert_eq!(report_with_congestion.routes.len(), 3);
+
+        assert!(report_no_congestion.total_length_um > 0.0);
+        assert!(report_with_congestion.total_length_um > 0.0);
+    }
+
+    #[test]
+    fn congestion_map_tracks_edge_usage() {
+        let mut congestion = CongestionMap::default();
+        let a = Point {
+            x_um: 0.0,
+            y_um: 0.0,
+        };
+        let b = Point {
+            x_um: 40.0,
+            y_um: 0.0,
+        };
+
+        assert_eq!(congestion.usage(a, b), 0);
+        congestion.increment(a, b);
+        assert_eq!(congestion.usage(a, b), 1);
+        congestion.increment(a, b);
+        assert_eq!(congestion.usage(a, b), 2);
+        assert_eq!(congestion.usage(b, a), 0);
+    }
+
+    #[test]
+    fn default_routing_config_has_congestion_weight() {
+        let config = RoutingConfig::default();
+        assert_eq!(config.congestion_weight, 0.0);
+        assert_eq!(config.prefer_ptl_from_length_um, 60.0);
     }
 }
