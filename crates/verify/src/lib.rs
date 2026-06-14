@@ -786,4 +786,459 @@ mod tests {
         assert!(report.equivalent);
         assert_eq!(report.depth, 3);
     }
+
+    #[test]
+    fn verifier_detects_xor_vs_xnor_non_equivalence() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let b_l = lhs.add_node(NodeKind::Port, "b");
+        let xor_l = lhs.add_node_with_logic(NodeKind::CellInstance, "xor0", Some(LogicOp::Xor));
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: xor_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: xor_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: xor_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let b_r = rhs.add_node(NodeKind::Port, "b");
+        let xor_r = rhs.add_node_with_logic(NodeKind::CellInstance, "xor0", Some(LogicOp::Xor));
+        let not_r = rhs.add_node_with_logic(NodeKind::CellInstance, "not0", Some(LogicOp::Not));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: xor_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: xor_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: xor_r,
+                port: 0,
+            },
+            PinRef {
+                node: not_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: not_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_boolean_equivalence(&lhs, &rhs)
+            .expect("equivalence check should run");
+        assert!(!report.equivalent);
+    }
+
+    #[test]
+    fn verifier_multi_level_circuit_equivalence() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let b_l = lhs.add_node(NodeKind::Port, "b");
+        let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let or_l = lhs.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef { node: b_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: or_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef { node: a_l, port: 1 },
+            PinRef {
+                node: or_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: or_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let b_r = rhs.add_node(NodeKind::Port, "b");
+        let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let or_r = rhs.add_node_with_logic(NodeKind::CellInstance, "or0", Some(LogicOp::Or));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef { node: b_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: or_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef { node: a_r, port: 1 },
+            PinRef {
+                node: or_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: or_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_boolean_equivalence(&lhs, &rhs)
+            .expect("equivalence check should run");
+        assert!(report.equivalent);
+        assert_eq!(report.checked_outputs, vec!["out".to_string()]);
+    }
+
+    #[test]
+    fn verifier_multiple_output_equivalence() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let and_l = lhs.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out1_l = lhs.add_node(NodeKind::Port, "out1");
+        let out2_l = lhs.add_node(NodeKind::Port, "out2");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef { node: a_l, port: 1 },
+            PinRef {
+                node: and_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: and_l,
+                port: 0,
+            },
+            PinRef {
+                node: out1_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef { node: a_l, port: 2 },
+            PinRef {
+                node: out2_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out1_r = rhs.add_node(NodeKind::Port, "out1");
+        let out2_r = rhs.add_node(NodeKind::Port, "out2");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef { node: a_r, port: 1 },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out1_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef { node: a_r, port: 2 },
+            PinRef {
+                node: out2_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_boolean_equivalence(&lhs, &rhs)
+            .expect("equivalence check should run");
+        assert!(report.equivalent);
+        assert_eq!(report.checked_outputs.len(), 2);
+    }
+
+    #[test]
+    fn verifier_splitter_passthrough_equivalence() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let a_l = lhs.add_node(NodeKind::Port, "a");
+        let split_l = lhs.add_node(NodeKind::Splitter, "split");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef { node: a_l, port: 0 },
+            PinRef {
+                node: split_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: split_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let a_r = rhs.add_node(NodeKind::Port, "a");
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef { node: a_r, port: 0 },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_boolean_equivalence(&lhs, &rhs)
+            .expect("equivalence check should run");
+        assert!(report.equivalent);
+    }
+
+    #[test]
+    fn bounded_non_equivalent_detected() {
+        let verifier = Verifier::new();
+
+        let mut lhs = Netlist::new();
+        let data_l = lhs.add_node(NodeKind::Port, "data");
+        let clock_l = lhs.add_node(NodeKind::Port, "clock");
+        let dff_l = lhs.add_node(NodeKind::Dff, "state");
+        let out_l = lhs.add_node(NodeKind::Port, "out");
+        lhs.connect(
+            PinRef {
+                node: data_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: clock_l,
+                port: 0,
+            },
+            PinRef {
+                node: dff_l,
+                port: 1,
+            },
+        )
+        .unwrap();
+        lhs.connect(
+            PinRef {
+                node: dff_l,
+                port: 0,
+            },
+            PinRef {
+                node: out_l,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let mut rhs = Netlist::new();
+        let data_r = rhs.add_node(NodeKind::Port, "data");
+        let clock_r = rhs.add_node(NodeKind::Port, "clock");
+        let dff_r = rhs.add_node(NodeKind::Dff, "state");
+        let and_r = rhs.add_node_with_logic(NodeKind::CellInstance, "and0", Some(LogicOp::And));
+        let out_r = rhs.add_node(NodeKind::Port, "out");
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: clock_r,
+                port: 0,
+            },
+            PinRef {
+                node: dff_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: dff_r,
+                port: 0,
+            },
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: data_r,
+                port: 1,
+            },
+            PinRef {
+                node: and_r,
+                port: 1,
+            },
+        )
+        .unwrap();
+        rhs.connect(
+            PinRef {
+                node: and_r,
+                port: 0,
+            },
+            PinRef {
+                node: out_r,
+                port: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verifier
+            .check_bounded_sequential_equivalence(&lhs, &rhs, 3)
+            .expect("bounded check should run");
+        assert!(!report.equivalent);
+    }
 }
