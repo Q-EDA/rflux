@@ -520,8 +520,8 @@ fn quaigh_alignment_fixture_cases() {
         total_recursive_calls += eq.sat_stats.recursive_calls;
         max_elapsed_ns = max_elapsed_ns.max(eq.sat_elapsed_ns);
         assert!(
-            eq.sat_stats.recursive_calls >= 1,
-            "sat stats missing recursive calls for fixture {}",
+            eq.sat_stats.decisions + eq.sat_stats.unit_assignments >= 1,
+            "sat stats missing solver activity for fixture {}",
             case.file_name
         );
 

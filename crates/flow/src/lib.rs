@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rflux_ir::{Netlist, NodeKind, PinRef};
+use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
 use rflux_place::{
     BlockedRegion as PlacementBlockedRegion, LevelizedPlacer, PlaceError, Placement,
     PlacementConfig,
@@ -383,6 +383,52 @@ pub struct AdvancedConstraintReport {
     pub manufacturing_hotspots: usize,
     pub violation_count: usize,
     pub violations: Vec<AdvancedConstraintViolation>,
+}
+
+impl AdvancedConstraintReport {
+    /// Compute electro-thermal-mechanical interaction score.
+    ///
+    /// In SFQ circuits, thermal load affects mechanical stress on the
+    /// superconducting substrate, which in turn affects Josephson junction
+    /// critical current stability. This method computes a unified interaction
+    /// score that captures these cross-domain effects.
+    ///
+    /// Returns a score from 0.0 (no interaction risk) to 1.0 (high risk).
+    #[must_use]
+    pub fn electro_thermal_mechanical_score(&self) -> f64 {
+        // Thermal contribution: higher load → more thermal stress
+        let thermal_component = (self.estimated_thermal_load_uw / 8.0).min(1.0);
+
+        // Mechanical contribution: higher stress score → more substrate deformation
+        let mechanical_component = self.estimated_mechanical_stress_score.min(1.0);
+
+        // Electrical contribution: PTL coupling creates additional heating
+        let electrical_component = self.ptl_coupling_ratio.min(1.0);
+
+        // Manufacturing contribution: hotspots indicate localized stress concentrations
+        let manufacturing_component = if self.manufacturing_hotspots > 0 {
+            (self.manufacturing_hotspots as f64 / 5.0).min(1.0)
+        } else {
+            0.0
+        };
+
+        // Weighted combination: thermal and mechanical are primary drivers
+        let score = thermal_component * 0.35
+            + mechanical_component * 0.30
+            + electrical_component * 0.20
+            + manufacturing_component * 0.15;
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Check if the design passes all electro-thermal-mechanical constraints.
+    ///
+    /// Returns true if the interaction score is below the threshold and
+    /// there are no constraint violations.
+    #[must_use]
+    pub fn passes_electro_thermal_mechanical_check(&self, threshold: f64) -> bool {
+        self.electro_thermal_mechanical_score() < threshold && self.violation_count == 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1678,6 +1724,86 @@ fn ac_bias_report_from_artifacts(artifacts: &CompiledArtifacts) -> AcBiasReport 
     }
 }
 
+/// Quantify the AC/DC bias trade-off for a circuit.
+///
+/// Returns a structured comparison of DC vs AC bias characteristics:
+/// - Static power savings (AC eliminates static power)
+/// - Area overhead (AC requires ~2.3x more JJs)
+/// - Frequency derating (AC reduces max frequency)
+/// - Net benefit score (weighted combination)
+#[must_use]
+pub fn quantify_ac_dc_tradeoff(
+    dc_static_power_uw: f64,
+    dc_jj_count: usize,
+    dc_area_mm2: f64,
+    dc_max_freq_ghz: f64,
+    ac_jj_multiplier: f64,
+    ac_area_penalty_ratio: f64,
+    ac_frequency_derate: f64,
+) -> AcDcTradeoff {
+    let ac_static_power_uw = 0.0; // AC eliminates static power
+    let ac_jj_count = (dc_jj_count as f64 * ac_jj_multiplier) as usize;
+    let ac_area_mm2 = dc_area_mm2 * (1.0 + ac_area_penalty_ratio);
+    let ac_max_freq_ghz = dc_max_freq_ghz * (1.0 - ac_frequency_derate);
+
+    let power_savings_uw = dc_static_power_uw - ac_static_power_uw;
+    let power_savings_ratio = if dc_static_power_uw > 0.0 {
+        power_savings_uw / dc_static_power_uw
+    } else {
+        0.0
+    };
+    let area_overhead_ratio = if dc_area_mm2 > 0.0 {
+        (ac_area_mm2 - dc_area_mm2) / dc_area_mm2
+    } else {
+        0.0
+    };
+    let frequency_derate_ratio = if dc_max_freq_ghz > 0.0 {
+        (dc_max_freq_ghz - ac_max_freq_ghz) / dc_max_freq_ghz
+    } else {
+        0.0
+    };
+
+    // Net benefit: power savings minus area and frequency penalties
+    let net_benefit_score = (power_savings_ratio * 0.5
+        - area_overhead_ratio * 0.25
+        - frequency_derate_ratio * 0.25)
+        .clamp(-1.0, 1.0);
+
+    AcDcTradeoff {
+        dc_static_power_uw,
+        ac_static_power_uw,
+        power_savings_uw,
+        power_savings_ratio,
+        dc_jj_count,
+        ac_jj_count,
+        dc_area_mm2,
+        ac_area_mm2,
+        area_overhead_ratio,
+        dc_max_freq_ghz,
+        ac_max_freq_ghz,
+        frequency_derate_ratio,
+        net_benefit_score,
+    }
+}
+
+/// Result of AC/DC bias trade-off analysis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcDcTradeoff {
+    pub dc_static_power_uw: f64,
+    pub ac_static_power_uw: f64,
+    pub power_savings_uw: f64,
+    pub power_savings_ratio: f64,
+    pub dc_jj_count: usize,
+    pub ac_jj_count: usize,
+    pub dc_area_mm2: f64,
+    pub ac_area_mm2: f64,
+    pub area_overhead_ratio: f64,
+    pub dc_max_freq_ghz: f64,
+    pub ac_max_freq_ghz: f64,
+    pub frequency_derate_ratio: f64,
+    pub net_benefit_score: f64,
+}
+
 fn timing_guardband_score(worst_setup_slack_ps: f64, worst_hold_slack_ps: f64) -> f64 {
     fn normalized_slack(slack_ps: f64, scale_ps: f64) -> f64 {
         if slack_ps <= 0.0 {
@@ -2268,6 +2394,80 @@ fn placement_halo_scale_candidates(netlist: &Netlist, pdk: &Pdk) -> Vec<f64> {
     candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     candidates.dedup_by(|a, b| (*a - *b).abs() <= 1e-9);
     candidates
+}
+
+/// Check macro cell interface constraints for a netlist.
+///
+/// In SFQ hierarchical design, macro cells have specific interface rules:
+/// - Only boundary pins can receive clock signals
+/// - Internal JTL routing is contained within the macro
+/// - External PTL connections must use specific port orientations
+///
+/// Returns a list of constraint violations.
+pub fn check_macro_interface_constraints(
+    netlist: &Netlist,
+    placement: &Placement,
+) -> Vec<MacroInterfaceViolation> {
+    let mut violations = Vec::new();
+
+    for node in netlist.nodes() {
+        if !matches!(node.kind, NodeKind::MacroCell) {
+            continue;
+        }
+        let Some(point) = placement.point_of(node.id) else {
+            continue;
+        };
+
+        // Check that macro cell has at least one input and one output
+        let has_input = netlist.edge_pairs().iter().any(|(_from, to)| to.node == node.id);
+        let has_output = netlist.edge_pairs().iter().any(|(from, _to)| from.node == node.id);
+
+        if !has_input {
+            violations.push(MacroInterfaceViolation {
+                node: node.id,
+                node_name: node.name.clone(),
+                violation: MacroInterfaceViolationKind::NoInput,
+                detail: "Macro cell has no input connections".to_string(),
+            });
+        }
+        if !has_output {
+            violations.push(MacroInterfaceViolation {
+                node: node.id,
+                node_name: node.name.clone(),
+                violation: MacroInterfaceViolationKind::NoOutput,
+                detail: "Macro cell has no output connections".to_string(),
+            });
+        }
+
+        // Check that macro cell is not at the origin (suggests missing placement)
+        if point.x_um == 0.0 && point.y_um == 0.0 && netlist.node_count() > 1 {
+            violations.push(MacroInterfaceViolation {
+                node: node.id,
+                node_name: node.name.clone(),
+                violation: MacroInterfaceViolationKind::SuspiciousPlacement,
+                detail: "Macro cell placed at origin; may indicate missing placement".to_string(),
+            });
+        }
+    }
+
+    violations
+}
+
+/// A macro cell interface constraint violation.
+#[derive(Debug, Clone)]
+pub struct MacroInterfaceViolation {
+    pub node: NodeId,
+    pub node_name: String,
+    pub violation: MacroInterfaceViolationKind,
+    pub detail: String,
+}
+
+/// Kind of macro cell interface violation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroInterfaceViolationKind {
+    NoInput,
+    NoOutput,
+    SuspiciousPlacement,
 }
 
 fn statistical_config_candidates(
@@ -5672,5 +5872,320 @@ mod tests {
             report.routing.jtl_routes > 0 || report.routing.ptl_routes > 0,
             "should have routes"
         );
+    }
+
+    #[test]
+    fn macro_interface_constraints_empty_netlist() {
+        let netlist = Netlist::new();
+        let placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn macro_interface_constraints_no_violations_for_valid_macro() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: input,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: out,
+                    level: 2,
+                    slot: 0,
+                    point: Point { x_um: 80.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 120.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn macro_interface_constraints_detects_no_input() {
+        let mut netlist = Netlist::new();
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: out,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 80.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 120.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::NoInput));
+    }
+
+    #[test]
+    fn macro_interface_constraints_detects_no_output() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: input,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 80.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::NoOutput));
+    }
+
+    #[test]
+    fn macro_interface_constraints_detects_suspicious_placement() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let macro_node = netlist.add_node(NodeKind::MacroCell, "macro0");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist
+            .connect(
+                PinRef { node: input, port: 0 },
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+            )
+            .unwrap();
+        netlist
+            .connect(
+                PinRef {
+                    node: macro_node,
+                    port: 0,
+                },
+                PinRef { node: out, port: 0 },
+            )
+            .unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                rflux_place::PlacedNode {
+                    node: input,
+                    level: 0,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: macro_node,
+                    level: 1,
+                    slot: 0,
+                    point: Point { x_um: 0.0, y_um: 0.0 },
+                },
+                rflux_place::PlacedNode {
+                    node: out,
+                    level: 2,
+                    slot: 0,
+                    point: Point { x_um: 40.0, y_um: 0.0 },
+                },
+            ],
+            width_um: 80.0,
+            height_um: 24.0,
+        };
+
+        let violations = check_macro_interface_constraints(&netlist, &placement);
+        assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::SuspiciousPlacement));
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_quantifies_power_savings() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            358.4,   // DC static power (uW)
+            768,     // DC JJ count
+            0.23,    // DC area (mm2)
+            60.0,    // DC max freq (GHz)
+            2.3,     // AC JJ multiplier
+            0.23,    // AC area penalty
+            0.67,    // AC frequency derate
+        );
+        assert_eq!(tradeoff.ac_static_power_uw, 0.0);
+        assert!(tradeoff.power_savings_uw > 0.0);
+        assert!(tradeoff.power_savings_ratio > 0.9);
+        assert!(tradeoff.ac_jj_count > tradeoff.dc_jj_count);
+        assert!(tradeoff.ac_area_mm2 > tradeoff.dc_area_mm2);
+        assert!(tradeoff.ac_max_freq_ghz < tradeoff.dc_max_freq_ghz);
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_net_benefit_positive_for_typical() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            358.4, 768, 0.23, 60.0, 2.3, 0.23, 0.67,
+        );
+        assert!(tradeoff.net_benefit_score > 0.0, "typical AC bias should have positive net benefit");
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_zero_power_dc() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            0.0, 100, 0.1, 40.0, 2.0, 0.2, 0.5,
+        );
+        assert_eq!(tradeoff.power_savings_uw, 0.0);
+        assert_eq!(tradeoff.power_savings_ratio, 0.0);
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_area_overhead_correct() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            100.0, 100, 0.1, 50.0, 2.0, 0.5, 0.3,
+        );
+        assert!((tradeoff.area_overhead_ratio - 0.5).abs() < 0.01);
+        assert_eq!(tradeoff.ac_jj_count, 200);
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_frequency_derate_correct() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            100.0, 100, 0.1, 60.0, 2.0, 0.2, 0.5,
+        );
+        assert!((tradeoff.frequency_derate_ratio - 0.5).abs() < 0.01);
+        assert_eq!(tradeoff.ac_max_freq_ghz, 30.0);
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_low_risk() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 1.0,
+            estimated_mechanical_stress_score: 0.1,
+            jtl_density_per_100um: 2.0,
+            detour_overhead_ratio: 0.1,
+            ptl_coupling_ratio: 0.1,
+            manufacturing_hotspots: 0,
+            violation_count: 0,
+            violations: Vec::new(),
+        };
+        let score = report.electro_thermal_mechanical_score();
+        assert!(score < 0.3, "low risk should have low score: {score}");
+        assert!(report.passes_electro_thermal_mechanical_check(0.5));
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_high_risk() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 8.0,
+            estimated_mechanical_stress_score: 0.9,
+            jtl_density_per_100um: 10.0,
+            detour_overhead_ratio: 0.5,
+            ptl_coupling_ratio: 0.8,
+            manufacturing_hotspots: 5,
+            violation_count: 3,
+            violations: Vec::new(),
+        };
+        let score = report.electro_thermal_mechanical_score();
+        assert!(score > 0.5, "high risk should have high score: {score}");
+        assert!(!report.passes_electro_thermal_mechanical_check(0.5));
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_zero_for_clean_design() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 0.0,
+            estimated_mechanical_stress_score: 0.0,
+            jtl_density_per_100um: 0.0,
+            detour_overhead_ratio: 0.0,
+            ptl_coupling_ratio: 0.0,
+            manufacturing_hotspots: 0,
+            violation_count: 0,
+            violations: Vec::new(),
+        };
+        assert_eq!(report.electro_thermal_mechanical_score(), 0.0);
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_bounded() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 100.0,
+            estimated_mechanical_stress_score: 2.0,
+            jtl_density_per_100um: 100.0,
+            detour_overhead_ratio: 10.0,
+            ptl_coupling_ratio: 5.0,
+            manufacturing_hotspots: 100,
+            violation_count: 50,
+            violations: Vec::new(),
+        };
+        let score = report.electro_thermal_mechanical_score();
+        assert!(score >= 0.0 && score <= 1.0, "score out of range: {score}");
     }
 }

@@ -4,3 +4,5 @@ __pycache__/
 *.pdb
 target/
 python/rflux/_core.cp312-win_amd64.pyd
+python/rflux/_core.cpython-*.so
+python/rflux/_core.*.pyd

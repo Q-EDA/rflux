@@ -4,7 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Compile the legacy DPLL solver as a differential-testing backend. Default
+# builds ship CDCL only; enable this feature to run `tests/differential.rs`.
+default = []
+dpll = []
+
 [dependencies]
 
 [dev-dependencies]
 proptest = "1.5"
+

@@ -120,11 +120,12 @@ fn dimacs_classic_examples_end_to_end() {
             "unexpected SAT result for fixture {}",
             case.file_name
         );
-        assert!(
-            metrics.stats.recursive_calls >= 1,
-            "recursive call metrics missing for fixture {}",
-            case.file_name
-        );
+        // CDCL replaces DPLL: `recursive_calls` is always 0 under the new
+        // engine. For most fixtures the search makes at least one decision or
+        // unit propagation; but a pure level-0 contradiction (e.g. unit
+        // clauses {1}, {¬1}) resolves before the search loop runs and reports
+        // zero search activity. `elapsed_ns > 0` (checked next) is the
+        // reliable non-triviality signal covering both cases.
         assert!(
             metrics.elapsed_ns > 0,
             "elapsed metrics missing for fixture {}",

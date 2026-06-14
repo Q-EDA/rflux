@@ -1043,6 +1043,7 @@ dependencies = [
 name = "rflux-flow"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "rflux-ir",
  "rflux-place",
  "rflux-route",
@@ -1128,6 +1129,7 @@ dependencies = [
 name = "rflux-sim"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "thiserror",
 ]
 

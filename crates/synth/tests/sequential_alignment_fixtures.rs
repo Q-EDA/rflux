@@ -154,7 +154,7 @@ fn quaigh_alignment_sequential_fixture_cases() {
             case.file_name
         );
         assert!(
-            eq.sat_stats.recursive_calls >= 1,
+            eq.sat_stats.decisions + eq.sat_stats.unit_assignments >= 1,
             "sequential sat stats should be populated for fixture {}",
             case.file_name
         );

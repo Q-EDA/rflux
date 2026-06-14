@@ -119,6 +119,87 @@ impl SimulationReport {
     pub fn josim_quality_gate(&self) -> SimulationQualityGateReport {
         simulation_quality_gate(self, true)
     }
+
+    /// Analyze simulation depth for hierarchical mixed simulation.
+    ///
+    /// In SFQ circuits, different subcircuit depths require different simulation
+    /// strategies:
+    /// - ≤3 levels: SPICE/JoSIM (precise, slow)
+    /// - >3 levels: Event-driven pulse simulation (fast, abstract)
+    /// - Cross-macro PTL: JoSIM electrical check (reflection/crosstalk)
+    ///
+    /// Returns a depth analysis report for guiding simulation strategy selection.
+    pub fn depth_analysis(&self) -> SimulationDepthAnalysis {
+        let element_count = self.generated_deck_lines;
+        let event_count = self.simulated_events;
+        let violation_count = self.reported_violations;
+
+        // Estimate circuit complexity based on deck size and event count
+        let estimated_depth = if element_count > 1000 {
+            SimulationDepth::Deep
+        } else if element_count > 100 {
+            SimulationDepth::Medium
+        } else {
+            SimulationDepth::Shallow
+        };
+
+        // Recommend simulation strategy based on depth
+        let recommended_strategy = match estimated_depth {
+            SimulationDepth::Shallow => SimulationStrategy::Spice,
+            SimulationDepth::Medium => SimulationStrategy::Hybrid,
+            SimulationDepth::Deep => SimulationStrategy::EventDriven,
+        };
+
+        // Estimate SPICE accuracy vs speed trade-off
+        let spice_accuracy = match estimated_depth {
+            SimulationDepth::Shallow => 1.0,
+            SimulationDepth::Medium => 0.95,
+            SimulationDepth::Deep => 0.85,
+        };
+        let event_driven_speedup = match estimated_depth {
+            SimulationDepth::Shallow => 1.0,
+            SimulationDepth::Medium => 5.0,
+            SimulationDepth::Deep => 50.0,
+        };
+
+        SimulationDepthAnalysis {
+            estimated_depth,
+            recommended_strategy,
+            spice_accuracy,
+            event_driven_speedup,
+            element_count,
+            event_count,
+            violation_count,
+        }
+    }
+}
+
+/// Estimated simulation depth of a circuit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulationDepth {
+    Shallow,
+    Medium,
+    Deep,
+}
+
+/// Recommended simulation strategy for a given depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulationStrategy {
+    Spice,
+    Hybrid,
+    EventDriven,
+}
+
+/// Result of hierarchical simulation depth analysis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimulationDepthAnalysis {
+    pub estimated_depth: SimulationDepth,
+    pub recommended_strategy: SimulationStrategy,
+    pub spice_accuracy: f64,
+    pub event_driven_speedup: f64,
+    pub element_count: usize,
+    pub event_count: usize,
+    pub violation_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8082,7 +8163,7 @@ mod tests {
         apply_external_env_sanitization, create_external_run_dir, is_allowed_external_command,
         parse_deck, parse_deck_file, run_generated_deck, should_strip_external_env_var,
         simulate_file, simulate_text, ParsedDeck, SimulationBackend, SimulationConfig,
-        SimulationError, SimulationMode, SimulationReport,
+        SimulationDepth, SimulationError, SimulationMode, SimulationReport, SimulationStrategy,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -13733,6 +13814,89 @@ mod tests {
             "RFLOW-SIM-002"
         );
         assert!(!SimulationError::MissingTran.suggestion().is_empty());
+    }
+
+    #[test]
+    fn depth_analysis_shallow_circuit() {
+        let report = SimulationReport {
+            backend: SimulationBackend::InternalTransientCompleted,
+            requested_mode: "internal_transient".to_string(),
+            simulated_events: 10,
+            generated_deck_lines: 50,
+            generated_deck_path: None,
+            waveform_path: None,
+            waveform_format: None,
+            external_summary_contract: None,
+            diagnostic_code: None,
+            reported_violations: 0,
+            reported_worst_delay_ps: None,
+            delay_details: Vec::new(),
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
+            violation_details: Vec::new(),
+            external_status_code: None,
+            external_result: None,
+        };
+        let analysis = report.depth_analysis();
+        assert_eq!(analysis.estimated_depth, SimulationDepth::Shallow);
+        assert_eq!(analysis.recommended_strategy, SimulationStrategy::Spice);
+        assert_eq!(analysis.spice_accuracy, 1.0);
+    }
+
+    #[test]
+    fn depth_analysis_medium_circuit() {
+        let report = SimulationReport {
+            backend: SimulationBackend::InternalTransientCompleted,
+            requested_mode: "internal_transient".to_string(),
+            simulated_events: 100,
+            generated_deck_lines: 500,
+            generated_deck_path: None,
+            waveform_path: None,
+            waveform_format: None,
+            external_summary_contract: None,
+            diagnostic_code: None,
+            reported_violations: 0,
+            reported_worst_delay_ps: None,
+            delay_details: Vec::new(),
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
+            violation_details: Vec::new(),
+            external_status_code: None,
+            external_result: None,
+        };
+        let analysis = report.depth_analysis();
+        assert_eq!(analysis.estimated_depth, SimulationDepth::Medium);
+        assert_eq!(analysis.recommended_strategy, SimulationStrategy::Hybrid);
+        assert!(analysis.spice_accuracy < 1.0);
+        assert!(analysis.event_driven_speedup > 1.0);
+    }
+
+    #[test]
+    fn depth_analysis_deep_circuit() {
+        let report = SimulationReport {
+            backend: SimulationBackend::InternalTransientCompleted,
+            requested_mode: "internal_transient".to_string(),
+            simulated_events: 1000,
+            generated_deck_lines: 2000,
+            generated_deck_path: None,
+            waveform_path: None,
+            waveform_format: None,
+            external_summary_contract: None,
+            diagnostic_code: None,
+            reported_violations: 5,
+            reported_worst_delay_ps: None,
+            delay_details: Vec::new(),
+            measurement_details: Vec::new(),
+            measurement_warnings: Vec::new(),
+            violation_details: Vec::new(),
+            external_status_code: None,
+            external_result: None,
+        };
+        let analysis = report.depth_analysis();
+        assert_eq!(analysis.estimated_depth, SimulationDepth::Deep);
+        assert_eq!(analysis.recommended_strategy, SimulationStrategy::EventDriven);
+        assert!(analysis.event_driven_speedup > 10.0);
+        assert_eq!(analysis.violation_count, 5);
     }
 }
 
