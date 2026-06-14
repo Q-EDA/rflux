@@ -1678,6 +1678,86 @@ fn ac_bias_report_from_artifacts(artifacts: &CompiledArtifacts) -> AcBiasReport 
     }
 }
 
+/// Quantify the AC/DC bias trade-off for a circuit.
+///
+/// Returns a structured comparison of DC vs AC bias characteristics:
+/// - Static power savings (AC eliminates static power)
+/// - Area overhead (AC requires ~2.3x more JJs)
+/// - Frequency derating (AC reduces max frequency)
+/// - Net benefit score (weighted combination)
+#[must_use]
+pub fn quantify_ac_dc_tradeoff(
+    dc_static_power_uw: f64,
+    dc_jj_count: usize,
+    dc_area_mm2: f64,
+    dc_max_freq_ghz: f64,
+    ac_jj_multiplier: f64,
+    ac_area_penalty_ratio: f64,
+    ac_frequency_derate: f64,
+) -> AcDcTradeoff {
+    let ac_static_power_uw = 0.0; // AC eliminates static power
+    let ac_jj_count = (dc_jj_count as f64 * ac_jj_multiplier) as usize;
+    let ac_area_mm2 = dc_area_mm2 * (1.0 + ac_area_penalty_ratio);
+    let ac_max_freq_ghz = dc_max_freq_ghz * (1.0 - ac_frequency_derate);
+
+    let power_savings_uw = dc_static_power_uw - ac_static_power_uw;
+    let power_savings_ratio = if dc_static_power_uw > 0.0 {
+        power_savings_uw / dc_static_power_uw
+    } else {
+        0.0
+    };
+    let area_overhead_ratio = if dc_area_mm2 > 0.0 {
+        (ac_area_mm2 - dc_area_mm2) / dc_area_mm2
+    } else {
+        0.0
+    };
+    let frequency_derate_ratio = if dc_max_freq_ghz > 0.0 {
+        (dc_max_freq_ghz - ac_max_freq_ghz) / dc_max_freq_ghz
+    } else {
+        0.0
+    };
+
+    // Net benefit: power savings minus area and frequency penalties
+    let net_benefit_score = (power_savings_ratio * 0.5
+        - area_overhead_ratio * 0.25
+        - frequency_derate_ratio * 0.25)
+        .clamp(-1.0, 1.0);
+
+    AcDcTradeoff {
+        dc_static_power_uw,
+        ac_static_power_uw,
+        power_savings_uw,
+        power_savings_ratio,
+        dc_jj_count,
+        ac_jj_count,
+        dc_area_mm2,
+        ac_area_mm2,
+        area_overhead_ratio,
+        dc_max_freq_ghz,
+        ac_max_freq_ghz,
+        frequency_derate_ratio,
+        net_benefit_score,
+    }
+}
+
+/// Result of AC/DC bias trade-off analysis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcDcTradeoff {
+    pub dc_static_power_uw: f64,
+    pub ac_static_power_uw: f64,
+    pub power_savings_uw: f64,
+    pub power_savings_ratio: f64,
+    pub dc_jj_count: usize,
+    pub ac_jj_count: usize,
+    pub dc_area_mm2: f64,
+    pub ac_area_mm2: f64,
+    pub area_overhead_ratio: f64,
+    pub dc_max_freq_ghz: f64,
+    pub ac_max_freq_ghz: f64,
+    pub frequency_derate_ratio: f64,
+    pub net_benefit_score: f64,
+}
+
 fn timing_guardband_score(worst_setup_slack_ps: f64, worst_hold_slack_ps: f64) -> f64 {
     fn normalized_slack(slack_ps: f64, scale_ps: f64) -> f64 {
         if slack_ps <= 0.0 {
@@ -5942,5 +6022,59 @@ mod tests {
 
         let violations = check_macro_interface_constraints(&netlist, &placement);
         assert!(violations.iter().any(|v| v.violation == MacroInterfaceViolationKind::SuspiciousPlacement));
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_quantifies_power_savings() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            358.4,   // DC static power (uW)
+            768,     // DC JJ count
+            0.23,    // DC area (mm2)
+            60.0,    // DC max freq (GHz)
+            2.3,     // AC JJ multiplier
+            0.23,    // AC area penalty
+            0.67,    // AC frequency derate
+        );
+        assert_eq!(tradeoff.ac_static_power_uw, 0.0);
+        assert!(tradeoff.power_savings_uw > 0.0);
+        assert!(tradeoff.power_savings_ratio > 0.9);
+        assert!(tradeoff.ac_jj_count > tradeoff.dc_jj_count);
+        assert!(tradeoff.ac_area_mm2 > tradeoff.dc_area_mm2);
+        assert!(tradeoff.ac_max_freq_ghz < tradeoff.dc_max_freq_ghz);
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_net_benefit_positive_for_typical() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            358.4, 768, 0.23, 60.0, 2.3, 0.23, 0.67,
+        );
+        assert!(tradeoff.net_benefit_score > 0.0, "typical AC bias should have positive net benefit");
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_zero_power_dc() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            0.0, 100, 0.1, 40.0, 2.0, 0.2, 0.5,
+        );
+        assert_eq!(tradeoff.power_savings_uw, 0.0);
+        assert_eq!(tradeoff.power_savings_ratio, 0.0);
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_area_overhead_correct() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            100.0, 100, 0.1, 50.0, 2.0, 0.5, 0.3,
+        );
+        assert!((tradeoff.area_overhead_ratio - 0.5).abs() < 0.01);
+        assert_eq!(tradeoff.ac_jj_count, 200);
+    }
+
+    #[test]
+    fn ac_dc_tradeoff_frequency_derate_correct() {
+        let tradeoff = quantify_ac_dc_tradeoff(
+            100.0, 100, 0.1, 60.0, 2.0, 0.2, 0.5,
+        );
+        assert!((tradeoff.frequency_derate_ratio - 0.5).abs() < 0.01);
+        assert_eq!(tradeoff.ac_max_freq_ghz, 30.0);
     }
 }
