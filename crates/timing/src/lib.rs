@@ -118,6 +118,54 @@ pub struct TimingReport {
     pub false_path_arcs: usize,
 }
 
+/// Recommendation for fixing a single hold violation arc.
+///
+/// In SFQ circuits, hold violations are fixed by inserting JTL segments of
+/// precise length to add delay on the data path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldFixRecommendation {
+    /// The source pin of the violating arc.
+    pub from: PinRef,
+    /// The sink pin of the violating arc.
+    pub to: PinRef,
+    /// The current hold slack (negative means violation).
+    pub hold_slack_ps: f64,
+    /// The additional delay needed to fix the violation (positive value).
+    pub required_delay_ps: f64,
+    /// The recommended JTL length in micrometers to achieve the required delay.
+    /// Computed as: required_delay_ps / jtl_delay_per_um.
+    pub recommended_jtl_length_um: f64,
+}
+
+impl TimingReport {
+    /// Compute hold fix recommendations for all violating arcs.
+    ///
+    /// For each arc with negative hold slack, recommends the JTL segment length
+    /// needed to eliminate the violation. The `jtl_delay_per_um` parameter
+    /// specifies the JTL delay in ps/um from the PDK interconnect model.
+    #[must_use]
+    pub fn hold_fix_recommendations(&self, jtl_delay_per_um: f64) -> Vec<HoldFixRecommendation> {
+        if jtl_delay_per_um <= 0.0 {
+            return Vec::new();
+        }
+        self.arcs
+            .iter()
+            .filter(|arc| arc.hold_slack_ps < 0.0 && !arc.is_false_path)
+            .map(|arc| {
+                let required_delay_ps = -arc.hold_slack_ps;
+                let recommended_jtl_length_um = required_delay_ps / jtl_delay_per_um;
+                HoldFixRecommendation {
+                    from: arc.from,
+                    to: arc.to,
+                    hold_slack_ps: arc.hold_slack_ps,
+                    required_delay_ps,
+                    recommended_jtl_length_um,
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 /// Configuration for statistical static timing analysis (SSTA).
 pub struct StatisticalTimingConfig {
@@ -3052,5 +3100,167 @@ mod tests {
             "RFLOW-PDK-003"
         );
         assert!(!TimingError::CyclicNetlist.suggestion().is_empty());
+    }
+
+    #[test]
+    fn hold_fix_recommendations_empty_when_no_violations() {
+        let report = TimingReport {
+            arcs: Vec::new(),
+            worst_setup_slack_ps: 10.0,
+            worst_hold_slack_ps: 2.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 12.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 0,
+            false_path_arcs: 0,
+        };
+        let recs = report.hold_fix_recommendations(0.5);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn hold_fix_recommendations_for_violating_arc() {
+        let report = TimingReport {
+            arcs: vec![TimingArcReport {
+                from: PinRef {
+                    node: rflux_ir::NodeId(0),
+                    port: 0,
+                },
+                to: PinRef {
+                    node: rflux_ir::NodeId(1),
+                    port: 0,
+                },
+                is_false_path: false,
+                driver_kind: rflux_tech::SfCellKind::GenericGate,
+                route_mode: rflux_route::RouteMode::Jtl,
+                route_length_um: 20.0,
+                cell_delay_ps: 8.0,
+                wire_delay_ps: 2.0,
+                launch_phase: 0,
+                capture_phase: 0,
+                launch_window_start_ps: 0.0,
+                launch_window_end_ps: 4.0,
+                capture_window_start_ps: 0.0,
+                capture_window_end_ps: 4.0,
+                arrival_phase_offset_ps: 1.0,
+                capture_window_slack_ps: 3.0,
+                capture_window_violation: false,
+                arrival_ps: 10.0,
+                required_ps: 12.0,
+                setup_slack_ps: 2.0,
+                hold_slack_ps: -3.0,
+            }],
+            worst_setup_slack_ps: 2.0,
+            worst_hold_slack_ps: -3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: -3.0,
+            critical_path_delay_ps: 10.0,
+            setup_violations: 0,
+            hold_violations: 1,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+        };
+        let recs = report.hold_fix_recommendations(0.5);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].required_delay_ps, 3.0);
+        assert_eq!(recs[0].recommended_jtl_length_um, 6.0);
+    }
+
+    #[test]
+    fn hold_fix_recommendations_skips_false_paths() {
+        let report = TimingReport {
+            arcs: vec![TimingArcReport {
+                from: PinRef {
+                    node: rflux_ir::NodeId(0),
+                    port: 0,
+                },
+                to: PinRef {
+                    node: rflux_ir::NodeId(1),
+                    port: 0,
+                },
+                is_false_path: true,
+                driver_kind: rflux_tech::SfCellKind::GenericGate,
+                route_mode: rflux_route::RouteMode::Jtl,
+                route_length_um: 20.0,
+                cell_delay_ps: 8.0,
+                wire_delay_ps: 2.0,
+                launch_phase: 0,
+                capture_phase: 0,
+                launch_window_start_ps: 0.0,
+                launch_window_end_ps: 4.0,
+                capture_window_start_ps: 0.0,
+                capture_window_end_ps: 4.0,
+                arrival_phase_offset_ps: 1.0,
+                capture_window_slack_ps: 3.0,
+                capture_window_violation: false,
+                arrival_ps: 10.0,
+                required_ps: 12.0,
+                setup_slack_ps: 2.0,
+                hold_slack_ps: -5.0,
+            }],
+            worst_setup_slack_ps: 2.0,
+            worst_hold_slack_ps: -5.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: -5.0,
+            critical_path_delay_ps: 10.0,
+            setup_violations: 0,
+            hold_violations: 1,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 1,
+        };
+        let recs = report.hold_fix_recommendations(0.5);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn hold_fix_recommendations_empty_for_zero_jtl_delay() {
+        let report = TimingReport {
+            arcs: vec![TimingArcReport {
+                from: PinRef {
+                    node: rflux_ir::NodeId(0),
+                    port: 0,
+                },
+                to: PinRef {
+                    node: rflux_ir::NodeId(1),
+                    port: 0,
+                },
+                is_false_path: false,
+                driver_kind: rflux_tech::SfCellKind::GenericGate,
+                route_mode: rflux_route::RouteMode::Jtl,
+                route_length_um: 20.0,
+                cell_delay_ps: 8.0,
+                wire_delay_ps: 2.0,
+                launch_phase: 0,
+                capture_phase: 0,
+                launch_window_start_ps: 0.0,
+                launch_window_end_ps: 4.0,
+                capture_window_start_ps: 0.0,
+                capture_window_end_ps: 4.0,
+                arrival_phase_offset_ps: 1.0,
+                capture_window_slack_ps: 3.0,
+                capture_window_violation: false,
+                arrival_ps: 10.0,
+                required_ps: 12.0,
+                setup_slack_ps: 2.0,
+                hold_slack_ps: -3.0,
+            }],
+            worst_setup_slack_ps: 2.0,
+            worst_hold_slack_ps: -3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: -3.0,
+            critical_path_delay_ps: 10.0,
+            setup_violations: 0,
+            hold_violations: 1,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+        };
+        let recs = report.hold_fix_recommendations(0.0);
+        assert!(recs.is_empty());
     }
 }
