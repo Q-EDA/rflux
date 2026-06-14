@@ -260,7 +260,7 @@ jobs:
           cargo deny check advisories bans licenses sources
 
       - name: Upload Week 3 quality artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: week3-quality-baseline
           if-no-files-found: error
@@ -295,7 +295,7 @@ jobs:
             python/tests/benchmarks/week3/inputs/sim_summary.golden.json
 
       - name: Upload SAT and synth metric artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sat-and-synth-metrics
           if-no-files-found: error
@@ -304,7 +304,7 @@ jobs:
             target/quaigh_fixture_sat_metrics.csv
 
       - name: Upload waveform baseline status snapshot
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: waveform-baseline-status
           if-no-files-found: error
@@ -313,7 +313,7 @@ jobs:
             target/waveform-baseline-status/linux.json
 
       - name: Upload CLI performance baseline snapshot
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cli-perf-baseline
           if-no-files-found: error
@@ -455,7 +455,7 @@ jobs:
           uv run python python/scripts/prepare_external_warning_artifacts.py --result-dir target/external-warning-manifest --artifact-dir target/external-warning-review --josim-command "$env:RFLOW_JOSIM_COMMAND" --github-workflow "${{ github.workflow }}" --github-job "waveform-compare-gate" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
 
       - name: Upload waveform compare artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: waveform-compare-results
           if-no-files-found: error
@@ -578,7 +578,7 @@ jobs:
           uv run python python/scripts/prepare_external_warning_artifacts.py --result-dir target/external-warning-manifest-linux --artifact-dir target/external-warning-review-linux --josim-command "$RFLOW_JOSIM_COMMAND" --github-workflow "${{ github.workflow }}" --github-job "waveform-compare-gate-linux-optional" --github-event-name "${{ github.event_name }}" --github-run-id "${{ github.run_id }}" --github-run-attempt "${{ github.run_attempt }}" --github-sha "${{ github.sha }}" --github-ref-name "${{ github.ref_name }}"
 
       - name: Upload Linux waveform compare artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: waveform-compare-results-linux
           if-no-files-found: error
@@ -640,7 +640,7 @@ jobs:
             --fail-on-regression
 
       - name: Upload CLI performance regression artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cli-perf-regression-gate
           if-no-files-found: error
@@ -667,7 +667,7 @@ jobs:
             --warmup "${{ inputs.cli_perf_warmup }}"
 
       - name: Upload CLI performance candidate baseline
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cli-perf-baseline-candidate
           if-no-files-found: error
@@ -703,7 +703,7 @@ jobs:
             --github-ref-name "${{ github.ref_name }}"
 
       - name: Upload compliance artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-compliance-baseline
           if-no-files-found: error
@@ -741,7 +741,7 @@ jobs:
             --github-ref-name "${{ github.ref_name }}"
 
       - name: Upload release artifact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-candidate-artifacts
           if-no-files-found: error
