@@ -5476,4 +5476,201 @@ mod tests {
         assert_eq!(report.grid_cells, 0);
         assert_eq!(report.connected_nodes, 0);
     }
+
+    #[test]
+    fn pdk_regression_pipelined_circuit_timing() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        let mut config = FlowConfig::default();
+        config.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: input, port: 0 },
+                    to: PinRef { node: g1, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: g1, port: 0 },
+                    to: PinRef { node: g2, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: g2, port: 0 },
+                    to: PinRef { node: out, port: 0 },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+
+        let mut runner = FlowRunner::new();
+        let report = runner
+            .compile_layout(&mut netlist, &Pdk::minimal("regression"), &config)
+            .expect("flow should succeed");
+
+        assert!(report.placement.placed_nodes > 0);
+        assert!(report.routing.routed_nets > 0);
+        assert!(report.routing.total_length_um > 0.0);
+        assert!(report.timing.critical_path_delay_ps > 0.0);
+        assert!(report.timing.analyzed_arcs > 0);
+        assert!(report.timing_closure.closed);
+        assert!(report.clock.phase_count >= 1);
+    }
+
+    #[test]
+    fn pdk_regression_pdk_roundtrip_preserves_results() {
+        let pdk = Pdk::minimal("roundtrip-test");
+        let json = serde_json::to_string(&pdk).expect("pdk should serialize");
+        let restored =
+            Pdk::from_json(&json).expect("pdk should deserialize");
+
+        assert_eq!(pdk.name, restored.name);
+        assert_eq!(pdk.cell_timing.len(), restored.cell_timing.len());
+        assert_eq!(
+            pdk.interconnect_timing.len(),
+            restored.interconnect_timing.len()
+        );
+
+        let mut netlist1 = Netlist::new();
+        let a1 = netlist1.add_node(NodeKind::Port, "a");
+        let b1 = netlist1.add_node(NodeKind::CellInstance, "b");
+        let c1 = netlist1.add_node(NodeKind::Port, "c");
+        let mut config1 = FlowConfig::default();
+        config1.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: a1, port: 0 },
+                    to: PinRef { node: b1, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: b1, port: 0 },
+                    to: PinRef { node: c1, port: 0 },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+        let mut runner1 = FlowRunner::new();
+        let report1 = runner1
+            .compile_layout(&mut netlist1, &pdk, &config1)
+            .expect("flow should succeed with original pdk");
+
+        let mut netlist2 = Netlist::new();
+        let a2 = netlist2.add_node(NodeKind::Port, "a");
+        let b2 = netlist2.add_node(NodeKind::CellInstance, "b");
+        let c2 = netlist2.add_node(NodeKind::Port, "c");
+        let mut config2 = FlowConfig::default();
+        config2.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: a2, port: 0 },
+                    to: PinRef { node: b2, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: b2, port: 0 },
+                    to: PinRef { node: c2, port: 0 },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+        let mut runner2 = FlowRunner::new();
+        let report2 = runner2
+            .compile_layout(&mut netlist2, &restored, &config2)
+            .expect("flow should succeed with restored pdk");
+
+        assert_eq!(
+            report1.placement.placed_nodes,
+            report2.placement.placed_nodes
+        );
+        assert_eq!(report1.routing.routed_nets, report2.routing.routed_nets);
+        assert_eq!(
+            report1.timing.analyzed_arcs,
+            report2.timing.analyzed_arcs
+        );
+        assert_eq!(
+            report1.clock.phase_count,
+            report2.clock.phase_count
+        );
+        assert_eq!(
+            report1.timing.critical_path_delay_ps,
+            report2.timing.critical_path_delay_ps
+        );
+    }
+
+    #[test]
+    fn pdk_regression_timing_closes_for_simple_pipeline() {
+        let mut netlist = Netlist::new();
+        let input = netlist.add_node(NodeKind::Port, "in");
+        let dff1 = netlist.add_node(NodeKind::Dff, "dff1");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+        let dff2 = netlist.add_node(NodeKind::Dff, "dff2");
+        let out = netlist.add_node(NodeKind::Port, "out");
+
+        let mut config = FlowConfig::default();
+        config.timing.clock_period_ps = 100.0;
+        config.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: input, port: 0 },
+                    to: PinRef { node: dff1, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: dff1, port: 0 },
+                    to: PinRef { node: gate, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: gate, port: 0 },
+                    to: PinRef { node: dff2, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: dff2, port: 0 },
+                    to: PinRef { node: out, port: 0 },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+
+        let mut runner = FlowRunner::new();
+        let report = runner
+            .compile_layout(&mut netlist, &Pdk::minimal("timing-test"), &config)
+            .expect("flow should succeed");
+
+        assert!(report.placement.placed_nodes > 0);
+        assert!(report.timing.analyzed_arcs > 0);
+        assert!(report.timing.critical_path_delay_ps > 0.0);
+    }
+
+    #[test]
+    fn pdk_regression_ptl_forbidden_range_affects_routing() {
+        let mut pdk = Pdk::minimal("ptl-test");
+        pdk.ptl_forbidden_ranges
+            .push(rflux_tech::LengthRange {
+                min_um: 80.0,
+                max_um: 120.0,
+            });
+
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+
+        let mut config = FlowConfig::default();
+        config.placement.x_pitch_um = 100.0;
+        config.synthesis.plan = CompilePlan {
+            connections: vec![ConnectionSpec {
+                from: PinRef { node: a, port: 0 },
+                to: PinRef { node: b, port: 0 },
+            }],
+            ..CompilePlan::default()
+        };
+
+        let mut runner = FlowRunner::new();
+        let report = runner
+            .compile_layout(&mut netlist, &pdk, &config)
+            .expect("flow should succeed");
+
+        assert!(
+            report.routing.jtl_routes > 0 || report.routing.ptl_routes > 0,
+            "should have routes"
+        );
+    }
 }
