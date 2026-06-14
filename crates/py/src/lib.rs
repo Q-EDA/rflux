@@ -3426,6 +3426,21 @@ fn build_bias_grid(circuit: PyRef<'_, Circuit>) -> PyResult<HashMap<String, f64>
 }
 #[pymodule]
 fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_module(m)
+}
+
+/// Register every `#[pyclass]` and `#[pyfunction]` exposed by the `_core`
+/// extension module.
+///
+/// Split out from `#[pymodule]` so that an inline `#[cfg(test)]` smoke test can
+/// call it without going through the C-level `PyInit__core` symbol. This guards
+/// against two whole classes of regression that would otherwise only surface at
+/// Python import time:
+///   * a `#[pyfunction]` / `#[pyclass]` added to the source but forgotten in the
+///     registration list;
+///   * a registration line accidentally duplicated (PyO3 allows duplicates by
+///     silent overwrite, which is easy to miss in review).
+fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Circuit>()?;
     m.add_class::<PyPinRef>()?;
     m.add_class::<PyConnectionSpec>()?;
@@ -3507,7 +3522,172 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_clock_tree, m)?)?;
     m.add_function(wrap_pyfunction!(build_bias_grid, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(build_clock_tree, m)?)?;
-    m.add_function(wrap_pyfunction!(build_bias_grid, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Static registration guards for the `_core` extension module.
+    //!
+    //! These scans run without an embedded Python interpreter (which avoids the
+    //! `extension-module` + `auto-initialize` link conflict on macOS/Linux).
+    //! They guard the specific regressions that PyO3 0.22 fails to catch at
+    //! compile time and that only surface at `import rflux` on the user side:
+    //!
+    //!   * a `#[pyfunction]` / `#[pyclass]` whose `add_function` / `add_class`
+    //!     registration line was accidentally deleted — the item compiles but
+    //!     is invisible from Python;
+    //!   * a registration line that was duplicated — PyO3 silently overwrites
+    //!     the earlier binding. This previously happened with
+    //!     `build_clock_tree` / `build_bias_grid`, which is the bug these tests
+    //!     exist to prevent.
+    //!
+    //! The behavioral contract (every expected symbol is actually importable)
+    //! is enforced separately by
+    //! `python/tests/test_python_api_surface_contract.py`, which compares the
+    //! live `_core` surface against a checked-in golden file.
+    use std::collections::HashSet;
+
+    const SOURCE: &str = include_str!("lib.rs");
+
+    /// Pull `(visibility) struct Name` declarations that follow a
+    /// `#[pyclass]` attribute (allowing for intervening `#[pyo3(...)]` /
+    /// `#[derive(...)]` lines), returning the struct identifier.
+    fn pyclass_names() -> Vec<&'static str> {
+        let lines = SOURCE.lines().collect::<Vec<_>>();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_start() != "#[pyclass]" && !line.trim_start().starts_with("#[pyclass(") {
+                continue;
+            }
+            // Scan forward through attribute lines to the struct declaration.
+            for follow in lines[i + 1..].iter().take(6) {
+                let t = follow.trim_start();
+                if t.starts_with("#[") || t.is_empty() {
+                    continue;
+                }
+                if let Some(name) = t
+                    .strip_prefix("pub struct ")
+                    .or_else(|| t.strip_prefix("struct "))
+                {
+                    out.push(name.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or(""));
+                }
+                break;
+            }
+        }
+        out
+    }
+
+    /// Pull function names declared with `#[pyfunction]`, allowing for an
+    /// intervening `#[pyo3(signature = ...)]` line.
+    fn pyfunction_names() -> Vec<&'static str> {
+        let lines = SOURCE.lines().collect::<Vec<_>>();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_start() != "#[pyfunction]" && !line.trim_start().starts_with("#[pyfunction(") {
+                continue;
+            }
+            for follow in lines[i + 1..].iter().take(4) {
+                let t = follow.trim_start();
+                if t.starts_with("#[") || t.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = t.strip_prefix("pub fn ").or_else(|| t.strip_prefix("fn ")) {
+                    out.push(rest.trim_start_matches("pub ").split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or(""));
+                }
+                break;
+            }
+        }
+        out
+    }
+
+    fn registered_classes() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for line in SOURCE.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("m.add_class::<") {
+                // "Circuit>()?" -> "Circuit"
+                out.push(rest.split('>').next().unwrap_or("").trim());
+            }
+        }
+        out
+    }
+
+    fn registered_functions() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let lines = SOURCE.lines().collect::<Vec<_>>();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            // Match `m.add_function(wrap_pyfunction!(NAME, m)?)?;` and the
+            // multi-line form `m.add_function(wrap_pyfunction!(\n  NAME, m\n)?)?;`.
+            if t.starts_with("m.add_function(wrap_pyfunction!(") {
+                let after = &t["m.add_function(wrap_pyfunction!(".len()..];
+                // Single-line form: `NAME, m)?)?;`
+                if let Some(name) = after.split(',').next() {
+                    let name = name.trim().trim_end_matches('(');
+                    if !name.is_empty() {
+                        out.push(name);
+                        continue;
+                    }
+                }
+                // Multi-line form: name is the first non-empty token on next line.
+                for follow in lines[i + 1..].iter().take(2) {
+                    let f = follow.trim().trim_end_matches(',');
+                    if !f.is_empty() {
+                        out.push(f);
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_class_registration_is_duplicated() {
+        let names = registered_classes();
+        let mut seen = HashSet::new();
+        for name in &names {
+            assert!(
+                seen.insert(name),
+                "add_class::<{name}>() is registered more than once in register_module; \
+                 PyO3 silently overwrites the earlier binding",
+            );
+        }
+    }
+
+    #[test]
+    fn no_function_registration_is_duplicated() {
+        let names = registered_functions();
+        let mut seen = HashSet::new();
+        for name in &names {
+            assert!(
+                seen.insert(name),
+                "add_function(wrap_pyfunction!({name}, m)) is registered more than once \
+                 in register_module; PyO3 silently overwrites the earlier binding",
+            );
+        }
+    }
+
+    #[test]
+    fn every_pyclass_is_registered() {
+        let declared: HashSet<&str> = pyclass_names().into_iter().collect();
+        let registered: HashSet<&str> = registered_classes().into_iter().collect();
+        let missing: Vec<&&str> = declared.difference(&registered).collect();
+        assert!(
+            missing.is_empty(),
+            "these #[pyclass] structs are not registered in register_module: {missing:?}",
+        );
+    }
+
+    #[test]
+    fn every_pyfunction_is_registered() {
+        let declared: HashSet<&str> = pyfunction_names().into_iter().collect();
+        let registered: HashSet<&str> = registered_functions().into_iter().collect();
+        let missing: Vec<&&str> = declared.difference(&registered).collect();
+        assert!(
+            missing.is_empty(),
+            "these #[pyfunction]s are not registered in register_module: {missing:?}",
+        );
+    }
 }

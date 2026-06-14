@@ -87,10 +87,12 @@
         "pdk",
         "sim",
         "timing",
+        "build_clock_tree",
+        "build_bias_grid",
         "verify_layout",
         "verify"
       ],
-      "exported_count": 86,
+      "exported_count": 88,
       "module": "rflux",
       "symbols": [
         {
@@ -511,6 +513,16 @@
         },
         {
           "kind": "callable",
+          "name": "build_clock_tree",
+          "signature": "(circuit)"
+        },
+        {
+          "kind": "callable",
+          "name": "build_bias_grid",
+          "signature": "(circuit)"
+        },
+        {
+          "kind": "callable",
           "name": "verify_layout",
           "signature": "(circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, simulation_mode: str = 'auto', external_command: str | None = None) -> rflux._types.VerificationReport"
         },
@@ -554,9 +566,11 @@
         "merge_characterized_library",
         "optimize_ac_bias",
         "optimize_ac_bias_with_characterized_library",
-        "optimize_design_with_characterized_library"
+        "optimize_design_with_characterized_library",
+        "build_clock_tree",
+        "build_bias_grid"
       ],
-      "exported_count": 33,
+      "exported_count": 35,
       "module": "rflux.flow",
       "symbols": [
         {
@@ -723,6 +737,16 @@
           "kind": "callable",
           "name": "optimize_design_with_characterized_library",
           "signature": "(circuit, characterized_library_entries: list[str], plan: rflux._types.CompilePlan | None = None, fixed_nodes: list[rflux._types.FixedNodePlacement] | None = None, blocked_regions: list[rflux._types.BlockedRegion] | None = None, timing_constraints: list[rflux._types.NodeTimingConstraint] | None = None, pin_timing_constraints: list[rflux._types.PinTimingConstraint] | None = None, clock_domains: list | None = None, crossing_constraints: list | None = None, max_estimated_thermal_load_uw: float = 8.0, max_estimated_mechanical_stress_score: float = 0.75, max_jtl_density_per_100um: float = 8.0, max_detour_overhead_ratio: float = 0.35, max_ptl_coupling_ratio: float = 0.65, cell_delay_sigma_ratio: float = 0.05, wire_delay_sigma_ratio: float = 0.05, global_cell_delay_sigma_ratio: float = 0.0, global_wire_delay_sigma_ratio: float = 0.0, clock_uncertainty_sigma_ps: float = 0.0, cross_domain_uncertainty_sigma_ps: float = 0.0, max_delay_cross_domain_uncertainty_sigma_ps: float = 0.0, multicycle_cross_domain_uncertainty_sigma_ps: float = 0.0, sigma_multiplier: float = 3.0) -> rflux._types.LibraryAwareDesignOptimizationReport"
+        },
+        {
+          "kind": "callable",
+          "name": "build_clock_tree",
+          "signature": "(circuit)"
+        },
+        {
+          "kind": "callable",
+          "name": "build_bias_grid",
+          "signature": "(circuit)"
         }
       ]
     },
