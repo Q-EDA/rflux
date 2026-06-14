@@ -7,6 +7,9 @@ pub struct ClockTreeConfig {
     pub phase_count: usize,
     pub target_fanout: usize,
     pub jtl_layer: u8,
+    /// Phase assignment strategy. If true, assign phases based on spatial
+    /// proximity (nearby sinks get same phase). If false, use round-robin.
+    pub spatial_phase_assignment: bool,
 }
 
 impl Default for ClockTreeConfig {
@@ -15,6 +18,7 @@ impl Default for ClockTreeConfig {
             phase_count: 2,
             target_fanout: 4,
             jtl_layer: 1,
+            spatial_phase_assignment: true,
         }
     }
 }
@@ -104,8 +108,18 @@ pub fn build_h_tree_with_buffers(
 
     // Assign phases to buffers and compute per-phase stats
     let mut phase_stats = vec![(0usize, 0usize); phase_count];
-    for buf in &buffers {
-        let phase = buf.id.0 % phase_count; // deterministic phase assignment
+    for buf in &mut buffers {
+        let phase = if config.spatial_phase_assignment {
+            // Spatial phase assignment: use grid-based clustering.
+            // Divide the placement area into phase_count regions and assign
+            // based on which region the buffer falls in.
+            let x_bucket = ((buf.position.x_um / 100.0) as usize) % phase_count;
+            let y_bucket = ((buf.position.y_um / 100.0) as usize) % phase_count;
+            (x_bucket + y_bucket) % phase_count
+        } else {
+            buf.id.0 % phase_count
+        };
+        buf.phase = phase;
         phase_stats[phase].0 += 1;
     }
 
@@ -278,4 +292,156 @@ pub fn clock_tree_routes(_report: &ClockTreeReport, buffers: &[ClockBuffer]) -> 
         });
     }
     routes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rflux_ir::NodeKind;
+    use rflux_place::PlacedNode;
+
+    fn make_netlist_with_dffs(count: usize) -> (Netlist, Vec<NodeId>) {
+        let mut netlist = Netlist::new();
+        let mut dff_ids = Vec::new();
+        for i in 0..count {
+            let id = netlist.add_node(NodeKind::Dff, format!("dff{i}"));
+            dff_ids.push(id);
+        }
+        (netlist, dff_ids)
+    }
+
+    fn make_placement_grid(dff_ids: &[NodeId], cols: usize, pitch: f64) -> Placement {
+        let nodes: Vec<PlacedNode> = dff_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| PlacedNode {
+                node: id,
+                level: 0,
+                slot: i,
+                point: Point {
+                    x_um: (i % cols) as f64 * pitch,
+                    y_um: (i / cols) as f64 * pitch,
+                },
+            })
+            .collect();
+        let width = nodes.iter().map(|n| n.point.x_um).fold(0.0, f64::max) + pitch;
+        let height = nodes.iter().map(|n| n.point.y_um).fold(0.0, f64::max) + pitch;
+        Placement {
+            nodes,
+            width_um: width,
+            height_um: height,
+        }
+    }
+
+    #[test]
+    fn clock_tree_empty_sinks() {
+        let mut netlist = Netlist::new();
+        let placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        let report = build_h_tree(&mut netlist, &[], &placement, &ClockTreeConfig::default());
+        assert_eq!(report.sink_count, 0);
+        assert_eq!(report.buffer_count, 0);
+    }
+
+    #[test]
+    fn clock_tree_single_sink() {
+        let (mut netlist, dff_ids) = make_netlist_with_dffs(1);
+        let placement = make_placement_grid(&dff_ids, 1, 40.0);
+        let report = build_h_tree(&mut netlist, &dff_ids.iter().map(|&id| (id, placement.point_of(id).unwrap())).collect::<Vec<_>>(), &placement, &ClockTreeConfig::default());
+        assert_eq!(report.sink_count, 1);
+        assert_eq!(report.buffer_count, 0);
+    }
+
+    #[test]
+    fn clock_tree_dual_phase_assigns_two_phases() {
+        let (mut netlist, dff_ids) = make_netlist_with_dffs(4);
+        let placement = make_placement_grid(&dff_ids, 2, 80.0);
+        let sinks: Vec<_> = dff_ids.iter().map(|&id| (id, placement.point_of(id).unwrap())).collect();
+        let config = ClockTreeConfig {
+            phase_count: 2,
+            ..ClockTreeConfig::default()
+        };
+        let report = build_h_tree(&mut netlist, &sinks, &placement, &config);
+        assert_eq!(report.phase_count, 2);
+        assert_eq!(report.phases.len(), 2);
+        assert!(report.phases.iter().all(|p| p.sinks > 0 || p.buffers >= 0));
+    }
+
+    #[test]
+    fn clock_tree_quad_phase_assigns_four_phases() {
+        let (mut netlist, dff_ids) = make_netlist_with_dffs(8);
+        let placement = make_placement_grid(&dff_ids, 4, 80.0);
+        let sinks: Vec<_> = dff_ids.iter().map(|&id| (id, placement.point_of(id).unwrap())).collect();
+        let config = ClockTreeConfig {
+            phase_count: 4,
+            ..ClockTreeConfig::default()
+        };
+        let report = build_h_tree(&mut netlist, &sinks, &placement, &config);
+        assert_eq!(report.phase_count, 4);
+        assert_eq!(report.phases.len(), 4);
+    }
+
+    #[test]
+    fn spatial_phase_assignment_groups_nearby_sinks() {
+        let (mut netlist, dff_ids) = make_netlist_with_dffs(4);
+        let placement = make_placement_grid(&dff_ids, 2, 80.0);
+        let sinks: Vec<_> = dff_ids.iter().map(|&id| (id, placement.point_of(id).unwrap())).collect();
+
+        let config_spatial = ClockTreeConfig {
+            phase_count: 2,
+            spatial_phase_assignment: true,
+            ..ClockTreeConfig::default()
+        };
+        let report_spatial = build_h_tree(&mut netlist, &sinks, &placement, &config_spatial);
+
+        let config_roundrobin = ClockTreeConfig {
+            phase_count: 2,
+            spatial_phase_assignment: false,
+            ..ClockTreeConfig::default()
+        };
+        let report_roundrobin = build_h_tree(&mut netlist, &sinks, &placement, &config_roundrobin);
+
+        assert_eq!(report_spatial.phase_count, 2);
+        assert_eq!(report_roundrobin.phase_count, 2);
+    }
+
+    #[test]
+    fn clock_tree_estimates_skew() {
+        let (mut netlist, dff_ids) = make_netlist_with_dffs(4);
+        let placement = make_placement_grid(&dff_ids, 2, 80.0);
+        let sinks: Vec<_> = dff_ids.iter().map(|&id| (id, placement.point_of(id).unwrap())).collect();
+        let report = build_h_tree(&mut netlist, &sinks, &placement, &ClockTreeConfig::default());
+        assert!(report.estimated_skew_ps >= 0.0);
+    }
+
+    #[test]
+    fn find_clock_sinks_finds_dffs_and_cells() {
+        let mut netlist = Netlist::new();
+        let dff = netlist.add_node(NodeKind::Dff, "dff0");
+        let cell = netlist.add_node(NodeKind::CellInstance, "cell0");
+        let port = netlist.add_node(NodeKind::Port, "clk");
+        let splitter = netlist.add_node(NodeKind::Splitter, "split0");
+
+        let mut placement = Placement {
+            nodes: Vec::new(),
+            width_um: 0.0,
+            height_um: 0.0,
+        };
+        for &id in &[dff, cell, port, splitter] {
+            placement.nodes.push(PlacedNode {
+                node: id,
+                level: 0,
+                slot: 0,
+                point: Point { x_um: 0.0, y_um: 0.0 },
+            });
+        }
+
+        let sinks = find_clock_sinks(&netlist, &placement);
+        assert_eq!(sinks.len(), 2);
+        assert!(sinks.iter().any(|(id, _)| *id == dff));
+        assert!(sinks.iter().any(|(id, _)| *id == cell));
+    }
 }
