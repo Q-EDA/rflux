@@ -15,7 +15,7 @@ This document describes the development workflow, code conventions, and PR proce
 #   - Python >= 3.12
 
 # Clone and set up
-git clone https://github.com/your-org/rflux
+git clone https://github.com/Q-EDA/rflux
 cd rflux
 uv sync
 cargo check --workspace
