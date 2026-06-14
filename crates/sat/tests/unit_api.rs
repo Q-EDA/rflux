@@ -419,3 +419,376 @@ fn solve_metrics_report_positive_elapsed() {
     assert!(metrics.elapsed_ns > 0, "elapsed time should be positive");
     assert!(metrics.stats.decisions + metrics.stats.unit_assignments >= 1);
 }
+
+// ---------------------------------------------------------------------------
+// Edge cases: formula construction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn empty_formula_is_sat() {
+    let cnf = CnfFormula::new(3);
+    let result = solve(&cnf);
+    assert!(matches!(result, SolveResult::Satisfiable(_)));
+}
+
+#[test]
+fn single_unit_clause_sat() {
+    let mut cnf = CnfFormula::new(1);
+    cnf.add_clause(vec![Lit::pos(1)]).unwrap();
+    let result = solve(&cnf);
+    let SolveResult::Satisfiable(model) = result else {
+        panic!("single unit clause should be SAT");
+    };
+    assert_eq!(model.value(1), Some(true));
+}
+
+#[test]
+fn single_long_clause_sat() {
+    let mut cnf = CnfFormula::new(20);
+    let clause: Vec<Lit> = (1..=20).map(|v| Lit::neg(v)).collect();
+    cnf.add_clause(clause).unwrap();
+    let result = solve(&cnf);
+    let SolveResult::Satisfiable(model) = result else {
+        panic!("single long clause should be SAT");
+    };
+    for var in 1..=20 {
+        assert_eq!(model.value(var), Some(false));
+    }
+}
+
+#[test]
+fn many_variables_few_clauses_sat() {
+    let mut cnf = CnfFormula::new(100);
+    cnf.add_clause(vec![Lit::pos(1), Lit::pos(50)]).unwrap();
+    let result = solve(&cnf);
+    assert!(matches!(result, SolveResult::Satisfiable(_)));
+}
+
+#[test]
+fn duplicate_clauses_sat() {
+    let mut cnf = CnfFormula::new(2);
+    cnf.add_clause(vec![Lit::pos(1)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(1)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(2)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(2)]).unwrap();
+    let result = solve(&cnf);
+    let SolveResult::Satisfiable(model) = result else {
+        panic!("duplicate clauses should still be SAT");
+    };
+    assert_eq!(model.value(1), Some(true));
+    assert_eq!(model.value(2), Some(true));
+}
+
+#[test]
+fn all_positive_literals_sat() {
+    let mut cnf = CnfFormula::new(5);
+    for v in 1..=5 {
+        cnf.add_clause(vec![Lit::pos(v)]).unwrap();
+    }
+    let result = solve(&cnf);
+    let SolveResult::Satisfiable(model) = result else {
+        panic!("all positive unit clauses should be SAT");
+    };
+    for v in 1..=5 {
+        assert_eq!(model.value(v), Some(true));
+    }
+}
+
+#[test]
+fn all_negative_literals_sat() {
+    let mut cnf = CnfFormula::new(5);
+    for v in 1..=5 {
+        cnf.add_clause(vec![Lit::neg(v)]).unwrap();
+    }
+    let result = solve(&cnf);
+    let SolveResult::Satisfiable(model) = result else {
+        panic!("all negative unit clauses should be SAT");
+    };
+    for v in 1..=5 {
+        assert_eq!(model.value(v), Some(false));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases: UNSAT patterns
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unsat_pigeonhole_3_2() {
+    let cnf = pigeonhole_unsat(3, 2);
+    assert_eq!(solve(&cnf), SolveResult::Unsatisfiable);
+}
+
+#[test]
+fn unsat_pigeonhole_4_3() {
+    let cnf = pigeonhole_unsat(4, 3);
+    assert_eq!(solve(&cnf), SolveResult::Unsatisfiable);
+}
+
+#[test]
+fn unsat_pigeonhole_6_5() {
+    let cnf = pigeonhole_unsat(6, 5);
+    assert_eq!(solve(&cnf), SolveResult::Unsatisfiable);
+}
+
+#[test]
+fn unsat_odd_xor_chain() {
+    let mut cnf = CnfFormula::new(3);
+    cnf.add_clause(vec![Lit::pos(1), Lit::pos(2)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(1), Lit::neg(2)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(2), Lit::pos(3)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(2), Lit::neg(3)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(1), Lit::pos(3)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(1), Lit::neg(3)]).unwrap();
+    assert_eq!(solve(&cnf), SolveResult::Unsatisfiable);
+}
+
+#[test]
+fn sat_even_xor_chain() {
+    let mut cnf = CnfFormula::new(2);
+    cnf.add_clause(vec![Lit::pos(1), Lit::pos(2)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(1), Lit::neg(2)]).unwrap();
+    let result = solve(&cnf);
+    assert!(matches!(result, SolveResult::Satisfiable(_)));
+}
+
+#[test]
+fn unsat_bool_circuit_ones_gate() {
+    let mut cnf = CnfFormula::new(3);
+    cnf.add_clause(vec![Lit::pos(1), Lit::pos(2)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(1), Lit::pos(3)]).unwrap();
+    cnf.add_clause(vec![Lit::pos(2), Lit::pos(3)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(1), Lit::neg(2)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(1), Lit::neg(3)]).unwrap();
+    cnf.add_clause(vec![Lit::neg(2), Lit::neg(3)]).unwrap();
+    assert_eq!(solve(&cnf), SolveResult::Unsatisfiable);
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases: Model and Lit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn model_value_out_of_range_returns_none() {
+    let mut cnf = CnfFormula::new(1);
+    cnf.add_clause(vec![Lit::pos(1)]).unwrap();
+    let SolveResult::Satisfiable(model) = solve(&cnf) else {
+        panic!("should be SAT");
+    };
+    assert_eq!(model.value(0), None);
+    assert_eq!(model.value(999), None);
+}
+
+#[test]
+fn lit_zero_var_is_rejected() {
+    let mut cnf = CnfFormula::new(1);
+    let err = cnf.add_clause(vec![Lit::pos(0)]).unwrap_err();
+    assert_eq!(
+        err,
+        SatError::VariableOutOfRange {
+            var: 0,
+            var_count: 1
+        }
+    );
+}
+
+#[test]
+fn lit_negated_matches_pos() {
+    let a = Lit::pos(5);
+    let b = Lit::neg(5);
+    assert_eq!(a.var, b.var);
+    assert_ne!(a.negated, b.negated);
+    assert_eq!(!a, b);
+}
+
+#[test]
+fn lit_watch_index_is_unique_per_polarity() {
+    let pos = Lit::pos(3);
+    let neg = Lit::neg(3);
+    assert_eq!(pos.var, neg.var);
+    assert_ne!(pos.negated, neg.negated);
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases: DIMACS parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dimacs_roundtrip_many_clauses() {
+    let mut cnf = CnfFormula::new(50);
+    for i in 1..=50 {
+        cnf.add_clause(vec![Lit::pos(i), Lit::neg((i % 50) + 1)])
+            .unwrap();
+    }
+    let reparsed = CnfFormula::from_dimacs(&cnf.to_dimacs()).unwrap();
+    assert_eq!(reparsed, cnf);
+}
+
+#[test]
+fn dimacs_rejects_empty_input() {
+    let err = CnfFormula::from_dimacs("").unwrap_err();
+    assert_eq!(err, SatError::MissingDimacsHeader);
+}
+
+#[test]
+fn dimacs_rejects_no_header() {
+    let err = CnfFormula::from_dimacs("1 2 0\n").unwrap_err();
+    assert_eq!(err, SatError::MissingDimacsHeader);
+}
+
+#[test]
+fn dimacs_rejects_malformed_header() {
+    let err = CnfFormula::from_dimacs("p cnf abc 3\n").unwrap_err();
+    assert!(matches!(err, SatError::InvalidDimacsHeader(_)));
+}
+
+#[test]
+fn dimacs_zero_terminates_clause() {
+    let cnf = CnfFormula::from_dimacs("p cnf 1 1\n1 0\n").unwrap();
+    assert_eq!(cnf.var_count(), 1);
+    assert_eq!(cnf.clauses().len(), 1);
+    assert_eq!(cnf.clauses()[0], vec![Lit::pos(1)]);
+}
+
+#[test]
+fn dimacs_rejects_clause_count_mismatch() {
+    let err = CnfFormula::from_dimacs("p cnf 1 2\n1 0\n").unwrap_err();
+    assert_eq!(
+        err,
+        SatError::InvalidDimacsClauseCount {
+            expected: 2,
+            actual: 1
+        }
+    );
+}
+
+#[test]
+fn dimacs_rejects_unterminated_clause() {
+    let err = CnfFormula::from_dimacs("p cnf 1 1\n1\n").unwrap_err();
+    assert_eq!(err, SatError::UnterminatedDimacsClause);
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases: IncrementalSolver
+// ---------------------------------------------------------------------------
+
+#[test]
+fn incremental_solver_empty_formula_sat() {
+    let solver = IncrementalSolver::new(0);
+    let result = solver.solve();
+    assert!(matches!(result, SolveResult::Satisfiable(_)));
+}
+
+#[test]
+fn incremental_solver_contradictory_assumptions_unsat() {
+    let mut solver = IncrementalSolver::new(2);
+    solver.add_clause(vec![Lit::pos(1), Lit::pos(2)]).unwrap();
+    let result = solver.solve_with_assumptions(&[Lit::neg(1), Lit::neg(2)]);
+    assert_eq!(result, SolveResult::Unsatisfiable);
+}
+
+#[test]
+fn incremental_solver_var_count_grows() {
+    let mut solver = IncrementalSolver::new(2);
+    assert_eq!(solver.var_count(), 2);
+    solver.add_var();
+    assert_eq!(solver.var_count(), 3);
+    solver.add_var();
+    assert_eq!(solver.var_count(), 4);
+}
+
+#[test]
+fn incremental_solver_add_clause_grows_formula() {
+    let mut solver = IncrementalSolver::new(2);
+    assert_eq!(solver.base_formula().clauses().len(), 0);
+    solver.add_clause(vec![Lit::pos(1)]).unwrap();
+    assert_eq!(solver.base_formula().clauses().len(), 1);
+    solver.add_clause(vec![Lit::neg(2)]).unwrap();
+    assert_eq!(solver.base_formula().clauses().len(), 2);
+}
+
+#[test]
+fn incremental_solver_multiple_sat_unsat_transitions() {
+    let mut solver = IncrementalSolver::new(2);
+    solver.add_clause(vec![Lit::pos(1), Lit::pos(2)]).unwrap();
+
+    assert!(matches!(
+        solver.solve_with_assumptions(&[]),
+        SolveResult::Satisfiable(_)
+    ));
+    assert_eq!(
+        solver.solve_with_assumptions(&[Lit::neg(1), Lit::neg(2)]),
+        SolveResult::Unsatisfiable
+    );
+    assert!(matches!(
+        solver.solve_with_assumptions(&[Lit::pos(1)]),
+        SolveResult::Satisfiable(_)
+    ));
+    let r = solver.solve_with_assumptions(&[Lit::neg(1)]);
+    assert!(matches!(r, SolveResult::Satisfiable(_)) || matches!(r, SolveResult::Unsatisfiable));
+}
+
+#[test]
+fn unsat_core_all_assumptions_needed() {
+    let mut solver = IncrementalSolver::new(3);
+    solver.add_clause(vec![Lit::pos(1), Lit::pos(2), Lit::pos(3)]).unwrap();
+    solver.add_clause(vec![Lit::neg(1), Lit::neg(2), Lit::neg(3)]).unwrap();
+
+    let core = solver
+        .unsat_core_of_assumptions(&[Lit::pos(1), Lit::pos(2), Lit::pos(3)])
+        .expect("should be UNSAT");
+    assert!(!core.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Larger stress tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_pigeonhole_unsat_7_6() {
+    let cnf = pigeonhole_unsat(7, 6);
+    assert_eq!(solve(&cnf), SolveResult::Unsatisfiable);
+}
+
+#[test]
+fn stress_3sat_100vars() {
+    let mut cnf = CnfFormula::new(100);
+    let mut seed = 123u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed
+    };
+    for _ in 0..300 {
+        let mut clause = Vec::new();
+        for _ in 0..3 {
+            let var = (next() as usize % 100) + 1;
+            let neg = next() % 2 == 0;
+            clause.push(if neg { Lit::neg(var) } else { Lit::pos(var) });
+        }
+        cnf.add_clause(clause).unwrap();
+    }
+    let result = solve(&cnf);
+    if let SolveResult::Satisfiable(model) = result {
+        for clause in cnf.clauses() {
+            let satisfied = clause
+                .iter()
+                .any(|lit| model.value(lit.var) == Some(!lit.negated));
+            assert!(satisfied, "clause {clause:?} not satisfied");
+        }
+    }
+}
+
+#[test]
+fn stress_incremental_many_assumptions() {
+    let mut solver = IncrementalSolver::new(10);
+    for v in 1..=10 {
+        solver.add_clause(vec![Lit::pos(v), Lit::pos((v % 10) + 1)])
+            .unwrap();
+    }
+    for i in 0..10 {
+        let assumptions: Vec<Lit> = (1..=5).map(|v| Lit::pos(v ^ i)).collect();
+        let _ = solver.solve_with_assumptions(&assumptions);
+    }
+}
