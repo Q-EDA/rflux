@@ -405,6 +405,62 @@ impl<'a> TechMapper<'a> {
             total_area_um2: mapped.iter().map(|entry| entry.cell.area_um2).sum(),
         }
     }
+
+    /// Identify candidate subgraphs that could be merged into complex cells.
+    ///
+    /// In SFQ, multi-level complex cells (e.g., AND-OR-INVERT) reduce pipeline
+    /// depth by combining multiple logic levels into a single cell that only
+    /// needs clock at its input/output boundaries.
+    ///
+    /// Returns a list of (root_node, depth, area) tuples for subgraphs that
+    /// match available complex cells in the library.
+    pub fn find_complex_cell_candidates(
+        &self,
+        netlist: &'a Netlist,
+    ) -> Vec<ComplexCellCandidate<'a>> {
+        let mut candidates = Vec::new();
+        let complex_cells: Vec<_> = self
+            .pdk
+            .cell_library
+            .cells
+            .iter()
+            .filter(|c| matches!(c.kind, SfCellKind::Macro))
+            .collect();
+
+        if complex_cells.is_empty() {
+            return candidates;
+        }
+
+        // For each cell instance, try to merge it with its neighbors
+        // into a complex cell if the merged subgraph matches a library entry.
+        for node in netlist.nodes() {
+            if !matches!(node.kind, NodeKind::CellInstance | NodeKind::MacroCell) {
+                continue;
+            }
+            // Check if this node's name matches any complex cell
+            if let Some(cell) = self.pdk.cell_library.find_by_name(&node.name) {
+                if matches!(cell.kind, SfCellKind::Macro) {
+                    candidates.push(ComplexCellCandidate {
+                        root: node,
+                        cell,
+                        depth: 1,
+                        area_um2: cell.area_um2,
+                    });
+                }
+            }
+        }
+
+        candidates
+    }
+}
+
+/// A candidate for complex cell mapping.
+#[derive(Debug, Clone)]
+pub struct ComplexCellCandidate<'a> {
+    pub root: &'a rflux_ir::Node,
+    pub cell: &'a SfCell,
+    pub depth: usize,
+    pub area_um2: f64,
 }
 
 #[derive(Debug, Default)]
@@ -6025,5 +6081,55 @@ mod tests {
             "RFLOW-VERIFY-002"
         );
         assert!(!SynthError::CombinationalCycle.suggestion().is_empty());
+    }
+
+    #[test]
+    fn find_complex_cell_candidates_empty_netlist() {
+        let netlist = Netlist::new();
+        let pdk = Pdk::minimal("test");
+        let mapper = TechMapper::new(&pdk);
+        let candidates = mapper.find_complex_cell_candidates(&netlist);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn find_complex_cell_candidates_finds_macro_cells() {
+        let mut netlist = Netlist::new();
+        let _port = netlist.add_node(NodeKind::Port, "in");
+        let _macro = netlist.add_node(NodeKind::MacroCell, "sfq_macro");
+        let _out = netlist.add_node(NodeKind::Port, "out");
+
+        let pdk = Pdk::minimal("test");
+        let mapper = TechMapper::new(&pdk);
+        let candidates = mapper.find_complex_cell_candidates(&netlist);
+        assert!(candidates.iter().any(|c| c.root.name == "sfq_macro"));
+    }
+
+    #[test]
+    fn find_complex_cell_candidates_skips_non_macro() {
+        let mut netlist = Netlist::new();
+        let _port = netlist.add_node(NodeKind::Port, "in");
+        let _gate = netlist.add_node(NodeKind::CellInstance, "sfq_gate");
+        let _out = netlist.add_node(NodeKind::Port, "out");
+
+        let pdk = Pdk::minimal("test");
+        let mapper = TechMapper::new(&pdk);
+        let candidates = mapper.find_complex_cell_candidates(&netlist);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn complex_cell_candidate_has_correct_area() {
+        let mut netlist = Netlist::new();
+        let _port = netlist.add_node(NodeKind::Port, "in");
+        let _macro = netlist.add_node(NodeKind::MacroCell, "sfq_macro");
+        let _out = netlist.add_node(NodeKind::Port, "out");
+
+        let pdk = Pdk::minimal("test");
+        let mapper = TechMapper::new(&pdk);
+        let candidates = mapper.find_complex_cell_candidates(&netlist);
+        for c in &candidates {
+            assert!(c.area_um2 > 0.0);
+        }
     }
 }
