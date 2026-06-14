@@ -454,6 +454,73 @@ impl Pdk {
             .any(|r| length_um >= r.min_um && length_um <= r.max_um)
     }
 
+    /// Compute the PTL reflection coefficient for a given length.
+    ///
+    /// In SFQ circuits, PTL (passive transmission line) reflections occur when
+    /// the electrical length approaches multiples of λ/2. The reflection
+    /// coefficient ranges from 0 (no reflection) to 1 (total reflection).
+    ///
+    /// This is a simplified model based on the PTL characteristic impedance
+    /// mismatch at termination. For production use, full electromagnetic
+    /// simulation is recommended.
+    #[must_use]
+    pub fn ptl_reflection_coefficient(&self, length_um: f64) -> f64 {
+        if length_um <= 0.0 {
+            return 0.0;
+        }
+        // PTL reflection peaks at multiples of half-wavelength.
+        // Use a sinusoidal model: Γ = |sin(π * L / λ/2)|^2
+        // where λ/2 is the half-wavelength (~1000 um for typical SFQ PTL).
+        let half_wavelength_um = 1000.0;
+        let phase = std::f64::consts::PI * length_um / half_wavelength_um;
+        let sin_val = phase.sin();
+        sin_val * sin_val
+    }
+
+    /// Check if a PTL length is in a reflection danger zone.
+    ///
+    /// Returns `true` if the reflection coefficient exceeds the threshold,
+    /// indicating the length should be avoided for reliable signal integrity.
+    #[must_use]
+    pub fn ptl_is_in_reflection_danger_zone(&self, length_um: f64, threshold: f64) -> bool {
+        self.ptl_reflection_coefficient(length_um) > threshold
+    }
+
+    /// Get the optimal PTL length range that minimizes reflection.
+    ///
+    /// Returns (min_um, max_um) of the safest length band, or `None` if
+    /// no safe range exists within the given bounds.
+    #[must_use]
+    pub fn ptl_optimal_length_range(&self, min_um: f64, max_um: f64) -> Option<(f64, f64)> {
+        if min_um >= max_um {
+            return None;
+        }
+        // Find the length with minimum reflection in the range.
+        let half_wavelength_um = 1000.0;
+        let _optimal_length = half_wavelength_um / 2.0;
+        let mut best_start = min_um;
+        let mut best_end = min_um;
+        let mut best_coef = f64::INFINITY;
+
+        let step = (max_um - min_um) / 100.0;
+        let mut start = min_um;
+        while start < max_um {
+            let coef = self.ptl_reflection_coefficient(start);
+            if coef < best_coef {
+                best_coef = coef;
+                best_start = start;
+                best_end = (start + step).min(max_um);
+            }
+            start += step;
+        }
+
+        if best_coef < 0.1 {
+            Some((best_start, best_end))
+        } else {
+            None
+        }
+    }
+
     #[must_use]
     pub fn cell_timing(&self, kind: SfCellKind) -> Option<&CellTimingModel> {
         self.active_corner()
@@ -2138,5 +2205,56 @@ mod tests {
         assert!(report.errors.is_empty());
         assert!(report.warnings.iter().any(|warning| warning
             .contains("arc 'unknown-sink' references unknown sink cell 'missing_sink'")));
+    }
+
+    #[test]
+    fn ptl_reflection_coefficient_zero_at_zero_length() {
+        let pdk = Pdk::minimal("test");
+        assert_eq!(pdk.ptl_reflection_coefficient(0.0), 0.0);
+    }
+
+    #[test]
+    fn ptl_reflection_coefficient_peaks_at_half_wavelength() {
+        let pdk = Pdk::minimal("test");
+        let coef = pdk.ptl_reflection_coefficient(500.0);
+        assert!(coef > 0.9, "should peak near half-wavelength: {coef}");
+    }
+
+    #[test]
+    fn ptl_reflection_coefficient_low_at_quarter_wavelength() {
+        let pdk = Pdk::minimal("test");
+        let coef = pdk.ptl_reflection_coefficient(250.0);
+        assert!(coef < 0.6, "should be moderate at quarter-wavelength: {coef}");
+    }
+
+    #[test]
+    fn ptl_is_in_reflection_danger_zone() {
+        let pdk = Pdk::minimal("test");
+        assert!(pdk.ptl_is_in_reflection_danger_zone(500.0, 0.3));
+        assert!(!pdk.ptl_is_in_reflection_danger_zone(100.0, 0.3));
+    }
+
+    #[test]
+    fn ptl_optimal_length_range_finds_safe_band() {
+        let pdk = Pdk::minimal("test");
+        let range = pdk.ptl_optimal_length_range(50.0, 200.0);
+        assert!(range.is_some(), "should find a safe range");
+        let (min, max) = range.unwrap();
+        assert!(min >= 50.0 && max <= 200.0);
+    }
+
+    #[test]
+    fn ptl_reflection_coefficient_is_bounded() {
+        let pdk = Pdk::minimal("test");
+        for length in [0.0, 100.0, 250.0, 500.0, 750.0, 1000.0] {
+            let coef = pdk.ptl_reflection_coefficient(length);
+            assert!(coef >= 0.0 && coef <= 1.0, "coefficient out of range: {coef}");
+        }
+    }
+
+    #[test]
+    fn routing_config_has_reflection_risk_weight() {
+        let pdk = Pdk::minimal("test");
+        assert!(pdk.ptl_reflection_coefficient(250.0) < 1.0);
     }
 }

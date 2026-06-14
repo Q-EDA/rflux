@@ -56,6 +56,7 @@ pub struct RoutingConfig {
     pub blocked_regions: Vec<BlockedRegion>,
     pub detour_margin_um: f64,
     pub congestion_weight: f64,
+    pub ptl_reflection_risk_weight: f64,
 }
 
 impl Default for RoutingConfig {
@@ -67,6 +68,7 @@ impl Default for RoutingConfig {
             blocked_regions: Vec::new(),
             detour_margin_um: 12.0,
             congestion_weight: 0.0,
+            ptl_reflection_risk_weight: 0.0,
         }
     }
 }
@@ -157,9 +159,15 @@ impl SimpleRouter {
             let length_um = path_length(&path);
             let touches_boundary_port =
                 is_boundary_port(netlist, from.node) || is_boundary_port(netlist, to.node);
-            let use_ptl = !touches_boundary_port
+            let ptl_allowed = !touches_boundary_port
                 && length_um >= config.prefer_ptl_from_length_um
                 && pdk.is_ptl_length_allowed(length_um);
+            let reflection_risk = if ptl_allowed && config.ptl_reflection_risk_weight > 0.0 {
+                pdk.ptl_reflection_coefficient(length_um)
+            } else {
+                0.0
+            };
+            let use_ptl = ptl_allowed && reflection_risk < 0.3;
             let mode = if use_ptl {
                 RouteMode::Ptl
             } else {
