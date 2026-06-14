@@ -1,0 +1,47 @@
+# CODEOWNERS for Q-EDA/rflux
+#
+# Each line is a path pattern followed by the GitHub handle(s) or team(s)
+# that own it. GitHub will automatically request review from these owners
+# when a PR touches the matching files. Replace the placeholder team with
+# the real @Q-EDA team or individual handles once established.
+
+# Default owner for anything not matched below.
+*                                   @Q-EDA/rflux-core
+
+# Core IR and data model
+/crates/ir/                         @Q-EDA/rflux-core
+/crates/hdl/                        @Q-EDA/rflux-core
+
+# Synthesis / SAT / verification
+/crates/synth/                      @Q-EDA/rflux-synth
+/crates/sat/                        @Q-EDA/rflux-synth
+/crates/verify/                     @Q-EDA/rflux-synth
+
+# Physical design: placement, routing, timing, tech library
+/crates/place/                      @Q-EDA/rflux-pd
+/crates/route/                      @Q-EDA/rflux-pd
+/crates/timing/                     @Q-EDA/rflux-pd
+/crates/tech/                       @Q-EDA/rflux-pd
+
+# Simulation
+/crates/sim/                        @Q-EDA/rflux-sim
+
+# Top-level flow runner
+/crates/flow/                       @Q-EDA/rflux-core
+
+# I/O and CLI
+/crates/io/                         @Q-EDA/rflux-core
+/crates/cli/                        @Q-EDA/rflux-core
+
+# Python bindings — anything touching the ABI is high-impact
+/crates/py/                         @Q-EDA/rflux-core
+/python/rflux/                      @Q-EDA/rflux-core
+
+# Security, release, CI — restricted review
+/SECURITY.md                        @Q-EDA/rflux-core
+/.github/workflows/                 @Q-EDA/rflux-core
+/Cargo.toml                         @Q-EDA/rflux-core
+/Cargo.lock                         @Q-EDA/rflux-core
+/pyproject.toml                     @Q-EDA/rflux-core
+/uv.lock                            @Q-EDA/rflux-core
+/deny.toml                          @Q-EDA/rflux-core
