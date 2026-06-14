@@ -385,6 +385,52 @@ pub struct AdvancedConstraintReport {
     pub violations: Vec<AdvancedConstraintViolation>,
 }
 
+impl AdvancedConstraintReport {
+    /// Compute electro-thermal-mechanical interaction score.
+    ///
+    /// In SFQ circuits, thermal load affects mechanical stress on the
+    /// superconducting substrate, which in turn affects Josephson junction
+    /// critical current stability. This method computes a unified interaction
+    /// score that captures these cross-domain effects.
+    ///
+    /// Returns a score from 0.0 (no interaction risk) to 1.0 (high risk).
+    #[must_use]
+    pub fn electro_thermal_mechanical_score(&self) -> f64 {
+        // Thermal contribution: higher load → more thermal stress
+        let thermal_component = (self.estimated_thermal_load_uw / 8.0).min(1.0);
+
+        // Mechanical contribution: higher stress score → more substrate deformation
+        let mechanical_component = self.estimated_mechanical_stress_score.min(1.0);
+
+        // Electrical contribution: PTL coupling creates additional heating
+        let electrical_component = self.ptl_coupling_ratio.min(1.0);
+
+        // Manufacturing contribution: hotspots indicate localized stress concentrations
+        let manufacturing_component = if self.manufacturing_hotspots > 0 {
+            (self.manufacturing_hotspots as f64 / 5.0).min(1.0)
+        } else {
+            0.0
+        };
+
+        // Weighted combination: thermal and mechanical are primary drivers
+        let score = thermal_component * 0.35
+            + mechanical_component * 0.30
+            + electrical_component * 0.20
+            + manufacturing_component * 0.15;
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Check if the design passes all electro-thermal-mechanical constraints.
+    ///
+    /// Returns true if the interaction score is below the threshold and
+    /// there are no constraint violations.
+    #[must_use]
+    pub fn passes_electro_thermal_mechanical_check(&self, threshold: f64) -> bool {
+        self.electro_thermal_mechanical_score() < threshold && self.violation_count == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerificationReport {
     pub checked_routes: usize,
@@ -6076,5 +6122,70 @@ mod tests {
         );
         assert!((tradeoff.frequency_derate_ratio - 0.5).abs() < 0.01);
         assert_eq!(tradeoff.ac_max_freq_ghz, 30.0);
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_low_risk() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 1.0,
+            estimated_mechanical_stress_score: 0.1,
+            jtl_density_per_100um: 2.0,
+            detour_overhead_ratio: 0.1,
+            ptl_coupling_ratio: 0.1,
+            manufacturing_hotspots: 0,
+            violation_count: 0,
+            violations: Vec::new(),
+        };
+        let score = report.electro_thermal_mechanical_score();
+        assert!(score < 0.3, "low risk should have low score: {score}");
+        assert!(report.passes_electro_thermal_mechanical_check(0.5));
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_high_risk() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 8.0,
+            estimated_mechanical_stress_score: 0.9,
+            jtl_density_per_100um: 10.0,
+            detour_overhead_ratio: 0.5,
+            ptl_coupling_ratio: 0.8,
+            manufacturing_hotspots: 5,
+            violation_count: 3,
+            violations: Vec::new(),
+        };
+        let score = report.electro_thermal_mechanical_score();
+        assert!(score > 0.5, "high risk should have high score: {score}");
+        assert!(!report.passes_electro_thermal_mechanical_check(0.5));
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_zero_for_clean_design() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 0.0,
+            estimated_mechanical_stress_score: 0.0,
+            jtl_density_per_100um: 0.0,
+            detour_overhead_ratio: 0.0,
+            ptl_coupling_ratio: 0.0,
+            manufacturing_hotspots: 0,
+            violation_count: 0,
+            violations: Vec::new(),
+        };
+        assert_eq!(report.electro_thermal_mechanical_score(), 0.0);
+    }
+
+    #[test]
+    fn electro_thermal_mechanical_score_bounded() {
+        let report = AdvancedConstraintReport {
+            estimated_thermal_load_uw: 100.0,
+            estimated_mechanical_stress_score: 2.0,
+            jtl_density_per_100um: 100.0,
+            detour_overhead_ratio: 10.0,
+            ptl_coupling_ratio: 5.0,
+            manufacturing_hotspots: 100,
+            violation_count: 50,
+            violations: Vec::new(),
+        };
+        let score = report.electro_thermal_mechanical_score();
+        assert!(score >= 0.0 && score <= 1.0, "score out of range: {score}");
     }
 }
