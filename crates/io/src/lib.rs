@@ -1,3 +1,6 @@
+pub mod gds;
+pub mod layout_svg;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;

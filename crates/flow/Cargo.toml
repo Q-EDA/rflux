@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rflux-io = { path = "../io" }
 rflux-ir = { path = "../ir" }
 rflux-place = { path = "../place" }
 rflux-route = { path = "../route" }

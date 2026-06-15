@@ -92,6 +92,9 @@ try:
         read_bench_file as _core_read_bench_file,
         read_bench_text as _core_read_bench_text,
         verify_layout as _core_verify_layout,
+        export_gds as _core_export_gds,
+        export_svg as _core_export_svg,
+        run_dse as _core_run_dse,
         version as core_version,
         build_clock_tree as _core_build_clock_tree,
         build_bias_grid as _core_build_bias_grid,
@@ -132,6 +135,8 @@ except ImportError as relative_import_error:
             read_bench_file as _core_read_bench_file,
             read_bench_text as _core_read_bench_text,
             verify_layout as _core_verify_layout,
+            export_gds as _core_export_gds,
+            run_dse as _core_run_dse,
             version as core_version,
             build_clock_tree as _core_build_clock_tree,
             build_bias_grid as _core_build_bias_grid,
@@ -177,6 +182,9 @@ except ImportError as relative_import_error:
         _core_read_bench_file = None
         _core_read_bench_text = None
         _core_verify_layout = None
+        _core_export_gds = None
+        _core_export_svg = None
+        _core_run_dse = None
 
         class Circuit:  # type: ignore[no-redef]
             def __init__(self, name: str = "") -> None:
@@ -480,6 +488,9 @@ analyze_timing_corners = timing.analyze_timing_corners
 analyze_timing_statistical = timing.analyze_timing_statistical
 analyze_advanced_constraints = timing.analyze_advanced_constraints
 compile_layout = flow.compile_layout
+export_gds = flow.export_gds
+export_svg = flow.export_svg
+run_dse = flow.run_dse
 analyze_ac_bias = flow.analyze_ac_bias
 optimize_ac_bias = flow.optimize_ac_bias
 characterize_compound_cell = flow.characterize_compound_cell
@@ -566,6 +577,9 @@ __all__ = [
     "simulate_text",
     "compile",
     "compile_layout",
+    "export_gds",
+    "export_svg",
+    "run_dse",
     "compile_netlist",
     "compile_plan",
     "compile_plan_report",

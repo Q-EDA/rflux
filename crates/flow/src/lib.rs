@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use rflux_io::IoError;
 use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
 use rflux_place::{
     BlockedRegion as PlacementBlockedRegion, LevelizedPlacer, PlaceError, Placement,
@@ -483,6 +484,8 @@ pub enum FlowError {
     Timing(#[from] TimingError),
     #[error("characterized library json invalid: {0}")]
     CharacterizedLibraryJson(#[from] serde_json::Error),
+    #[error("io error: {0}")]
+    Io(#[from] IoError),
 }
 
 impl FlowError {
@@ -494,6 +497,7 @@ impl FlowError {
             FlowError::Routing(e) => e.code(),
             FlowError::Timing(e) => e.code(),
             FlowError::CharacterizedLibraryJson(_) => "RFLOW-PDK-004",
+            FlowError::Io(e) => e.code(),
         }
     }
 
@@ -507,6 +511,7 @@ impl FlowError {
             FlowError::CharacterizedLibraryJson(_) => {
                 "Validate the characterized library JSON against the expected schema."
             }
+            FlowError::Io(e) => e.suggestion(),
         }
     }
 }
@@ -1242,6 +1247,42 @@ impl FlowRunner {
         })
     }
 
+    pub fn export_gds(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+        gds_path: impl AsRef<std::path::Path>,
+        library_name: &str,
+    ) -> Result<(), FlowError> {
+        let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let library = build_gds_library(netlist, &artifacts.placement, &artifacts.routing, library_name);
+        let file = std::fs::File::create(gds_path.as_ref()).map_err(rflux_io::IoError::Io)?;
+        let mut writer = std::io::BufWriter::new(file);
+        rflux_io::gds::write_gds(&mut writer, &library)?;
+        use std::io::Write;
+        writer.flush().map_err(rflux_io::IoError::Io)?;
+        Ok(())
+    }
+
+    pub fn export_svg(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+        svg_path: impl AsRef<std::path::Path>,
+        title: &str,
+    ) -> Result<(), FlowError> {
+        let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let layout = build_svg_layout(netlist, &artifacts.placement, &artifacts.routing);
+        let file = std::fs::File::create(svg_path.as_ref()).map_err(rflux_io::IoError::Io)?;
+        let mut writer = std::io::BufWriter::new(file);
+        rflux_io::layout_svg::write_svg(&mut writer, &layout, title)?;
+        use std::io::Write;
+        writer.flush().map_err(rflux_io::IoError::Io)?;
+        Ok(())
+    }
+
     fn compile_artifacts(
         &mut self,
         netlist: &mut Netlist,
@@ -1554,6 +1595,345 @@ impl FlowRunner {
             }
         };
         bias_grid::build_bias_grid(netlist, &placement, &bias_grid::BiasGridConfig::default())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DseConfig {
+    pub clock_period_ps_values: Vec<f64>,
+    pub prefer_ptl_from_length_um_values: Vec<f64>,
+    pub detour_margin_um_values: Vec<f64>,
+    pub min_hold_jtl_length_um_values: Vec<f64>,
+    pub sfq_phase_count_values: Vec<usize>,
+}
+
+impl Default for DseConfig {
+    fn default() -> Self {
+        Self {
+            clock_period_ps_values: vec![80.0, 100.0, 120.0],
+            prefer_ptl_from_length_um_values: vec![40.0, 60.0, 80.0],
+            detour_margin_um_values: vec![8.0, 12.0, 16.0],
+            min_hold_jtl_length_um_values: vec![0.0],
+            sfq_phase_count_values: vec![2],
+        }
+    }
+}
+
+impl DseConfig {
+    #[must_use]
+    pub fn total_points(&self) -> usize {
+        self.clock_period_ps_values.len()
+            * self.prefer_ptl_from_length_um_values.len()
+            * self.detour_margin_um_values.len()
+            * self.min_hold_jtl_length_um_values.len()
+            * self.sfq_phase_count_values.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DsePoint {
+    pub clock_period_ps: f64,
+    pub prefer_ptl_from_length_um: f64,
+    pub detour_margin_um: f64,
+    pub min_hold_jtl_length_um: f64,
+    pub sfq_phase_count: usize,
+    pub worst_setup_slack_ps: f64,
+    pub worst_hold_slack_ps: f64,
+    pub critical_path_delay_ps: f64,
+    pub placement_width_um: f64,
+    pub placement_height_um: f64,
+    pub placement_area_um2: f64,
+    pub total_route_length_um: f64,
+    pub setup_violations: usize,
+    pub hold_violations: usize,
+    pub routed_nets: usize,
+    pub is_pareto_optimal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DseReport {
+    pub points: Vec<DsePoint>,
+    pub pareto_front: Vec<DsePoint>,
+    pub total_evaluated: usize,
+    pub total_failed: usize,
+    pub recommended: Option<DsePoint>,
+}
+
+fn flow_config_from_dse_params(
+    base: &FlowConfig,
+    clock_period_ps: f64,
+    prefer_ptl_from_length_um: f64,
+    detour_margin_um: f64,
+    min_hold_jtl_length_um: f64,
+    sfq_phase_count: usize,
+) -> FlowConfig {
+    let mut config = base.clone();
+    config.timing.clock_period_ps = clock_period_ps;
+    config.routing.prefer_ptl_from_length_um = prefer_ptl_from_length_um;
+    config.routing.detour_margin_um = detour_margin_um;
+    config.min_hold_jtl_length_um = min_hold_jtl_length_um;
+    config.clock_phase_count = sfq_phase_count;
+    config
+}
+
+fn dse_point_from_report(
+    report: &LayoutReport,
+    clock_period_ps: f64,
+    prefer_ptl_from_length_um: f64,
+    detour_margin_um: f64,
+    min_hold_jtl_length_um: f64,
+    sfq_phase_count: usize,
+) -> DsePoint {
+    DsePoint {
+        clock_period_ps,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
+        min_hold_jtl_length_um,
+        sfq_phase_count,
+        worst_setup_slack_ps: report.timing.worst_setup_slack_ps,
+        worst_hold_slack_ps: report.timing.worst_hold_slack_ps,
+        critical_path_delay_ps: report.timing.critical_path_delay_ps,
+        placement_width_um: report.placement.width_um,
+        placement_height_um: report.placement.height_um,
+        placement_area_um2: report.placement.width_um * report.placement.height_um,
+        total_route_length_um: report.routing.total_length_um,
+        setup_violations: report.timing.setup_violations,
+        hold_violations: report.timing.final_hold_violations,
+        routed_nets: report.routing.routed_nets,
+        is_pareto_optimal: false,
+    }
+}
+
+fn is_pareto_dominated(candidate: &DsePoint, other: &DsePoint) -> bool {
+    let setup_ok = other.worst_setup_slack_ps >= candidate.worst_setup_slack_ps;
+    let area_ok = other.placement_area_um2 <= candidate.placement_area_um2;
+    let length_ok = other.total_route_length_um <= candidate.total_route_length_um;
+    let violations_ok = (other.setup_violations + other.hold_violations)
+        <= (candidate.setup_violations + candidate.hold_violations);
+
+    (setup_ok && area_ok && length_ok && violations_ok)
+        && (other.worst_setup_slack_ps > candidate.worst_setup_slack_ps
+            || other.placement_area_um2 < candidate.placement_area_um2
+            || other.total_route_length_um < candidate.total_route_length_um
+            || (other.setup_violations + other.hold_violations)
+                < (candidate.setup_violations + candidate.hold_violations))
+}
+
+fn compute_pareto_front(points: &[DsePoint]) -> Vec<usize> {
+    let mut pareto_indices = Vec::new();
+    for (i, candidate) in points.iter().enumerate() {
+        let dominated = points
+            .iter()
+            .enumerate()
+            .any(|(j, other)| i != j && is_pareto_dominated(candidate, other));
+        if !dominated {
+            pareto_indices.push(i);
+        }
+    }
+    pareto_indices
+}
+
+fn select_recommended(points: &[DsePoint]) -> Option<usize> {
+    if points.is_empty() {
+        return None;
+    }
+
+    let feasible: Vec<(usize, &DsePoint)> = points
+        .iter()
+        .enumerate()
+        .filter(|p| p.1.setup_violations == 0 && p.1.hold_violations == 0)
+        .collect();
+
+    let candidates = if feasible.is_empty() {
+        points.iter().enumerate().collect()
+    } else {
+        feasible
+    };
+
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            let score_a = -a.1.worst_setup_slack_ps + a.1.placement_area_um2 * 0.001;
+            let score_b = -b.1.worst_setup_slack_ps + b.1.placement_area_um2 * 0.001;
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| *i)
+}
+
+impl FlowRunner {
+    pub fn run_dse(
+        &mut self,
+        netlist: &Netlist,
+        pdk: &Pdk,
+        base_config: &FlowConfig,
+        dse_config: &DseConfig,
+    ) -> DseReport {
+        let mut points = Vec::new();
+        let mut failed = 0usize;
+
+        for &clock_period_ps in &dse_config.clock_period_ps_values {
+            for &prefer_ptl in &dse_config.prefer_ptl_from_length_um_values {
+                for &detour_margin in &dse_config.detour_margin_um_values {
+                    for &min_hold_jtl in &dse_config.min_hold_jtl_length_um_values {
+                        for &phase_count in &dse_config.sfq_phase_count_values {
+                            let config = flow_config_from_dse_params(
+                                base_config,
+                                clock_period_ps,
+                                prefer_ptl,
+                                detour_margin,
+                                min_hold_jtl,
+                                phase_count,
+                            );
+                            let mut trial_netlist = netlist.clone();
+                            match self.compile_layout(&mut trial_netlist, pdk, &config) {
+                                Ok(report) => {
+                                    points.push(dse_point_from_report(
+                                        &report,
+                                        clock_period_ps,
+                                        prefer_ptl,
+                                        detour_margin,
+                                        min_hold_jtl,
+                                        phase_count,
+                                    ));
+                                }
+                                Err(_) => {
+                                    failed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let pareto_indices = compute_pareto_front(&points);
+        for idx in &pareto_indices {
+            points[*idx].is_pareto_optimal = true;
+        }
+        let pareto_front: Vec<DsePoint> = pareto_indices.iter().map(|&i| points[i].clone()).collect();
+        let recommended_idx = select_recommended(&points);
+        let recommended = recommended_idx.map(|i| points[i].clone());
+
+        DseReport {
+            points,
+            pareto_front,
+            total_evaluated: dse_config.total_points(),
+            total_failed: failed,
+            recommended,
+        }
+    }
+}
+
+fn build_gds_library(
+    netlist: &Netlist,
+    placement: &Placement,
+    routing: &RoutingReport,
+    library_name: &str,
+) -> rflux_io::gds::GdsLibrary {
+    use rflux_io::gds::*;
+
+    let lib_name = sanitize_gds_name(library_name);
+    let mut structures = Vec::new();
+
+    for node in netlist.nodes() {
+        let name = cell_structure_name(netlist, node.id);
+        let elements = vec![
+            make_cell_boundary(0.0, 0.0, CELL_WIDTH_UM, CELL_HEIGHT_UM),
+            make_cell_outline(0.0, 0.0, CELL_WIDTH_UM, CELL_HEIGHT_UM),
+            make_port_marker(0.0, CELL_HEIGHT_UM / 2.0),
+            make_port_marker(CELL_WIDTH_UM, CELL_HEIGHT_UM / 2.0),
+            make_label(0.0, 0.0, &node.name),
+        ];
+        structures.push(GdsStructure { name, elements });
+    }
+
+    let mut top_elements = Vec::new();
+    for placed in &placement.nodes {
+        let name = cell_structure_name(netlist, placed.node);
+        top_elements.push(GdsElement::Sref(GdsSref {
+            name,
+            x: um_to_db(placed.point.x_um),
+            y: um_to_db(placed.point.y_um),
+        }));
+    }
+    for route in &routing.routes {
+        if route.segments.is_empty() {
+            continue;
+        }
+        let seg_tuples: Vec<(f64, f64, f64, f64, u8)> = route
+            .segments
+            .iter()
+            .map(|s| (s.start.x_um, s.start.y_um, s.end.x_um, s.end.y_um, s.layer))
+            .collect();
+        if let Some(path) = make_route_path(&seg_tuples) {
+            top_elements.push(path);
+        }
+    }
+    structures.push(GdsStructure {
+        name: "TOP".to_string(),
+        elements: top_elements,
+    });
+
+    GdsLibrary {
+        name: lib_name,
+        structures,
+    }
+}
+
+fn build_svg_layout(
+    netlist: &Netlist,
+    placement: &Placement,
+    routing: &RoutingReport,
+) -> rflux_io::layout_svg::SvgLayout {
+    use rflux_io::layout_svg::*;
+
+    const CELL_W: f64 = 20.0;
+    const CELL_H: f64 = 12.0;
+
+    let mut cells = Vec::new();
+    let mut width_um = 0.0_f64;
+    let mut height_um = 0.0_f64;
+
+    for placed in &placement.nodes {
+        let node = &netlist.nodes()[placed.node.0];
+        cells.push(SvgCell {
+            x_um: placed.point.x_um,
+            y_um: placed.point.y_um,
+            name: node.name.clone(),
+            kind: node.kind.clone(),
+        });
+        width_um = width_um.max(placed.point.x_um + CELL_W);
+        height_um = height_um.max(placed.point.y_um + CELL_H);
+    }
+
+    let mut routes = Vec::new();
+    for route in &routing.routes {
+        if route.segments.is_empty() {
+            continue;
+        }
+        let mut points = Vec::new();
+        let first = &route.segments[0];
+        points.push((
+            first.start.x_um + CELL_W / 2.0,
+            first.start.y_um + CELL_H / 2.0,
+        ));
+        for seg in &route.segments {
+            points.push((
+                seg.end.x_um + CELL_W / 2.0,
+                seg.end.y_um + CELL_H / 2.0,
+            ));
+        }
+        let layer = route.segments[0].layer;
+        routes.push(SvgRoute { points, layer });
+    }
+
+    SvgLayout {
+        cells,
+        routes,
+        width_um,
+        height_um,
     }
 }
 
@@ -6187,5 +6567,164 @@ mod tests {
         };
         let score = report.electro_thermal_mechanical_score();
         assert!(score >= 0.0 && score <= 1.0, "score out of range: {score}");
+    }
+
+    #[test]
+    fn dse_config_total_points_is_product_of_ranges() {
+        let config = DseConfig {
+            clock_period_ps_values: vec![100.0, 120.0],
+            prefer_ptl_from_length_um_values: vec![60.0],
+            detour_margin_um_values: vec![8.0, 12.0, 16.0],
+            min_hold_jtl_length_um_values: vec![0.0],
+            sfq_phase_count_values: vec![2],
+        };
+        assert_eq!(config.total_points(), 6);
+    }
+
+    #[test]
+    fn dse_default_config_has_reasonable_values() {
+        let config = DseConfig::default();
+        assert!(!config.clock_period_ps_values.is_empty());
+        assert!(!config.prefer_ptl_from_length_um_values.is_empty());
+        assert!(!config.detour_margin_um_values.is_empty());
+        assert!(config.total_points() > 0);
+    }
+
+    #[test]
+    fn run_dse_evaluates_all_points() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+
+        let mut config = FlowConfig::default();
+        config.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: a, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: b, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 1,
+                    },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+
+        let dse_config = DseConfig {
+            clock_period_ps_values: vec![100.0, 120.0],
+            prefer_ptl_from_length_um_values: vec![60.0],
+            detour_margin_um_values: vec![8.0, 12.0],
+            min_hold_jtl_length_um_values: vec![0.0],
+            sfq_phase_count_values: vec![2],
+        };
+
+        let pdk = Pdk::minimal("dse-test");
+        let mut runner = FlowRunner::new();
+        let report = runner.run_dse(&netlist, &pdk, &config, &dse_config);
+
+        assert_eq!(report.points.len(), 4);
+        assert_eq!(report.total_evaluated, 4);
+        assert_eq!(report.total_failed, 0);
+        assert!(report.recommended.is_some());
+        assert!(!report.pareto_front.is_empty());
+    }
+
+    #[test]
+    fn dse_pareto_front_is_non_dominated() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+
+        let mut config = FlowConfig::default();
+        config.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: a, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: b, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 1,
+                    },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+
+        let dse_config = DseConfig {
+            clock_period_ps_values: vec![80.0, 100.0, 120.0],
+            prefer_ptl_from_length_um_values: vec![40.0, 60.0],
+            detour_margin_um_values: vec![8.0, 12.0],
+            min_hold_jtl_length_um_values: vec![0.0],
+            sfq_phase_count_values: vec![2],
+        };
+
+        let pdk = Pdk::minimal("dse-pareto");
+        let mut runner = FlowRunner::new();
+        let report = runner.run_dse(&netlist, &pdk, &config, &dse_config);
+
+        assert!(report.pareto_front.len() <= report.points.len());
+        for point in &report.pareto_front {
+            assert!(point.is_pareto_optimal);
+        }
+    }
+
+    #[test]
+    fn dse_recommended_has_best_score() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::Port, "b");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+
+        let mut config = FlowConfig::default();
+        config.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: a, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: b, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 1,
+                    },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+
+        let dse_config = DseConfig {
+            clock_period_ps_values: vec![100.0, 120.0],
+            prefer_ptl_from_length_um_values: vec![60.0],
+            detour_margin_um_values: vec![8.0],
+            min_hold_jtl_length_um_values: vec![0.0],
+            sfq_phase_count_values: vec![2],
+        };
+
+        let pdk = Pdk::minimal("dse-rec");
+        let mut runner = FlowRunner::new();
+        let report = runner.run_dse(&netlist, &pdk, &config, &dse_config);
+
+        let recommended = report.recommended.as_ref().expect("should have recommended");
+        assert!(recommended.worst_setup_slack_ps.is_finite());
+        assert!(recommended.placement_area_um2 > 0.0);
     }
 }

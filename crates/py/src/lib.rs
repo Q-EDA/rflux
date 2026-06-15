@@ -3303,9 +3303,232 @@ fn verify_layout(
 }
 
 #[pyfunction]
-#[pyo3(signature = (deck_text, simulation_mode=None, external_command=None))]
-fn simulate_text(
-    deck_text: &str,
+#[pyo3(signature = (circuit, gds_path, library_name=None, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, min_hold_jtl_length_um=None, prefer_ptl_from_length_um=None, detour_margin_um=None, characterized_library_json=None, characterized_library_entries=None))]
+fn export_gds(
+    mut circuit: PyRefMut<'_, Circuit>,
+    gds_path: &str,
+    library_name: Option<String>,
+    plan: Option<&PyCompilePlan>,
+    fixed_nodes: Option<Vec<PyFixedNodePlacement>>,
+    blocked_regions: Option<Vec<PyBlockedRegion>>,
+    timing_constraints: Option<Vec<PyNodeTimingConstraint>>,
+    pin_timing_constraints: Option<Vec<PyPinTimingConstraint>>,
+    clock_domains: Option<Vec<PyClockDomainConstraint>>,
+    crossing_constraints: Option<Vec<PyCrossingConstraint>>,
+    min_hold_jtl_length_um: Option<f64>,
+    prefer_ptl_from_length_um: Option<f64>,
+    detour_margin_um: Option<f64>,
+    characterized_library_json: Option<String>,
+    characterized_library_entries: Option<Vec<String>>,
+) -> PyResult<()> {
+    if let Some(plan) = plan {
+        ensure_plan_nodes(&mut circuit.netlist, plan);
+    }
+    if let Some(fixed_nodes) = &fixed_nodes {
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
+    }
+    let config = to_flow_config(
+        plan,
+        fixed_nodes,
+        blocked_regions,
+        timing_constraints,
+        pin_timing_constraints,
+        clock_domains,
+        crossing_constraints,
+        min_hold_jtl_length_um,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
+    )?;
+    let pdk = build_flow_pdk(
+        "py-minimal-pdk",
+        characterized_library_json.as_deref(),
+        characterized_library_entries,
+    )?;
+    let lib_name = library_name.unwrap_or_else(|| "rflux_design".to_string());
+
+    let mut runner = FlowRunner::new();
+    runner
+        .export_gds(&mut circuit.netlist, &pdk, &config, gds_path, &lib_name)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (circuit, svg_path, title=None, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, min_hold_jtl_length_um=None, prefer_ptl_from_length_um=None, detour_margin_um=None, characterized_library_json=None, characterized_library_entries=None))]
+fn export_svg(
+    mut circuit: PyRefMut<'_, Circuit>,
+    svg_path: &str,
+    title: Option<String>,
+    plan: Option<&PyCompilePlan>,
+    fixed_nodes: Option<Vec<PyFixedNodePlacement>>,
+    blocked_regions: Option<Vec<PyBlockedRegion>>,
+    timing_constraints: Option<Vec<PyNodeTimingConstraint>>,
+    pin_timing_constraints: Option<Vec<PyPinTimingConstraint>>,
+    clock_domains: Option<Vec<PyClockDomainConstraint>>,
+    crossing_constraints: Option<Vec<PyCrossingConstraint>>,
+    min_hold_jtl_length_um: Option<f64>,
+    prefer_ptl_from_length_um: Option<f64>,
+    detour_margin_um: Option<f64>,
+    characterized_library_json: Option<String>,
+    characterized_library_entries: Option<Vec<String>>,
+) -> PyResult<()> {
+    if let Some(plan) = plan {
+        ensure_plan_nodes(&mut circuit.netlist, plan);
+    }
+    if let Some(fixed_nodes) = &fixed_nodes {
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
+    }
+    let config = to_flow_config(
+        plan,
+        fixed_nodes,
+        blocked_regions,
+        timing_constraints,
+        pin_timing_constraints,
+        clock_domains,
+        crossing_constraints,
+        min_hold_jtl_length_um,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
+    )?;
+    let pdk = build_flow_pdk(
+        "py-minimal-pdk",
+        characterized_library_json.as_deref(),
+        characterized_library_entries,
+    )?;
+    let title_str = title.unwrap_or_else(|| "rflux layout".to_string());
+
+    let mut runner = FlowRunner::new();
+    runner
+        .export_svg(&mut circuit.netlist, &pdk, &config, svg_path, &title_str)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
+    mut circuit: PyRefMut<'_, Circuit>,
+    plan: Option<&PyCompilePlan>,
+    fixed_nodes: Option<Vec<PyFixedNodePlacement>>,
+    blocked_regions: Option<Vec<PyBlockedRegion>>,
+    timing_constraints: Option<Vec<PyNodeTimingConstraint>>,
+    pin_timing_constraints: Option<Vec<PyPinTimingConstraint>>,
+    clock_domains: Option<Vec<PyClockDomainConstraint>>,
+    crossing_constraints: Option<Vec<PyCrossingConstraint>>,
+    clock_period_ps_values: Option<Vec<f64>>,
+    prefer_ptl_from_length_um_values: Option<Vec<f64>>,
+    detour_margin_um_values: Option<Vec<f64>>,
+    min_hold_jtl_length_um_values: Option<Vec<f64>>,
+    sfq_phase_count_values: Option<Vec<usize>>,
+    characterized_library_json: Option<String>,
+    characterized_library_entries: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    if let Some(plan) = plan {
+        ensure_plan_nodes(&mut circuit.netlist, plan);
+    }
+    if let Some(fixed_nodes) = &fixed_nodes {
+        ensure_node_capacity(
+            &mut circuit.netlist,
+            fixed_nodes.iter().map(|fixed| fixed.node),
+        );
+    }
+    let config = to_flow_config(
+        plan,
+        fixed_nodes,
+        blocked_regions,
+        timing_constraints,
+        pin_timing_constraints,
+        clock_domains,
+        crossing_constraints,
+        None,
+        None,
+        None,
+    )?;
+    let pdk = build_flow_pdk(
+        "py-minimal-pdk",
+        characterized_library_json.as_deref(),
+        characterized_library_entries,
+    )?;
+
+    let dse_config = rflux_flow::DseConfig {
+        clock_period_ps_values: clock_period_ps_values
+            .unwrap_or_else(|| vec![80.0, 100.0, 120.0]),
+        prefer_ptl_from_length_um_values: prefer_ptl_from_length_um_values
+            .unwrap_or_else(|| vec![40.0, 60.0, 80.0]),
+        detour_margin_um_values: detour_margin_um_values
+            .unwrap_or_else(|| vec![8.0, 12.0, 16.0]),
+        min_hold_jtl_length_um_values: min_hold_jtl_length_um_values
+            .unwrap_or_else(|| vec![0.0]),
+        sfq_phase_count_values: sfq_phase_count_values.unwrap_or_else(|| vec![2]),
+    };
+
+    let mut runner = FlowRunner::new();
+    let report = runner.run_dse(&circuit.netlist, &pdk, &config, &dse_config);
+
+    Python::with_gil(|py| {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("total_evaluated", report.total_evaluated)?;
+        dict.set_item("total_failed", report.total_failed)?;
+
+        let points_list = PyList::empty_bound(py);
+        for point in &report.points {
+            let pd = PyDict::new_bound(py);
+            pd.set_item("clock_period_ps", point.clock_period_ps)?;
+            pd.set_item("prefer_ptl_from_length_um", point.prefer_ptl_from_length_um)?;
+            pd.set_item("detour_margin_um", point.detour_margin_um)?;
+            pd.set_item("min_hold_jtl_length_um", point.min_hold_jtl_length_um)?;
+            pd.set_item("sfq_phase_count", point.sfq_phase_count)?;
+            pd.set_item("worst_setup_slack_ps", point.worst_setup_slack_ps)?;
+            pd.set_item("worst_hold_slack_ps", point.worst_hold_slack_ps)?;
+            pd.set_item("critical_path_delay_ps", point.critical_path_delay_ps)?;
+            pd.set_item("placement_area_um2", point.placement_area_um2)?;
+            pd.set_item("total_route_length_um", point.total_route_length_um)?;
+            pd.set_item("setup_violations", point.setup_violations)?;
+            pd.set_item("hold_violations", point.hold_violations)?;
+            pd.set_item("is_pareto_optimal", point.is_pareto_optimal)?;
+            points_list.append(pd)?;
+        }
+        dict.set_item("points", points_list)?;
+
+        let pareto_list = PyList::empty_bound(py);
+        for point in &report.pareto_front {
+            let pd = PyDict::new_bound(py);
+            pd.set_item("clock_period_ps", point.clock_period_ps)?;
+            pd.set_item("prefer_ptl_from_length_um", point.prefer_ptl_from_length_um)?;
+            pd.set_item("detour_margin_um", point.detour_margin_um)?;
+            pd.set_item("worst_setup_slack_ps", point.worst_setup_slack_ps)?;
+            pd.set_item("placement_area_um2", point.placement_area_um2)?;
+            pd.set_item("total_route_length_um", point.total_route_length_um)?;
+            pd.set_item("setup_violations", point.setup_violations)?;
+            pd.set_item("hold_violations", point.hold_violations)?;
+            pareto_list.append(pd)?;
+        }
+        dict.set_item("pareto_front", pareto_list)?;
+
+        if let Some(rec) = &report.recommended {
+            let rd = PyDict::new_bound(py);
+            rd.set_item("clock_period_ps", rec.clock_period_ps)?;
+            rd.set_item("prefer_ptl_from_length_um", rec.prefer_ptl_from_length_um)?;
+            rd.set_item("detour_margin_um", rec.detour_margin_um)?;
+            rd.set_item("min_hold_jtl_length_um", rec.min_hold_jtl_length_um)?;
+            rd.set_item("sfq_phase_count", rec.sfq_phase_count)?;
+            rd.set_item("worst_setup_slack_ps", rec.worst_setup_slack_ps)?;
+            rd.set_item("placement_area_um2", rec.placement_area_um2)?;
+            rd.set_item("total_route_length_um", rec.total_route_length_um)?;
+            rd.set_item("setup_violations", rec.setup_violations)?;
+            rd.set_item("hold_violations", rec.hold_violations)?;
+            dict.set_item("recommended", rd)?;
+        }
+
+        Ok(dict.into_any().unbind())
+    })
+}
+
+#[pyfunction]
     simulation_mode: Option<String>,
     external_command: Option<String>,
 ) -> PyResult<PySimulationReport> {
@@ -3508,6 +3731,9 @@ fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(characterize_compound_cell, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_advanced_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(verify_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(export_gds, m)?)?;
+    m.add_function(wrap_pyfunction!(export_svg, m)?)?;
+    m.add_function(wrap_pyfunction!(run_dse, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_text, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_file, m)?)?;
     m.add_function(wrap_pyfunction!(is_supported_external_command, m)?)?;

@@ -57,6 +57,7 @@ enum Commands {
     SimulateFile(SimulateFileArgs),
     SolveDimacs(SolveDimacsArgs),
     CheckEquivalence(CheckEquivalenceArgs),
+    Dse(DseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -216,6 +217,14 @@ struct LayoutCommandArgs {
     #[arg(long)]
     flow_config_patch_output: Option<PathBuf>,
     #[arg(long)]
+    gds_output: Option<PathBuf>,
+    #[arg(long)]
+    gds_library_name: Option<String>,
+    #[arg(long)]
+    svg_output: Option<PathBuf>,
+    #[arg(long)]
+    svg_title: Option<String>,
+    #[arg(long)]
     clock_period_ps: Option<f64>,
     #[arg(long)]
     input_arrival_ps: Option<f64>,
@@ -295,6 +304,30 @@ struct CheckEquivalenceArgs {
     dimacs_output: Option<PathBuf>,
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct DseArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
+    input_format: CliNetlistInputFormat,
+    #[arg(long)]
+    pdk: Option<PathBuf>,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    flow_config: Option<PathBuf>,
+    #[arg(long, value_delimiter = ',')]
+    clock_period_ps: Option<Vec<f64>>,
+    #[arg(long, value_delimiter = ',')]
+    prefer_ptl_from_length_um: Option<Vec<f64>>,
+    #[arg(long, value_delimiter = ',')]
+    detour_margin_um: Option<Vec<f64>>,
+    #[arg(long, value_delimiter = ',')]
+    min_hold_jtl_length_um: Option<Vec<f64>>,
+    #[arg(long, value_delimiter = ',')]
+    sfq_phase_count: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -964,6 +997,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::SimulateFile(args) => run_simulate_file(args),
         Commands::SolveDimacs(args) => run_solve_dimacs(args),
         Commands::CheckEquivalence(args) => run_check_equivalence(args),
+        Commands::Dse(args) => run_dse(args),
     }
 }
 
@@ -3339,6 +3373,16 @@ fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
     )?;
+    let gds_output = args.gds_output.clone();
+    let gds_library_name = args
+        .gds_library_name
+        .clone()
+        .unwrap_or_else(|| "rflux_design".to_string());
+    let svg_output = args.svg_output.clone();
+    let svg_title = args
+        .svg_title
+        .clone()
+        .unwrap_or_else(|| "rflux layout".to_string());
     let report = with_loaded_flow_inputs(
         &args.input,
         args.input_format,
@@ -3347,8 +3391,18 @@ fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
             if let Some(path) = args.timing_constraints.as_deref() {
                 apply_timing_constraints_file(&mut flow_config, netlist, path)?;
             }
-            flow.compile_layout(netlist, pdk, &flow_config)
-                .context("compile-layout failed")
+            let report = flow
+                .compile_layout(netlist, pdk, &flow_config)
+                .context("compile-layout failed")?;
+            if let Some(gds_path) = gds_output.as_deref() {
+                flow.export_gds(netlist, pdk, &flow_config, gds_path, &gds_library_name)
+                    .context("GDS-II export failed")?;
+            }
+            if let Some(svg_path) = svg_output.as_deref() {
+                flow.export_svg(netlist, pdk, &flow_config, svg_path, &svg_title)
+                    .context("SVG export failed")?;
+            }
+            Ok(report)
         },
     )?;
     let report_json = layout_report_to_json_with_flow_config(&report, &flow_config);
@@ -3406,6 +3460,79 @@ fn run_analyze_timing(args: LayoutCommandArgs) -> Result<()> {
         );
     }
     emit_json(&with_schema_version(report_json), args.output.as_deref())
+}
+
+fn run_dse(args: DseArgs) -> Result<()> {
+    let base_config = flow_config_with_cli_closure_options(
+        args.flow_config.as_deref(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    let dse_config = rflux_flow::DseConfig {
+        clock_period_ps_values: args
+            .clock_period_ps
+            .unwrap_or_else(|| vec![80.0, 100.0, 120.0]),
+        prefer_ptl_from_length_um_values: args
+            .prefer_ptl_from_length_um
+            .unwrap_or_else(|| vec![40.0, 60.0, 80.0]),
+        detour_margin_um_values: args
+            .detour_margin_um
+            .unwrap_or_else(|| vec![8.0, 12.0, 16.0]),
+        min_hold_jtl_length_um_values: args
+            .min_hold_jtl_length_um
+            .unwrap_or_else(|| vec![0.0]),
+        sfq_phase_count_values: args.sfq_phase_count.unwrap_or_else(|| vec![2]),
+    };
+
+    let report = with_loaded_flow_inputs(
+        &args.input,
+        args.input_format,
+        args.pdk.clone(),
+        |flow, netlist, pdk| Ok(flow.run_dse(netlist, pdk, &base_config, &dse_config)),
+    )?;
+
+    let report_json = dse_report_to_json(&report);
+    emit_json(&with_schema_version(report_json), args.output.as_deref())
+}
+
+fn dse_report_to_json(report: &rflux_flow::DseReport) -> Value {
+    let points: Vec<Value> = report.points.iter().map(dse_point_to_json).collect();
+    let pareto: Vec<Value> = report.pareto_front.iter().map(dse_point_to_json).collect();
+    let recommended = report.recommended.as_ref().map(dse_point_to_json);
+    json!({
+        "kind": "dse_report",
+        "total_evaluated": report.total_evaluated,
+        "total_failed": report.total_failed,
+        "points": points,
+        "pareto_front": pareto,
+        "recommended": recommended,
+    })
+}
+
+fn dse_point_to_json(point: &rflux_flow::DsePoint) -> Value {
+    json!({
+        "clock_period_ps": point.clock_period_ps,
+        "prefer_ptl_from_length_um": point.prefer_ptl_from_length_um,
+        "detour_margin_um": point.detour_margin_um,
+        "min_hold_jtl_length_um": point.min_hold_jtl_length_um,
+        "sfq_phase_count": point.sfq_phase_count,
+        "worst_setup_slack_ps": point.worst_setup_slack_ps,
+        "worst_hold_slack_ps": point.worst_hold_slack_ps,
+        "critical_path_delay_ps": point.critical_path_delay_ps,
+        "placement_width_um": point.placement_width_um,
+        "placement_height_um": point.placement_height_um,
+        "placement_area_um2": point.placement_area_um2,
+        "total_route_length_um": point.total_route_length_um,
+        "setup_violations": point.setup_violations,
+        "hold_violations": point.hold_violations,
+        "routed_nets": point.routed_nets,
+        "is_pareto_optimal": point.is_pareto_optimal,
+    })
 }
 
 fn run_verify_layout(args: VerifyLayoutArgs) -> Result<()> {
@@ -6607,6 +6734,10 @@ mod tests {
             pdk: None,
             output: Some(output_path.clone()),
             flow_config_patch_output: Some(patch_path.clone()),
+            gds_output: None,
+            gds_library_name: None,
+            svg_output: None,
+            svg_title: None,
             clock_period_ps: Some(90.0),
             input_arrival_ps: Some(4.0),
             sfq_phase_count: Some(2),
@@ -6651,6 +6782,10 @@ mod tests {
             pdk: None,
             output: Some(replay_output_path.clone()),
             flow_config_patch_output: None,
+            gds_output: None,
+            gds_library_name: None,
+            svg_output: None,
+            svg_title: None,
             clock_period_ps: None,
             input_arrival_ps: None,
             sfq_phase_count: None,
@@ -6738,6 +6873,10 @@ mod tests {
                 pdk: None,
                 output: Some(output_path.clone()),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: None,
                 input_arrival_ps: None,
                 sfq_phase_count: None,
@@ -6849,6 +6988,10 @@ mod tests {
                 pdk: Some(pdk_path),
                 output: Some(output_path.clone()),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: None,
                 input_arrival_ps: None,
                 sfq_phase_count: None,
@@ -6919,6 +7062,10 @@ mod tests {
                 pdk: None,
                 output: Some(output_path.clone()),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: Some(20.0),
                 input_arrival_ps: Some(5.0),
                 sfq_phase_count: Some(2),
@@ -6993,6 +7140,10 @@ mod tests {
                 pdk: None,
                 output: Some(output_path.clone()),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: Some(20.0),
                 input_arrival_ps: None,
                 sfq_phase_count: None,
@@ -7068,6 +7219,10 @@ mod tests {
                 pdk: None,
                 output: Some(output_path.clone()),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: None,
                 input_arrival_ps: None,
                 sfq_phase_count: Some(2),
@@ -7145,6 +7300,10 @@ mod tests {
                 pdk: None,
                 output: Some(output_path.clone()),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: None,
                 input_arrival_ps: None,
                 sfq_phase_count: Some(2),
@@ -7214,10 +7373,14 @@ mod tests {
                 pdk: None,
                 output: Some(output_path),
                 flow_config_patch_output: None,
+                gds_output: None,
+                gds_library_name: None,
+                svg_output: None,
+                svg_title: None,
                 clock_period_ps: None,
                 input_arrival_ps: None,
-                sfq_phase_count: None,
-                sfq_pulse_window_ps: None,
+                sfq_phase_count: Some(2),
+                sfq_pulse_window_ps: Some(2.5),
                 flow_config: None,
                 timing_constraints: Some(constraints_path),
                 min_hold_jtl_length_um: None,

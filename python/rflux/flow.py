@@ -495,6 +495,123 @@ def build_bias_grid(circuit):
     return _api._core_build_bias_grid(circuit)
 
 
+def export_gds(
+    circuit,
+    gds_path: str,
+    library_name: str | None = None,
+    plan: CompilePlan | None = None,
+    fixed_nodes: list[FixedNodePlacement] | None = None,
+    blocked_regions: list[BlockedRegion] | None = None,
+    timing_constraints: list[NodeTimingConstraint] | None = None,
+    pin_timing_constraints: list[PinTimingConstraint] | None = None,
+    clock_domains: list | None = None,
+    crossing_constraints: list | None = None,
+    min_hold_jtl_length_um: float | None = None,
+    prefer_ptl_from_length_um: float | None = None,
+    detour_margin_um: float | None = None,
+    characterized_library_json: str | None = None,
+    characterized_library_entries: list[str] | None = None,
+) -> None:
+    """Run the full layout flow and export the result as a GDS-II file."""
+    _api._require_core_extension("export_gds(...)", _api._core_export_gds)
+    core_plan = _api._to_core_compile_plan(plan) if plan is not None else None
+    _api._core_export_gds(
+        circuit,
+        gds_path,
+        library_name,
+        core_plan,
+        _api._to_core_fixed_nodes(fixed_nodes),
+        _api._to_core_blocked_regions(blocked_regions),
+        _api._to_core_timing_constraints(timing_constraints),
+        _api._to_core_pin_timing_constraints(pin_timing_constraints),
+        _api._to_core_clock_domains(clock_domains),
+        _api._to_core_crossing_constraints(crossing_constraints),
+        min_hold_jtl_length_um,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
+        characterized_library_json,
+        characterized_library_entries,
+    )
+
+
+def export_svg(
+    circuit,
+    svg_path: str,
+    title: str | None = None,
+    plan: CompilePlan | None = None,
+    fixed_nodes: list[FixedNodePlacement] | None = None,
+    blocked_regions: list[BlockedRegion] | None = None,
+    timing_constraints: list[NodeTimingConstraint] | None = None,
+    pin_timing_constraints: list[PinTimingConstraint] | None = None,
+    clock_domains: list | None = None,
+    crossing_constraints: list | None = None,
+    min_hold_jtl_length_um: float | None = None,
+    prefer_ptl_from_length_um: float | None = None,
+    detour_margin_um: float | None = None,
+    characterized_library_json: str | None = None,
+    characterized_library_entries: list[str] | None = None,
+) -> None:
+    """Run the full layout flow and export the result as an SVG visualization."""
+    _api._require_core_extension("export_svg(...)", _api._core_export_svg)
+    core_plan = _api._to_core_compile_plan(plan) if plan is not None else None
+    _api._core_export_svg(
+        circuit,
+        svg_path,
+        title,
+        core_plan,
+        _api._to_core_fixed_nodes(fixed_nodes),
+        _api._to_core_blocked_regions(blocked_regions),
+        _api._to_core_timing_constraints(timing_constraints),
+        _api._to_core_pin_timing_constraints(pin_timing_constraints),
+        _api._to_core_clock_domains(clock_domains),
+        _api._to_core_crossing_constraints(crossing_constraints),
+        min_hold_jtl_length_um,
+        prefer_ptl_from_length_um,
+        detour_margin_um,
+        characterized_library_json,
+        characterized_library_entries,
+    )
+
+
+def run_dse(
+    circuit,
+    plan: CompilePlan | None = None,
+    fixed_nodes: list[FixedNodePlacement] | None = None,
+    blocked_regions: list[BlockedRegion] | None = None,
+    timing_constraints: list[NodeTimingConstraint] | None = None,
+    pin_timing_constraints: list[PinTimingConstraint] | None = None,
+    clock_domains: list | None = None,
+    crossing_constraints: list | None = None,
+    clock_period_ps_values: list[float] | None = None,
+    prefer_ptl_from_length_um_values: list[float] | None = None,
+    detour_margin_um_values: list[float] | None = None,
+    min_hold_jtl_length_um_values: list[float] | None = None,
+    sfq_phase_count_values: list[int] | None = None,
+    characterized_library_json: str | None = None,
+    characterized_library_entries: list[str] | None = None,
+) -> dict:
+    """Run Design Space Exploration and return all evaluated points, Pareto front, and recommended config."""
+    _api._require_core_extension("run_dse(...)", _api._core_run_dse)
+    core_plan = _api._to_core_compile_plan(plan) if plan is not None else None
+    return _api._core_run_dse(
+        circuit,
+        core_plan,
+        _api._to_core_fixed_nodes(fixed_nodes),
+        _api._to_core_blocked_regions(blocked_regions),
+        _api._to_core_timing_constraints(timing_constraints),
+        _api._to_core_pin_timing_constraints(pin_timing_constraints),
+        _api._to_core_clock_domains(clock_domains),
+        _api._to_core_crossing_constraints(crossing_constraints),
+        clock_period_ps_values,
+        prefer_ptl_from_length_um_values,
+        detour_margin_um_values,
+        min_hold_jtl_length_um_values,
+        sfq_phase_count_values,
+        characterized_library_json,
+        characterized_library_entries,
+    )
+
+
 __all__ = [
     "DEFAULT_CLOCK_PERIOD_PS",
     "DEFAULT_INPUT_ARRIVAL_PS",
@@ -531,4 +648,7 @@ __all__ = [
     "optimize_design_with_characterized_library",
     "build_clock_tree",
     "build_bias_grid",
+    "export_gds",
+    "export_svg",
+    "run_dse",
 ]
