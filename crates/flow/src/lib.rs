@@ -71,6 +71,9 @@ pub struct RoutingSummary {
     pub ptl_routes: usize,
     pub effective_prefer_ptl_from_length_um: f64,
     pub effective_detour_margin_um: f64,
+    pub reflection_risk_routes: usize,
+    pub reflection_boundary_sites: usize,
+    pub max_reflection_energy: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,6 +464,7 @@ struct CompiledArtifacts {
     placement: Placement,
     routing: RoutingReport,
     effective_routing_config: RoutingConfig,
+    reflection: rflux_route::ReflectionReport,
     clock: ClockSummary,
     timing: TimingReport,
     initial_total_detour_overhead_um: f64,
@@ -590,6 +594,9 @@ impl FlowRunner {
                     .effective_routing_config
                     .prefer_ptl_from_length_um,
                 effective_detour_margin_um: artifacts.effective_routing_config.detour_margin_um,
+                reflection_risk_routes: artifacts.reflection.total_risk_routes,
+                reflection_boundary_sites: artifacts.reflection.total_boundary_sites,
+                max_reflection_energy: artifacts.reflection.max_reflection_energy,
             },
             clock: artifacts.clock,
             timing: TimingSummary {
@@ -680,7 +687,7 @@ impl FlowRunner {
         default_pdk.active_timing_corner = None;
         let default_timing =
             self.timing
-                .analyze(netlist, &artifacts.routing, &default_pdk, &config.timing)?;
+                .analyze(netlist, &artifacts.routing, &default_pdk, &config.timing, None)?;
         corner_reports.push(timing_corner_analysis_report(
             "default",
             true,
@@ -694,7 +701,7 @@ impl FlowRunner {
             let corner_pdk = pdk.with_active_timing_corner(corner_name);
             let timing =
                 self.timing
-                    .analyze(netlist, &artifacts.routing, &corner_pdk, &config.timing)?;
+                    .analyze(netlist, &artifacts.routing, &corner_pdk, &config.timing, None)?;
             corner_reports.push(timing_corner_analysis_report(
                 corner_name,
                 false,
@@ -725,6 +732,7 @@ impl FlowRunner {
             pdk,
             &config.timing,
             statistical_config,
+            None,
         )?;
 
         Ok(StatisticalTimingAnalysisReport {
@@ -1313,9 +1321,10 @@ impl FlowRunner {
             initial_routing,
             &routing_config,
         )?;
+        let coupling_map = rflux_route::CouplingMap::build(&routing.routes, 10.0);
         let initial_timing = self
             .timing
-            .analyze(netlist, &routing, pdk, &config.timing)?;
+            .analyze(netlist, &routing, pdk, &config.timing, Some(&coupling_map))?;
         let initial_closure = timing_closure_summary(
             initial_timing.setup_violations,
             initial_timing.hold_violations,
@@ -1345,6 +1354,8 @@ impl FlowRunner {
         if hold_fix_applied {
             effective_routing_config = hold_fix_routing_config;
         }
+        let reflection_analyzer = rflux_route::ReflectionAnalyzer::new(0.1);
+        let reflection = reflection_analyzer.analyze(&routing.routes, pdk, &effective_routing_config);
         let clock = build_clock_summary(netlist, &placement, config.clock_phase_count);
 
         Ok(CompiledArtifacts {
@@ -1352,6 +1363,7 @@ impl FlowRunner {
             placement,
             routing,
             effective_routing_config,
+            reflection,
             clock,
             timing,
             initial_total_detour_overhead_um,
@@ -1432,7 +1444,7 @@ impl FlowRunner {
             .route(netlist, placement, pdk, &routing_config)?;
         let rerouted_timing = self
             .timing
-            .analyze(netlist, &rerouted, pdk, &config.timing)?;
+            .analyze(netlist, &rerouted, pdk, &config.timing, None)?;
         if rerouted_timing.hold_violations < initial_violations {
             Ok((rerouted, rerouted_timing, routing_config, true))
         } else {
@@ -1478,7 +1490,7 @@ impl FlowRunner {
                 .route(netlist, placement, pdk, &candidate_routing_config)?;
         let candidate_timing =
             self.timing
-                .analyze(netlist, &candidate_routing, pdk, &config.timing)?;
+                .analyze(netlist, &candidate_routing, pdk, &config.timing, None)?;
         if route_delay_candidate_is_better(&candidate_timing, &initial_timing) {
             Ok((
                 candidate_routing,
@@ -1525,7 +1537,7 @@ impl FlowRunner {
                 .route(netlist, &artifacts.placement, pdk, &candidate_config)?;
         let candidate_timing =
             self.timing
-                .analyze(netlist, &candidate_routing, pdk, &config.timing)?;
+                .analyze(netlist, &candidate_routing, pdk, &config.timing, None)?;
         let candidate_route = candidate_routing
             .routes
             .iter()
@@ -1647,6 +1659,10 @@ pub struct DsePoint {
     pub setup_violations: usize,
     pub hold_violations: usize,
     pub routed_nets: usize,
+    pub coupling_score: f64,
+    pub high_coupling_nets: usize,
+    pub reflection_risk_routes: usize,
+    pub max_reflection_energy: f64,
     pub is_pareto_optimal: bool,
 }
 
@@ -1683,6 +1699,8 @@ fn dse_point_from_report(
     detour_margin_um: f64,
     min_hold_jtl_length_um: f64,
     sfq_phase_count: usize,
+    coupling_score: f64,
+    high_coupling_nets: usize,
 ) -> DsePoint {
     DsePoint {
         clock_period_ps,
@@ -1700,6 +1718,10 @@ fn dse_point_from_report(
         setup_violations: report.timing.setup_violations,
         hold_violations: report.timing.final_hold_violations,
         routed_nets: report.routing.routed_nets,
+        coupling_score,
+        high_coupling_nets,
+        reflection_risk_routes: report.routing.reflection_risk_routes,
+        max_reflection_energy: report.routing.max_reflection_energy,
         is_pareto_optimal: false,
     }
 }
@@ -1710,13 +1732,17 @@ fn is_pareto_dominated(candidate: &DsePoint, other: &DsePoint) -> bool {
     let length_ok = other.total_route_length_um <= candidate.total_route_length_um;
     let violations_ok = (other.setup_violations + other.hold_violations)
         <= (candidate.setup_violations + candidate.hold_violations);
+    let coupling_ok = other.coupling_score <= candidate.coupling_score;
+    let reflection_ok = other.max_reflection_energy <= candidate.max_reflection_energy;
 
-    (setup_ok && area_ok && length_ok && violations_ok)
+    (setup_ok && area_ok && length_ok && violations_ok && coupling_ok && reflection_ok)
         && (other.worst_setup_slack_ps > candidate.worst_setup_slack_ps
             || other.placement_area_um2 < candidate.placement_area_um2
             || other.total_route_length_um < candidate.total_route_length_um
             || (other.setup_violations + other.hold_violations)
-                < (candidate.setup_violations + candidate.hold_violations))
+                < (candidate.setup_violations + candidate.hold_violations)
+            || other.coupling_score < candidate.coupling_score
+            || other.max_reflection_energy < candidate.max_reflection_energy)
 }
 
 fn compute_pareto_front(points: &[DsePoint]) -> Vec<usize> {
@@ -1753,8 +1779,14 @@ fn select_recommended(points: &[DsePoint]) -> Option<usize> {
     candidates
         .iter()
         .min_by(|a, b| {
-            let score_a = -a.1.worst_setup_slack_ps + a.1.placement_area_um2 * 0.001;
-            let score_b = -b.1.worst_setup_slack_ps + b.1.placement_area_um2 * 0.001;
+            let score_a = -a.1.worst_setup_slack_ps
+                + a.1.placement_area_um2 * 0.001
+                + a.1.coupling_score * 0.5
+                + a.1.max_reflection_energy * 2.0;
+            let score_b = -b.1.worst_setup_slack_ps
+                + b.1.placement_area_um2 * 0.001
+                + b.1.coupling_score * 0.5
+                + b.1.max_reflection_energy * 2.0;
             score_a
                 .partial_cmp(&score_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1789,6 +1821,18 @@ impl FlowRunner {
                             let mut trial_netlist = netlist.clone();
                             match self.compile_layout(&mut trial_netlist, pdk, &config) {
                                 Ok(report) => {
+                                    let mut artifacts_netlist = netlist.clone();
+                                    let (coupling_score, high_coupling_nets) =
+                                        match self.compile_artifacts(&mut artifacts_netlist, pdk, &config) {
+                                            Ok(artifacts) => {
+                                                let cm = rflux_route::CouplingMap::build(
+                                                    &artifacts.routing.routes,
+                                                    10.0,
+                                                );
+                                                (cm.total_coupling_score(), cm.high_coupling_nets(0.1))
+                                            }
+                                            Err(_) => (0.0, 0),
+                                        };
                                     points.push(dse_point_from_report(
                                         &report,
                                         clock_period_ps,
@@ -1796,6 +1840,8 @@ impl FlowRunner {
                                         detour_margin,
                                         min_hold_jtl,
                                         phase_count,
+                                        coupling_score,
+                                        high_coupling_nets,
                                     ));
                                 }
                                 Err(_) => {
@@ -4434,18 +4480,24 @@ mod tests {
             },
             placement: Placement {
                 nodes: Vec::new(),
-                width_um: 40.0,
-                height_um: 24.0,
+                width_um: 0.0,
+                height_um: 0.0,
             },
             routing: RoutingReport {
                 routes: Vec::new(),
-                total_length_um: 40.0,
+                total_length_um: 0.0,
                 total_detour_overhead_um: 0.0,
                 detoured_routes: 0,
-                jtl_routes: 1,
+                jtl_routes: 0,
                 ptl_routes: 0,
             },
             effective_routing_config: RoutingConfig::default(),
+            reflection: rflux_route::ReflectionReport {
+                per_route: Vec::new(),
+                total_risk_routes: 0,
+                total_boundary_sites: 0,
+                max_reflection_energy: 0.0,
+            },
             clock: ClockSummary {
                 clock_sinks: 1,
                 clock_buffers: 0,
@@ -4599,6 +4651,12 @@ mod tests {
                 ptl_routes: 0,
             },
             effective_routing_config: RoutingConfig::default(),
+            reflection: rflux_route::ReflectionReport {
+                per_route: Vec::new(),
+                total_risk_routes: 0,
+                total_boundary_sites: 0,
+                max_reflection_energy: 0.0,
+            },
             clock: ClockSummary {
                 clock_sinks: 1,
                 clock_buffers: 0,
@@ -4773,6 +4831,7 @@ mod tests {
                 &routing,
                 &characterized_pdk,
                 &TimingConfig::default(),
+                None,
             )
             .expect("timing should succeed");
         let macro_arc = timing
@@ -4852,6 +4911,7 @@ mod tests {
                 &artifacts.routing,
                 &characterized_pdk,
                 &FlowConfig::default().timing,
+                None,
             )
             .expect("timing should succeed");
         let macro_arc = timing
@@ -6726,5 +6786,164 @@ mod tests {
         let recommended = report.recommended.as_ref().expect("should have recommended");
         assert!(recommended.worst_setup_slack_ps.is_finite());
         assert!(recommended.placement_area_um2 > 0.0);
+    }
+
+    #[test]
+    fn coupling_analysis_affects_timing_for_parallel_routes() {
+        use rflux_route::CouplingMap;
+
+        let mut netlist = Netlist::new();
+        let src0 = netlist.add_node(NodeKind::Port, "src0");
+        let src1 = netlist.add_node(NodeKind::Port, "src1");
+        let src2 = netlist.add_node(NodeKind::Port, "src2");
+        let dst0 = netlist.add_node(NodeKind::Port, "dst0");
+        let dst1 = netlist.add_node(NodeKind::Port, "dst1");
+        let dst2 = netlist.add_node(NodeKind::Port, "dst2");
+
+        let conns = vec![
+            (src0, dst0, 0, 0),
+            (src1, dst1, 0, 0),
+            (src2, dst2, 0, 0),
+        ];
+        let plan_conns: Vec<ConnectionSpec> = conns
+            .iter()
+            .map(|(f, t, fp, tp)| ConnectionSpec {
+                from: PinRef { node: *f, port: *fp },
+                to: PinRef { node: *t, port: *tp },
+            })
+            .collect();
+
+        let mut config = FlowConfig::default();
+        config.synthesis.plan = CompilePlan {
+            connections: plan_conns,
+            ..CompilePlan::default()
+        };
+        config.placement.x_pitch_um = 40.0;
+        config.placement.y_pitch_um = 6.0;
+
+        let pdk = Pdk::minimal("coupling-test");
+        let mut runner = FlowRunner::new();
+
+        let mut nl1 = netlist.clone();
+        let artifacts = runner
+            .compile_artifacts(&mut nl1, &pdk, &config)
+            .expect("artifacts should compile");
+
+        println!("\n=== Coupling Analysis ===");
+        println!("Routes: {}", artifacts.routing.routes.len());
+        for (i, r) in artifacts.routing.routes.iter().enumerate() {
+            let src_pt = artifacts.placement.point_of(r.from.node);
+            let dst_pt = artifacts.placement.point_of(r.to.node);
+            println!(
+                "  route {}: {:?}->{:?} mode={:?} len={:.1}um src={:?} dst={:?}",
+                i, r.from, r.to, r.mode, r.length_um, src_pt, dst_pt
+            );
+        }
+
+        let coupling_map = CouplingMap::build(&artifacts.routing.routes, 10.0);
+        let coupling_score = coupling_map.total_coupling_score();
+        println!("\nTotal coupling score: {coupling_score:.4}");
+        println!("High-coupling nets (>0.1): {}", coupling_map.high_coupling_nets(0.1));
+
+        for i in 0..artifacts.routing.routes.len() {
+            if let Some(info) = coupling_map.net_info(i) {
+                if !info.neighbors.is_empty() {
+                    println!(
+                        "  route {i}: score={:.4} max_coeff={:.4} neighbors={}",
+                        info.total_coupling_score, info.max_coefficient, info.neighbors.len()
+                    );
+                    for nbr in &info.neighbors {
+                        println!(
+                            "    -> route {}: parallel={:.1}um dist={:.1}um coeff={:.4}",
+                            nbr.route_index, nbr.parallel_length_um, nbr.distance_um, nbr.coupling_coefficient
+                        );
+                    }
+                }
+            }
+        }
+
+        let timing_no = rflux_timing::StaticTimingAnalyzer::new()
+            .analyze(&nl1, &artifacts.routing, &pdk, &config.timing, None)
+            .unwrap();
+
+        let mut nl2 = netlist.clone();
+        let artifacts2 = runner.compile_artifacts(&mut nl2, &pdk, &config).unwrap();
+        let cm2 = CouplingMap::build(&artifacts2.routing.routes, 10.0);
+        let timing_yes = rflux_timing::StaticTimingAnalyzer::new()
+            .analyze(&nl2, &artifacts2.routing, &pdk, &config.timing, Some(&cm2))
+            .unwrap();
+
+        println!("\n=== Timing Impact ===");
+        println!("Without coupling: critical={:.2}ps slack={:.2}ps", timing_no.critical_path_delay_ps, timing_no.worst_setup_slack_ps);
+        println!("With coupling:    critical={:.2}ps slack={:.2}ps", timing_yes.critical_path_delay_ps, timing_yes.worst_setup_slack_ps);
+        let delta = timing_yes.critical_path_delay_ps - timing_no.critical_path_delay_ps;
+        println!("Delta: {:+.4}ps", delta);
+
+        assert_eq!(timing_no.analyzed_arcs, timing_yes.analyzed_arcs);
+        if coupling_score > 0.0 {
+            assert!(delta >= 0.0, "coupling should not reduce delay");
+        }
+    }
+
+    #[test]
+    fn dse_reports_coupling_scores() {
+        let mut netlist = Netlist::new();
+        let src0 = netlist.add_node(NodeKind::Port, "src0");
+        let src1 = netlist.add_node(NodeKind::Port, "src1");
+        let dst0 = netlist.add_node(NodeKind::Port, "dst0");
+        let dst1 = netlist.add_node(NodeKind::Port, "dst1");
+
+        let mut config = FlowConfig::default();
+        config.synthesis.plan = CompilePlan {
+            connections: vec![
+                ConnectionSpec {
+                    from: PinRef { node: src0, port: 0 },
+                    to: PinRef { node: dst0, port: 0 },
+                },
+                ConnectionSpec {
+                    from: PinRef { node: src1, port: 0 },
+                    to: PinRef { node: dst1, port: 0 },
+                },
+            ],
+            ..CompilePlan::default()
+        };
+        config.placement.x_pitch_um = 40.0;
+        config.placement.y_pitch_um = 6.0;
+
+        let dse_config = DseConfig {
+            clock_period_ps_values: vec![100.0, 120.0],
+            prefer_ptl_from_length_um_values: vec![60.0],
+            detour_margin_um_values: vec![8.0],
+            min_hold_jtl_length_um_values: vec![0.0],
+            sfq_phase_count_values: vec![2],
+        };
+
+        let pdk = Pdk::minimal("dse-coupling");
+        let mut runner = FlowRunner::new();
+        let report = runner.run_dse(&netlist, &pdk, &config, &dse_config);
+
+        for point in &report.points {
+            println!(
+                "DSE point: clock={:.0} coupling_score={:.4} high_coupling={} area={:.0} slack={:.2}",
+                point.clock_period_ps,
+                point.coupling_score,
+                point.high_coupling_nets,
+                point.placement_area_um2,
+                point.worst_setup_slack_ps,
+            );
+        }
+
+        if let Some(rec) = &report.recommended {
+            println!(
+                "Recommended: clock={:.0} coupling_score={:.4} area={:.0} slack={:.2}",
+                rec.clock_period_ps,
+                rec.coupling_score,
+                rec.placement_area_um2,
+                rec.worst_setup_slack_ps,
+            );
+        }
+
+        assert!(!report.points.is_empty());
+        assert!(report.recommended.is_some());
     }
 }

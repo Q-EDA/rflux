@@ -323,6 +323,10 @@ pub struct Pdk {
     pub name: String,
     pub metal_layers: u8,
     pub ptl_forbidden_ranges: Vec<LengthRange>,
+    pub jtl_impedance_ohm: f64,
+    pub ptl_impedance_ohm: f64,
+    pub jtl_propagation_delay_ps_per_um: f64,
+    pub ptl_propagation_delay_ps_per_um: f64,
     pub cell_library: SfCellLibrary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_timing_corner: Option<String>,
@@ -358,6 +362,10 @@ impl Pdk {
             name: name.into(),
             metal_layers: 4,
             ptl_forbidden_ranges: Vec::new(),
+            jtl_impedance_ohm: 2.0,
+            ptl_impedance_ohm: 4.0,
+            jtl_propagation_delay_ps_per_um: 0.15,
+            ptl_propagation_delay_ps_per_um: 0.10,
             cell_library: SfCellLibrary::minimal(),
             active_timing_corner: None,
             timing_corners: Vec::new(),
@@ -519,6 +527,26 @@ impl Pdk {
         } else {
             None
         }
+    }
+
+    /// Compute the reflection coefficient at a JTL-PTL impedance boundary.
+    ///
+    /// Uses Γ = (Z_ptl - Z_jtl) / (Z_ptl + Z_jtl).
+    /// Returns a value between -1 and 1; magnitude indicates reflected energy.
+    #[must_use]
+    pub fn boundary_reflection_coefficient(&self, from_mode: InterconnectKind, to_mode: InterconnectKind) -> f64 {
+        if from_mode == to_mode {
+            return 0.0;
+        }
+        let z_from = match from_mode {
+            InterconnectKind::Jtl => self.jtl_impedance_ohm,
+            InterconnectKind::Ptl => self.ptl_impedance_ohm,
+        };
+        let z_to = match to_mode {
+            InterconnectKind::Jtl => self.jtl_impedance_ohm,
+            InterconnectKind::Ptl => self.ptl_impedance_ohm,
+        };
+        (z_to - z_from) / (z_to + z_from)
     }
 
     #[must_use]

@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, BinaryHeap, HashMap};
 
 use rflux_ir::{Netlist, NodeKind, PinRef};
 use rflux_place::{Placement, Point};
-use rflux_tech::Pdk;
+use rflux_tech::{InterconnectKind, Pdk};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,10 +666,418 @@ fn is_boundary_port(netlist: &Netlist, node: rflux_ir::NodeId) -> bool {
     matches!(netlist.nodes()[node.0].kind, NodeKind::Port)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CouplingNeighbor {
+    pub route_index: usize,
+    pub parallel_length_um: f64,
+    pub distance_um: f64,
+    pub coupling_coefficient: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetCouplingInfo {
+    pub total_coupling_score: f64,
+    pub neighbors: Vec<CouplingNeighbor>,
+    pub max_coefficient: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SpatialBin {
+    segments: Vec<BinSegment>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct BinSegment {
+    route_index: usize,
+    segment_index: usize,
+    start: Point,
+    end: Point,
+    layer: u8,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CouplingMap {
+    bin_size_um: f64,
+    bins: HashMap<(i64, i64), SpatialBin>,
+    coupling_radius_um: f64,
+    per_net: Vec<NetCouplingInfo>,
+}
+
+impl CouplingMap {
+    pub fn build(routes: &[NetRoute], coupling_radius_um: f64) -> Self {
+        let bin_size_um = coupling_radius_um.max(1.0);
+        let mut bins: HashMap<(i64, i64), SpatialBin> = HashMap::new();
+
+        for (route_idx, route) in routes.iter().enumerate() {
+            for (seg_idx, seg) in route.segments.iter().enumerate() {
+                let bin_entries = bins_covered_by_segment(seg, bin_size_um);
+                for bin_key in bin_entries {
+                    bins
+                        .entry(bin_key)
+                        .or_insert_with(|| SpatialBin {
+                            segments: Vec::new(),
+                        })
+                        .segments
+                        .push(BinSegment {
+                            route_index: route_idx,
+                            segment_index: seg_idx,
+                            start: seg.start,
+                            end: seg.end,
+                            layer: seg.layer,
+                        });
+                }
+            }
+        }
+
+        let mut per_net = Vec::with_capacity(routes.len());
+        for (route_idx, route) in routes.iter().enumerate() {
+            let info = Self::compute_net_coupling(route_idx, route, &bins, coupling_radius_um, bin_size_um);
+            per_net.push(info);
+        }
+
+        CouplingMap {
+            bin_size_um,
+            bins,
+            coupling_radius_um,
+            per_net,
+        }
+    }
+
+    fn compute_net_coupling(
+        route_index: usize,
+        route: &NetRoute,
+        bins: &HashMap<(i64, i64), SpatialBin>,
+        radius_um: f64,
+        bin_size_um: f64,
+    ) -> NetCouplingInfo {
+        let mut neighbors: Vec<CouplingNeighbor> = Vec::new();
+        let mut neighbor_map: HashMap<usize, (f64, f64, f64)> = HashMap::new();
+
+        for seg in &route.segments {
+            let candidate_bins = bins_covered_by_segment(seg, bin_size_um);
+            for bin_key in candidate_bins {
+                let Some(bin) = bins.get(&bin_key) else {
+                    continue;
+                };
+                for other in &bin.segments {
+                    if other.route_index == route_index {
+                        continue;
+                    }
+                    if other.layer != seg.layer {
+                        continue;
+                    }
+
+                    let (parallel_len, distance) =
+                        parallel_length_and_distance(seg.start, seg.end, other.start, other.end);
+                    if distance > radius_um || parallel_len < 0.1 {
+                        continue;
+                    }
+
+                    let coeff = coupling_coefficient(parallel_len, distance);
+                    let entry = neighbor_map
+                        .entry(other.route_index)
+                        .or_insert((0.0, f64::INFINITY, 0.0));
+                    entry.0 += parallel_len;
+                    entry.1 = entry.1.min(distance);
+                    entry.2 = entry.2.max(coeff);
+                }
+            }
+        }
+
+        for (nbr_idx, (parallel_len, distance, coeff)) in neighbor_map {
+            neighbors.push(CouplingNeighbor {
+                route_index: nbr_idx,
+                parallel_length_um: parallel_len,
+                distance_um: distance,
+                coupling_coefficient: coeff,
+            });
+        }
+        neighbors.sort_by(|a, b| {
+            b.coupling_coefficient
+                .partial_cmp(&a.coupling_coefficient)
+                .unwrap_or(Ordering::Equal)
+        });
+
+        let total_score: f64 = neighbors.iter().map(|n| n.coupling_coefficient).sum();
+        let max_coeff = neighbors
+            .iter()
+            .map(|n| n.coupling_coefficient)
+            .fold(0.0_f64, f64::max);
+
+        NetCouplingInfo {
+            total_coupling_score: total_score,
+            neighbors,
+            max_coefficient: max_coeff,
+        }
+    }
+
+    pub fn net_info(&self, route_index: usize) -> Option<&NetCouplingInfo> {
+        self.per_net.get(route_index)
+    }
+
+    pub fn total_coupling_score(&self) -> f64 {
+        self.per_net.iter().map(|n| n.total_coupling_score).sum()
+    }
+
+    pub fn high_coupling_nets(&self, threshold: f64) -> usize {
+        self.per_net
+            .iter()
+            .filter(|n| n.max_coefficient > threshold)
+            .count()
+    }
+
+    pub fn coupling_delay_ps(&self, route_index: usize, base_delay_ps: f64) -> f64 {
+        let Some(info) = self.per_net.get(route_index) else {
+            return 0.0;
+        };
+        base_delay_ps * info.total_coupling_score * 0.05
+    }
+
+    pub fn coupling_sigma_ps(&self, route_index: usize, base_delay_ps: f64) -> f64 {
+        let Some(info) = self.per_net.get(route_index) else {
+            return 0.0;
+        };
+        base_delay_ps * info.max_coefficient * 0.02
+    }
+}
+
+fn bins_covered_by_segment(seg: &RouteSegment, bin_size_um: f64) -> Vec<(i64, i64)> {
+    let min_x = seg.start.x_um.min(seg.end.x_um);
+    let max_x = seg.start.x_um.max(seg.end.x_um);
+    let min_y = seg.start.y_um.min(seg.end.y_um);
+    let max_y = seg.start.y_um.max(seg.end.y_um);
+
+    let bx_min = (min_x / bin_size_um).floor() as i64;
+    let bx_max = (max_x / bin_size_um).floor() as i64;
+    let by_min = (min_y / bin_size_um).floor() as i64;
+    let by_max = (max_y / bin_size_um).floor() as i64;
+
+    let mut bins = Vec::new();
+    for bx in bx_min..=bx_max {
+        for by in by_min..=by_max {
+            bins.push((bx, by));
+        }
+    }
+    bins
+}
+
+fn parallel_length_and_distance(
+    a_start: Point,
+    a_end: Point,
+    b_start: Point,
+    b_end: Point,
+) -> (f64, f64) {
+    let a_horiz = (a_start.y_um - a_end.y_um).abs() < 0.001;
+    let b_horiz = (b_start.y_um - b_end.y_um).abs() < 0.001;
+    let a_vert = (a_start.x_um - a_end.x_um).abs() < 0.001;
+    let b_vert = (b_start.x_um - b_end.x_um).abs() < 0.001;
+
+    if a_horiz && b_horiz {
+        let distance = (a_start.y_um - b_start.y_um).abs();
+        let overlap = segment_overlap_1d(
+            a_start.x_um.min(a_end.x_um),
+            a_start.x_um.max(a_end.x_um),
+            b_start.x_um.min(b_end.x_um),
+            b_start.x_um.max(b_end.x_um),
+        );
+        (overlap, distance)
+    } else if a_vert && b_vert {
+        let distance = (a_start.x_um - b_start.x_um).abs();
+        let overlap = segment_overlap_1d(
+            a_start.y_um.min(a_end.y_um),
+            a_start.y_um.max(a_end.y_um),
+            b_start.y_um.min(b_end.y_um),
+            b_start.y_um.max(b_end.y_um),
+        );
+        (overlap, distance)
+    } else {
+        let dx = a_start.x_um - b_start.x_um;
+        let dy = a_start.y_um - b_start.y_um;
+        let distance = (dx * dx + dy * dy).sqrt();
+        (0.0, distance)
+    }
+}
+
+fn segment_overlap_1d(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
+    let overlap_start = a_min.max(b_min);
+    let overlap_end = a_max.min(b_max);
+    (overlap_end - overlap_start).max(0.0)
+}
+
+fn coupling_coefficient(parallel_length_um: f64, distance_um: f64) -> f64 {
+    if distance_um < 0.001 {
+        return 1.0;
+    }
+    let length_factor = (parallel_length_um / 10.0).min(5.0);
+    let distance_factor = 1.0 / (1.0 + (distance_um / 5.0).powi(2));
+    (length_factor * distance_factor).min(1.0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReflectionSite {
+    pub route_index: usize,
+    pub segment_index: usize,
+    pub from_mode: RouteMode,
+    pub to_mode: RouteMode,
+    pub boundary_coefficient: f64,
+    pub resonance_coefficient: f64,
+    pub reflected_delay_ps: f64,
+    pub position: Point,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteReflectionInfo {
+    pub sites: Vec<ReflectionSite>,
+    pub total_reflection_energy: f64,
+    pub max_coefficient: f64,
+    pub has_risk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReflectionReport {
+    pub per_route: Vec<RouteReflectionInfo>,
+    pub total_risk_routes: usize,
+    pub total_boundary_sites: usize,
+    pub max_reflection_energy: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReflectionAnalyzer {
+    risk_threshold: f64,
+}
+
+impl ReflectionAnalyzer {
+    pub fn new(risk_threshold: f64) -> Self {
+        Self { risk_threshold }
+    }
+
+    pub fn analyze(&self, routes: &[NetRoute], pdk: &Pdk, config: &RoutingConfig) -> ReflectionReport {
+        let mut per_route = Vec::with_capacity(routes.len());
+        let mut total_risk_routes = 0usize;
+        let mut total_boundary_sites = 0usize;
+        let mut max_energy = 0.0_f64;
+
+        for (route_idx, route) in routes.iter().enumerate() {
+            let info = self.analyze_route(route_idx, route, pdk, config);
+            if info.has_risk {
+                total_risk_routes += 1;
+            }
+            total_boundary_sites += info.sites.len();
+            max_energy = max_energy.max(info.total_reflection_energy);
+            per_route.push(info);
+        }
+
+        ReflectionReport {
+            per_route,
+            total_risk_routes,
+            total_boundary_sites,
+            max_reflection_energy: max_energy,
+        }
+    }
+
+    fn analyze_route(&self, route_idx: usize, route: &NetRoute, pdk: &Pdk, config: &RoutingConfig) -> RouteReflectionInfo {
+        let mut sites = Vec::new();
+        let mut total_energy = 0.0_f64;
+        let mut max_coeff = 0.0_f64;
+
+        for (seg_idx, window) in route.segments.windows(2).enumerate() {
+            let from_layer = window[0].layer;
+            let to_layer = window[1].layer;
+            if from_layer == to_layer {
+                continue;
+            }
+
+            let from_mode = layer_to_interconnect_kind(from_layer, config);
+            let to_mode = layer_to_interconnect_kind(to_layer, config);
+            if from_mode == to_mode {
+                continue;
+            }
+
+            let boundary_gamma = pdk.boundary_reflection_coefficient(from_mode, to_mode);
+            let boundary_coeff = boundary_gamma.abs();
+            let transition_point = window[0].end;
+            let delay_ps = self.reflected_delay_ps(&window[0], pdk, config);
+
+            total_energy += boundary_coeff * boundary_coeff;
+            max_coeff = max_coeff.max(boundary_coeff);
+
+            if boundary_coeff > self.risk_threshold {
+                sites.push(ReflectionSite {
+                    route_index: route_idx,
+                    segment_index: seg_idx,
+                    from_mode: interconnect_to_route_mode(from_mode),
+                    to_mode: interconnect_to_route_mode(to_mode),
+                    boundary_coefficient: boundary_coeff,
+                    resonance_coefficient: 0.0,
+                    reflected_delay_ps: delay_ps,
+                    position: transition_point,
+                });
+            }
+        }
+
+        for seg in &route.segments {
+            if layer_to_interconnect_kind(seg.layer, config) == InterconnectKind::Ptl {
+                let length_um = manhattan_length(seg.start, seg.end);
+                let resonance = pdk.ptl_reflection_coefficient(length_um);
+                if resonance > self.risk_threshold {
+                    let delay_ps = 2.0 * length_um * pdk.ptl_propagation_delay_ps_per_um;
+                    total_energy += resonance * resonance;
+                    max_coeff = max_coeff.max(resonance);
+                    sites.push(ReflectionSite {
+                        route_index: route_idx,
+                        segment_index: 0,
+                        from_mode: RouteMode::Ptl,
+                        to_mode: RouteMode::Ptl,
+                        boundary_coefficient: 0.0,
+                        resonance_coefficient: resonance,
+                        reflected_delay_ps: delay_ps,
+                        position: seg.start,
+                    });
+                }
+            }
+        }
+
+        let has_risk = !sites.is_empty();
+
+        RouteReflectionInfo {
+            sites,
+            total_reflection_energy: total_energy,
+            max_coefficient: max_coeff,
+            has_risk,
+        }
+    }
+
+    fn reflected_delay_ps(&self, seg: &RouteSegment, pdk: &Pdk, config: &RoutingConfig) -> f64 {
+        let length_um = manhattan_length(seg.start, seg.end);
+        let delay_per_um = match layer_to_interconnect_kind(seg.layer, config) {
+            InterconnectKind::Jtl => pdk.jtl_propagation_delay_ps_per_um,
+            InterconnectKind::Ptl => pdk.ptl_propagation_delay_ps_per_um,
+        };
+        2.0 * length_um * delay_per_um
+    }
+}
+
+fn layer_to_interconnect_kind(layer: u8, config: &RoutingConfig) -> InterconnectKind {
+    if layer == config.ptl_layer {
+        InterconnectKind::Ptl
+    } else {
+        InterconnectKind::Jtl
+    }
+}
+
+fn interconnect_to_route_mode(kind: InterconnectKind) -> RouteMode {
+    match kind {
+        InterconnectKind::Jtl => RouteMode::Jtl,
+        InterconnectKind::Ptl => RouteMode::Ptl,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rflux_ir::{NodeKind, PinRef};
+    use rflux_ir::{NodeId, NodeKind, PinRef};
     use rflux_place::{LevelizedPlacer, PlacementConfig};
     use rflux_tech::{LengthRange, Pdk};
 
@@ -1161,5 +1569,401 @@ mod tests {
         let config = RoutingConfig::default();
         assert_eq!(config.congestion_weight, 0.0);
         assert_eq!(config.prefer_ptl_from_length_um, 60.0);
+    }
+
+    #[test]
+    fn coupling_map_empty_for_no_routes() {
+        let routes: Vec<NetRoute> = Vec::new();
+        let cmap = CouplingMap::build(&routes, 10.0);
+        assert_eq!(cmap.total_coupling_score(), 0.0);
+        assert_eq!(cmap.high_coupling_nets(0.1), 0);
+    }
+
+    #[test]
+    fn coupling_map_single_route_has_no_neighbors() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Jtl,
+            segments: vec![RouteSegment {
+                start: Point { x_um: 0.0, y_um: 0.0 },
+                end: Point { x_um: 40.0, y_um: 0.0 },
+                layer: 1,
+            }],
+            direct_length_um: 40.0,
+            length_um: 40.0,
+        }];
+        let cmap = CouplingMap::build(&routes, 10.0);
+        assert_eq!(cmap.total_coupling_score(), 0.0);
+        let info = cmap.net_info(0).expect("should have info");
+        assert!(info.neighbors.is_empty());
+    }
+
+    #[test]
+    fn coupling_map_detects_parallel_routes() {
+        let routes = vec![
+            NetRoute {
+                from: PinRef { node: NodeId(0), port: 0 },
+                to: PinRef { node: NodeId(1), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+            NetRoute {
+                from: PinRef { node: NodeId(2), port: 0 },
+                to: PinRef { node: NodeId(3), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 4.0 },
+                    end: Point { x_um: 40.0, y_um: 4.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+        ];
+        let cmap = CouplingMap::build(&routes, 10.0);
+        let info0 = cmap.net_info(0).expect("should have info for route 0");
+        assert_eq!(info0.neighbors.len(), 1);
+        assert_eq!(info0.neighbors[0].route_index, 1);
+        assert!(info0.neighbors[0].coupling_coefficient > 0.0);
+        assert!(info0.total_coupling_score > 0.0);
+    }
+
+    #[test]
+    fn coupling_map_ignores_different_layers() {
+        let routes = vec![
+            NetRoute {
+                from: PinRef { node: NodeId(0), port: 0 },
+                to: PinRef { node: NodeId(1), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+            NetRoute {
+                from: PinRef { node: NodeId(2), port: 0 },
+                to: PinRef { node: NodeId(3), port: 0 },
+                mode: RouteMode::Ptl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 4.0 },
+                    end: Point { x_um: 40.0, y_um: 4.0 },
+                    layer: 2,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+        ];
+        let cmap = CouplingMap::build(&routes, 10.0);
+        assert_eq!(cmap.total_coupling_score(), 0.0);
+    }
+
+    #[test]
+    fn coupling_map_ignores_distant_routes() {
+        let routes = vec![
+            NetRoute {
+                from: PinRef { node: NodeId(0), port: 0 },
+                to: PinRef { node: NodeId(1), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+            NetRoute {
+                from: PinRef { node: NodeId(2), port: 0 },
+                to: PinRef { node: NodeId(3), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 50.0 },
+                    end: Point { x_um: 40.0, y_um: 50.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+        ];
+        let cmap = CouplingMap::build(&routes, 10.0);
+        assert_eq!(cmap.total_coupling_score(), 0.0);
+    }
+
+    #[test]
+    fn coupling_coefficient_decreases_with_distance() {
+        let close = coupling_coefficient(20.0, 2.0);
+        let medium = coupling_coefficient(20.0, 10.0);
+        let far = coupling_coefficient(20.0, 30.0);
+        assert!(close > medium);
+        assert!(medium > far);
+    }
+
+    #[test]
+    fn coupling_coefficient_increases_with_parallel_length() {
+        let short = coupling_coefficient(5.0, 5.0);
+        let long = coupling_coefficient(50.0, 5.0);
+        assert!(long > short);
+    }
+
+    #[test]
+    fn coupling_map_high_coupling_nets_threshold() {
+        let routes = vec![
+            NetRoute {
+                from: PinRef { node: NodeId(0), port: 0 },
+                to: PinRef { node: NodeId(1), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+            NetRoute {
+                from: PinRef { node: NodeId(2), port: 0 },
+                to: PinRef { node: NodeId(3), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 3.0 },
+                    end: Point { x_um: 40.0, y_um: 3.0 },
+                    layer: 1,
+                }],
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            },
+        ];
+        let cmap = CouplingMap::build(&routes, 10.0);
+        assert_eq!(cmap.high_coupling_nets(0.01), 2);
+        assert_eq!(cmap.high_coupling_nets(1.5), 0);
+    }
+
+    #[test]
+    fn coupling_map_per_net_info_returns_none_for_out_of_bounds() {
+        let routes: Vec<NetRoute> = Vec::new();
+        let cmap = CouplingMap::build(&routes, 10.0);
+        assert!(cmap.net_info(99).is_none());
+    }
+
+    #[test]
+    fn segment_overlap_1d_basic_cases() {
+        assert_eq!(segment_overlap_1d(0.0, 10.0, 5.0, 15.0), 5.0);
+        assert_eq!(segment_overlap_1d(0.0, 10.0, 20.0, 30.0), 0.0);
+        assert_eq!(segment_overlap_1d(0.0, 10.0, 0.0, 10.0), 10.0);
+    }
+
+    #[test]
+    fn reflection_analyzer_empty_routes() {
+        let routes: Vec<NetRoute> = Vec::new();
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+        let analyzer = ReflectionAnalyzer::new(0.1);
+        let report = analyzer.analyze(&routes, &pdk, &config);
+        assert_eq!(report.total_risk_routes, 0);
+        assert_eq!(report.total_boundary_sites, 0);
+        assert_eq!(report.max_reflection_energy, 0.0);
+    }
+
+    #[test]
+    fn reflection_analyzer_single_jtl_route_no_risk() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Jtl,
+            segments: vec![RouteSegment {
+                start: Point { x_um: 0.0, y_um: 0.0 },
+                end: Point { x_um: 40.0, y_um: 0.0 },
+                layer: 1,
+            }],
+            direct_length_um: 40.0,
+            length_um: 40.0,
+        }];
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+        let analyzer = ReflectionAnalyzer::new(0.1);
+        let report = analyzer.analyze(&routes, &pdk, &config);
+        assert_eq!(report.total_risk_routes, 0);
+        assert_eq!(report.total_boundary_sites, 0);
+    }
+
+    #[test]
+    fn reflection_analyzer_detects_jtl_ptl_boundary() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Jtl,
+            segments: vec![
+                RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                },
+                RouteSegment {
+                    start: Point { x_um: 40.0, y_um: 0.0 },
+                    end: Point { x_um: 80.0, y_um: 0.0 },
+                    layer: 2,
+                },
+            ],
+            direct_length_um: 80.0,
+            length_um: 80.0,
+        }];
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+        let analyzer = ReflectionAnalyzer::new(0.01);
+        let report = analyzer.analyze(&routes, &pdk, &config);
+
+        assert_eq!(report.total_risk_routes, 1);
+        assert!(report.total_boundary_sites >= 1);
+        let boundary_site = report.per_route[0]
+            .sites
+            .iter()
+            .find(|s| s.boundary_coefficient > 0.0)
+            .expect("should have a boundary site");
+        assert_eq!(boundary_site.route_index, 0);
+        assert_eq!(boundary_site.from_mode, RouteMode::Jtl);
+        assert_eq!(boundary_site.to_mode, RouteMode::Ptl);
+        assert!(boundary_site.boundary_coefficient > 0.0);
+        assert!(boundary_site.reflected_delay_ps > 0.0);
+    }
+
+    #[test]
+    fn reflection_analyzer_detects_ptl_jtl_boundary() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Ptl,
+            segments: vec![
+                RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 2,
+                },
+                RouteSegment {
+                    start: Point { x_um: 40.0, y_um: 0.0 },
+                    end: Point { x_um: 80.0, y_um: 0.0 },
+                    layer: 1,
+                },
+            ],
+            direct_length_um: 80.0,
+            length_um: 80.0,
+        }];
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+        let analyzer = ReflectionAnalyzer::new(0.01);
+        let report = analyzer.analyze(&routes, &pdk, &config);
+
+        assert_eq!(report.total_risk_routes, 1);
+        let site = &report.per_route[0].sites[0];
+        assert_eq!(site.from_mode, RouteMode::Ptl);
+        assert_eq!(site.to_mode, RouteMode::Jtl);
+    }
+
+    #[test]
+    fn reflection_analyzer_same_layer_no_boundary() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Jtl,
+            segments: vec![
+                RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                },
+                RouteSegment {
+                    start: Point { x_um: 40.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 24.0 },
+                    layer: 1,
+                },
+            ],
+            direct_length_um: 64.0,
+            length_um: 64.0,
+        }];
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+        let analyzer = ReflectionAnalyzer::new(0.1);
+        let report = analyzer.analyze(&routes, &pdk, &config);
+
+        assert_eq!(report.total_boundary_sites, 0);
+    }
+
+    #[test]
+    fn reflection_analyzer_high_threshold_filters_sites() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Jtl,
+            segments: vec![
+                RouteSegment {
+                    start: Point { x_um: 0.0, y_um: 0.0 },
+                    end: Point { x_um: 40.0, y_um: 0.0 },
+                    layer: 1,
+                },
+                RouteSegment {
+                    start: Point { x_um: 40.0, y_um: 0.0 },
+                    end: Point { x_um: 80.0, y_um: 0.0 },
+                    layer: 2,
+                },
+            ],
+            direct_length_um: 80.0,
+            length_um: 80.0,
+        }];
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+
+        let low = ReflectionAnalyzer::new(0.01);
+        let high = ReflectionAnalyzer::new(0.99);
+        let r_low = low.analyze(&routes, &pdk, &config);
+        let r_high = high.analyze(&routes, &pdk, &config);
+
+        assert!(r_low.total_boundary_sites >= r_high.total_boundary_sites);
+    }
+
+    #[test]
+    fn reflection_analyzer_ptl_resonance_detection() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Ptl,
+            segments: vec![RouteSegment {
+                start: Point { x_um: 0.0, y_um: 0.0 },
+                end: Point { x_um: 500.0, y_um: 0.0 },
+                layer: 2,
+            }],
+            direct_length_um: 500.0,
+            length_um: 500.0,
+        }];
+        let pdk = Pdk::minimal("test");
+        let config = RoutingConfig::default();
+        let analyzer = ReflectionAnalyzer::new(0.1);
+        let report = analyzer.analyze(&routes, &pdk, &config);
+
+        assert!(report.per_route[0].sites.iter().any(|s| s.resonance_coefficient > 0.0));
+        assert!(report.per_route[0].has_risk);
+    }
+
+    #[test]
+    fn boundary_reflection_coefficient_symmetric() {
+        let pdk = Pdk::minimal("test");
+        let gamma_jtl_ptl = pdk.boundary_reflection_coefficient(InterconnectKind::Jtl, InterconnectKind::Ptl);
+        let gamma_ptl_jtl = pdk.boundary_reflection_coefficient(InterconnectKind::Ptl, InterconnectKind::Jtl);
+        assert!((gamma_jtl_ptl + gamma_ptl_jtl).abs() < 1e-10);
+    }
+
+    #[test]
+    fn boundary_reflection_coefficient_same_mode_zero() {
+        let pdk = Pdk::minimal("test");
+        assert_eq!(pdk.boundary_reflection_coefficient(InterconnectKind::Jtl, InterconnectKind::Jtl), 0.0);
+        assert_eq!(pdk.boundary_reflection_coefficient(InterconnectKind::Ptl, InterconnectKind::Ptl), 0.0);
     }
 }

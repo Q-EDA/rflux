@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
-use rflux_route::{RouteMode, RoutingReport};
+use rflux_route::{CouplingMap, RouteMode, RoutingReport};
 use rflux_tech::{CharacterizationArtifactMetadata, InterconnectKind, Pdk, SfCell, SfCellKind};
 use thiserror::Error;
 
@@ -297,6 +297,7 @@ impl StaticTimingAnalyzer {
         routing: &RoutingReport,
         pdk: &Pdk,
         config: &TimingConfig,
+        coupling_map: Option<&CouplingMap>,
     ) -> Result<TimingReport, TimingError> {
         let node_count = netlist.node_count();
         let mut adjacency = vec![Vec::<usize>::new(); node_count];
@@ -349,7 +350,7 @@ impl StaticTimingAnalyzer {
         for &node_index in &topo {
             for &edge_index in &adjacency[node_index] {
                 let (from, to) = edges[edge_index];
-                let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to)?;
+                let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to, coupling_map)?;
                 let candidate = arrival[from.node.0] + arc_delay;
                 if candidate > arrival[to.node.0] {
                     arrival[to.node.0] = candidate;
@@ -377,7 +378,7 @@ impl StaticTimingAnalyzer {
                 ) {
                     continue;
                 }
-                let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to)?;
+                let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to, coupling_map)?;
                 let candidate = required[to.node.0] - arc_delay;
                 if candidate < required[from.node.0] {
                     required[from.node.0] = candidate;
@@ -398,7 +399,7 @@ impl StaticTimingAnalyzer {
 
         for (from, to) in edges {
             let (cell_delay_ps, wire_delay_ps) =
-                arc_components_ps(netlist, routing, pdk, from, to)?;
+                arc_components_ps(netlist, routing, pdk, from, to, coupling_map)?;
             let sink_arrival = arrival[from.node.0] + cell_delay_ps + wire_delay_ps;
             let setup_requirement = setup_time_ps(netlist, pdk, to.node.0)?;
             let base_required_ps =
@@ -510,8 +511,9 @@ impl StaticTimingAnalyzer {
         pdk: &Pdk,
         config: &TimingConfig,
         statistical_config: &StatisticalTimingConfig,
+        coupling_map: Option<&CouplingMap>,
     ) -> Result<StatisticalTimingReport, TimingError> {
-        let report = self.analyze(netlist, routing, pdk, config)?;
+        let report = self.analyze(netlist, routing, pdk, config, coupling_map)?;
         let node_count = netlist.node_count();
         let edges = netlist.edge_pairs();
         let mut adjacency = vec![Vec::<usize>::new(); node_count];
@@ -685,8 +687,10 @@ fn arc_delay_ps(
     pdk: &Pdk,
     from: PinRef,
     to: PinRef,
+    coupling_map: Option<&CouplingMap>,
 ) -> Result<f64, TimingError> {
-    let (cell_delay_ps, wire_delay_ps) = arc_components_ps(netlist, routing, pdk, from, to)?;
+    let (cell_delay_ps, wire_delay_ps) =
+        arc_components_ps(netlist, routing, pdk, from, to, coupling_map)?;
     Ok(cell_delay_ps + wire_delay_ps)
 }
 
@@ -820,6 +824,7 @@ fn arc_components_ps(
     pdk: &Pdk,
     from: PinRef,
     to: PinRef,
+    coupling_map: Option<&CouplingMap>,
 ) -> Result<(f64, f64), TimingError> {
     let from_node = &netlist.nodes()[from.node.0];
     let to_node = &netlist.nodes()[to.node.0];
@@ -830,15 +835,19 @@ fn arc_components_ps(
     let cell_delay_ps = pdk
         .characterized_arc_delay_ps(&from_node.name, from.port, &to_node.name, to.port)
         .unwrap_or(cell_timing.intrinsic_delay_ps);
-    let route = routing
+    let (route_index, route) = routing
         .routes
         .iter()
-        .find(|route| route.from == from && route.to == to)
+        .enumerate()
+        .find(|(_, route)| route.from == from && route.to == to)
         .ok_or(TimingError::MissingRoute(from, to))?;
     let wire_delay_ps = pdk
         .interconnect_delay_ps(interconnect_kind(route.mode), route.length_um)
         .ok_or(TimingError::MissingInterconnectTiming(route.mode))?;
-    Ok((cell_delay_ps, wire_delay_ps))
+    let coupling_extra = coupling_map
+        .map(|cm| cm.coupling_delay_ps(route_index, wire_delay_ps))
+        .unwrap_or(0.0);
+    Ok((cell_delay_ps, wire_delay_ps + coupling_extra))
 }
 
 fn route_length_um(routing: &RoutingReport, from: PinRef, to: PinRef) -> Result<f64, TimingError> {
@@ -1176,6 +1185,7 @@ mod tests {
                 &routing,
                 &Pdk::minimal("test"),
                 &TimingConfig::default(),
+                None,
             )
             .expect("timing should succeed");
 
@@ -1231,6 +1241,7 @@ mod tests {
                 &routing,
                 &Pdk::minimal("test"),
                 &TimingConfig::default(),
+                None,
             )
             .expect("timing should succeed");
 
@@ -1329,7 +1340,7 @@ mod tests {
             .expect("characterized artifact json should parse");
 
         let baseline = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &base_pdk, &TimingConfig::default())
+            .analyze(&netlist, &routing, &base_pdk, &TimingConfig::default(), None)
             .expect("baseline timing should succeed");
         let characterized = StaticTimingAnalyzer::new()
             .analyze(
@@ -1337,6 +1348,7 @@ mod tests {
                 &routing,
                 &characterized_pdk,
                 &TimingConfig::default(),
+                None,
             )
             .expect("characterized timing should succeed");
         let baseline_macro_arc = baseline
@@ -1455,10 +1467,10 @@ mod tests {
         });
 
         let baseline = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &base_pdk, &TimingConfig::default())
+            .analyze(&netlist, &routing, &base_pdk, &TimingConfig::default(), None)
             .expect("baseline timing should succeed");
         let slow = StaticTimingAnalyzer::new()
-            .analyze(&netlist, &routing, &slow_pdk, &TimingConfig::default())
+            .analyze(&netlist, &routing, &slow_pdk, &TimingConfig::default(), None)
             .expect("slow-corner timing should succeed");
         let baseline_gate_arc = baseline
             .arcs
@@ -1584,6 +1596,7 @@ mod tests {
                 &routing,
                 &characterized_pdk,
                 &TimingConfig::default(),
+                None,
             )
             .expect("timing should succeed");
         let macro_arc = report
@@ -1654,6 +1667,7 @@ mod tests {
                     clock_domains: Vec::new(),
                     crossing_constraints: Vec::new(),
                 },
+                None,
             )
             .expect("timing should succeed");
 
@@ -1724,6 +1738,7 @@ mod tests {
                     }],
                     crossing_constraints: Vec::new(),
                 },
+                None,
             )
             .expect("timing should succeed");
 
@@ -1808,6 +1823,7 @@ mod tests {
                     ],
                     crossing_constraints: Vec::new(),
                 },
+                None,
             )
             .expect("timing should succeed");
 
@@ -1890,6 +1906,7 @@ mod tests {
                     clock_domains: Vec::new(),
                     crossing_constraints: Vec::new(),
                 },
+                None,
             )
             .expect("timing should succeed");
 
@@ -1980,6 +1997,7 @@ mod tests {
                         cycles: None,
                     }],
                 },
+                None,
             )
             .expect("timing should succeed");
 
@@ -2072,6 +2090,7 @@ mod tests {
                         cycles: Some(3),
                     }],
                 },
+                None,
             )
             .expect("timing should succeed");
 
@@ -2136,6 +2155,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("statistical timing should succeed");
 
@@ -2228,6 +2248,7 @@ mod tests {
                     }],
                 },
                 &StatisticalTimingConfig::default(),
+                None,
             )
             .expect("statistical timing should succeed");
 
@@ -2322,6 +2343,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("statistical timing should succeed");
 
@@ -2428,6 +2450,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("baseline statistical timing should succeed");
 
@@ -2448,6 +2471,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("correlated statistical timing should succeed");
 
@@ -2526,6 +2550,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("baseline statistical timing should succeed");
 
@@ -2546,6 +2571,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("uncertain statistical timing should succeed");
 
@@ -2651,6 +2677,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("baseline statistical timing should succeed");
 
@@ -2671,6 +2698,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("cross-domain statistical timing should succeed");
 
@@ -2782,6 +2810,7 @@ mod tests {
                     multicycle_cross_domain_uncertainty_sigma_ps: 2.0,
                     sigma_multiplier: 3.0,
                 },
+                None,
             )
             .expect("categorized statistical timing should succeed");
 
@@ -3068,6 +3097,7 @@ mod tests {
                 &routing,
                 &Pdk::minimal("test"),
                 &TimingConfig::default(),
+                None,
             )
             .expect_err("cycles must fail");
 

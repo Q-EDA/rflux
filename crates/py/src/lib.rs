@@ -3489,6 +3489,10 @@ fn export_svg(
             pd.set_item("total_route_length_um", point.total_route_length_um)?;
             pd.set_item("setup_violations", point.setup_violations)?;
             pd.set_item("hold_violations", point.hold_violations)?;
+            pd.set_item("coupling_score", point.coupling_score)?;
+            pd.set_item("high_coupling_nets", point.high_coupling_nets)?;
+            pd.set_item("reflection_risk_routes", point.reflection_risk_routes)?;
+            pd.set_item("max_reflection_energy", point.max_reflection_energy)?;
             pd.set_item("is_pareto_optimal", point.is_pareto_optimal)?;
             points_list.append(pd)?;
         }
@@ -3521,6 +3525,10 @@ fn export_svg(
             rd.set_item("total_route_length_um", rec.total_route_length_um)?;
             rd.set_item("setup_violations", rec.setup_violations)?;
             rd.set_item("hold_violations", rec.hold_violations)?;
+            rd.set_item("coupling_score", rec.coupling_score)?;
+            rd.set_item("high_coupling_nets", rec.high_coupling_nets)?;
+            rd.set_item("reflection_risk_routes", rec.reflection_risk_routes)?;
+            rd.set_item("max_reflection_energy", rec.max_reflection_energy)?;
             dict.set_item("recommended", rd)?;
         }
 

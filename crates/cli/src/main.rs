@@ -3531,6 +3531,10 @@ fn dse_point_to_json(point: &rflux_flow::DsePoint) -> Value {
         "setup_violations": point.setup_violations,
         "hold_violations": point.hold_violations,
         "routed_nets": point.routed_nets,
+        "coupling_score": point.coupling_score,
+        "high_coupling_nets": point.high_coupling_nets,
+        "reflection_risk_routes": point.reflection_risk_routes,
+        "max_reflection_energy": point.max_reflection_energy,
         "is_pareto_optimal": point.is_pareto_optimal,
     })
 }
