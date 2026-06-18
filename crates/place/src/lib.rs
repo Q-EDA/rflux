@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use rflux_ir::{Netlist, NodeId, NodeKind};
+use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,6 +69,23 @@ impl Default for PlacementConfig {
             macro_halo_x_um: 40.0,
             macro_halo_y_um: 24.0,
             max_nodes_per_level: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartitionConfig {
+    pub max_partition_size: usize,
+    pub overlap_margin_um: f64,
+    pub enable_partitioning: bool,
+}
+
+impl Default for PartitionConfig {
+    fn default() -> Self {
+        Self {
+            max_partition_size: 500,
+            overlap_margin_um: 20.0,
+            enable_partitioning: false,
         }
     }
 }
@@ -201,6 +218,75 @@ impl LevelizedPlacer {
             } else {
                 height_um + config.y_pitch_um
             },
+        })
+    }
+}
+
+pub struct PartitionPlacer {
+    config: PlacementConfig,
+    partition_config: PartitionConfig,
+}
+
+impl PartitionPlacer {
+    pub fn new(config: PlacementConfig, partition_config: PartitionConfig) -> Self {
+        Self {
+            config,
+            partition_config,
+        }
+    }
+
+    pub fn place(&self, netlist: &Netlist) -> Result<Placement, PlaceError> {
+        if !self.partition_config.enable_partitioning {
+            let placer = LevelizedPlacer::new();
+            return placer.place(netlist, &self.config);
+        }
+
+        let levels = compute_node_levels_grouped(netlist)?;
+        let max_size = self.partition_config.max_partition_size;
+
+        let needs_partitioning = levels.iter().any(|(_, nodes)| nodes.len() > max_size);
+
+        if !needs_partitioning {
+            let placer = LevelizedPlacer::new();
+            return placer.place(netlist, &self.config);
+        }
+
+        let mut partitions: Vec<Vec<NodeId>> = Vec::new();
+        for (_, mut level_nodes) in levels {
+            while level_nodes.len() > max_size {
+                let partition: Vec<NodeId> = level_nodes.drain(..max_size).collect();
+                partitions.push(partition);
+            }
+            if !level_nodes.is_empty() {
+                partitions.push(level_nodes);
+            }
+        }
+
+        let mut all_placed = Vec::new();
+        let mut y_offset = 0.0f64;
+
+        for partition in &partitions {
+            let sub_netlist = extract_subgraph(netlist, partition);
+            let placer = LevelizedPlacer::new();
+            let sub_placement = placer.place(&sub_netlist, &self.config)?;
+
+            for mut placed in sub_placement.nodes {
+                placed.point.y_um += y_offset;
+                all_placed.push(placed);
+            }
+            y_offset += sub_placement.height_um + self.partition_config.overlap_margin_um;
+        }
+
+        let width = all_placed
+            .iter()
+            .map(|p| p.point.x_um)
+            .fold(0.0f64, f64::max)
+            + self.config.x_pitch_um;
+
+        Ok(Placement {
+            nodes: all_placed,
+            width_um: width,
+            height_um: y_offset,
         })
     }
 }
@@ -436,6 +522,44 @@ fn compute_node_levels(netlist: &Netlist) -> Result<Vec<usize>, PlaceError> {
     }
 
     Ok(levels)
+}
+
+fn compute_node_levels_grouped(netlist: &Netlist) -> Result<Vec<(usize, Vec<NodeId>)>, PlaceError> {
+    let levels = compute_node_levels(netlist)?;
+    let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+    for node in netlist.nodes() {
+        grouped.entry(levels[node.id.0]).or_default().push(node.id);
+    }
+    Ok(grouped.into_iter().collect())
+}
+
+fn extract_subgraph(netlist: &Netlist, nodes: &[NodeId]) -> Netlist {
+    let node_set: std::collections::HashSet<NodeId> = nodes.iter().copied().collect();
+    let mut sub = Netlist::new();
+
+    let mut id_map: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();
+    for &node_id in &node_set {
+        if let Some(node) = netlist.nodes().get(node_id.0) {
+            let new_id = sub.add_node(node.kind.clone(), node.name.clone());
+            id_map.insert(node_id, new_id);
+        }
+    }
+
+    for (from, to) in netlist.edge_pairs() {
+        if node_set.contains(&from.node) && node_set.contains(&to.node) {
+            let new_from = PinRef {
+                node: id_map[&from.node],
+                port: from.port,
+            };
+            let new_to = PinRef {
+                node: id_map[&to.node],
+                port: to.port,
+            };
+            let _ = sub.connect(new_from, new_to);
+        }
+    }
+
+    sub
 }
 
 #[cfg(test)]
@@ -941,5 +1065,117 @@ mod tests {
     fn place_error_codes_are_stable() {
         assert_eq!(PlaceError::Cycle.code(), "RFLOW-FLOW-002");
         assert!(!PlaceError::Cycle.suggestion().is_empty());
+    }
+
+    #[test]
+    fn partition_placer_small_circuit_no_partition() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 })
+            .unwrap();
+
+        let placer = PartitionPlacer::new(
+            PlacementConfig::default(),
+            PartitionConfig {
+                max_partition_size: 500,
+                enable_partitioning: true,
+                ..Default::default()
+            },
+        );
+        let placement = placer.place(&netlist).unwrap();
+        assert_eq!(placement.nodes.len(), 3);
+    }
+
+    #[test]
+    fn partition_placer_disabled_uses_levelized() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        let placer = PartitionPlacer::new(
+            PlacementConfig::default(),
+            PartitionConfig {
+                enable_partitioning: false,
+                ..Default::default()
+            },
+        );
+        let placement = placer.place(&netlist).unwrap();
+        assert_eq!(placement.nodes.len(), 2);
+        assert_eq!(placement.point_of(a).unwrap().x_um, 0.0);
+        assert_eq!(placement.point_of(b).unwrap().x_um, 40.0);
+    }
+
+    #[test]
+    fn partition_placer_splits_large_level() {
+        let mut netlist = Netlist::new();
+        for i in 0..4 {
+            netlist.add_node(NodeKind::CellInstance, format!("g{i}"));
+        }
+
+        let placer = PartitionPlacer::new(
+            PlacementConfig::default(),
+            PartitionConfig {
+                max_partition_size: 2,
+                overlap_margin_um: 10.0,
+                enable_partitioning: true,
+            },
+        );
+        let placement = placer.place(&netlist).unwrap();
+        assert_eq!(placement.nodes.len(), 4);
+        assert!(placement.height_um > 0.0);
+    }
+
+    #[test]
+    fn partition_placer_empty_netlist() {
+        let netlist = Netlist::new();
+        let placer = PartitionPlacer::new(
+            PlacementConfig::default(),
+            PartitionConfig {
+                enable_partitioning: true,
+                ..Default::default()
+            },
+        );
+        let placement = placer.place(&netlist).unwrap();
+        assert!(placement.nodes.is_empty());
+        assert_eq!(placement.width_um, 0.0);
+        assert_eq!(placement.height_um, 0.0);
+    }
+
+    #[test]
+    fn partition_config_default_values() {
+        let config = PartitionConfig::default();
+        assert_eq!(config.max_partition_size, 500);
+        assert_eq!(config.overlap_margin_um, 20.0);
+        assert!(!config.enable_partitioning);
+    }
+
+    #[test]
+    fn extract_subgraph_preserves_edges() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 })
+            .unwrap();
+
+        let sub = extract_subgraph(&netlist, &[a, b]);
+        assert_eq!(sub.node_count(), 2);
+        assert_eq!(sub.edge_count(), 1);
     }
 }

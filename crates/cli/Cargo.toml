@@ -13,12 +13,15 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 rflux-flow = { path = "../flow" }
 rflux-ir = { path = "../ir" }
-rflux-io = { path = "../io" }
+rflux-io = { path = "../io", features = ["yaml"] }
 rflux-sim = { path = "../sim" }
 rflux-sat = { path = "../sat" }
 rflux-synth = { path = "../synth" }
-rflux-tech = { path = "../tech" }
+rflux-tech = { path = "../tech", features = ["yaml"] }
 rflux-timing = { path = "../timing" }
+rflux-margin = { path = "../margin" }
+rflux-route = { path = "../route" }
 rflux-verify = { path = "../verify" }

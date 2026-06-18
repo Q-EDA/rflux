@@ -11,8 +11,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rflux_flow::{FlowConfig, FlowError, FlowRunner, SimulationConfig, SimulationMode};
 use rflux_io::{
-    detect_netlist_input_format, read_netlist, read_netlist_as, read_pdk_json, write_pdk_json,
-    IoError, NetlistInputFormat,
+    detect_netlist_input_format, read_netlist, read_netlist_as, read_pdk_auto, read_pdk_json,
+    write_pdk_json, write_pdk_yaml, IoError, NetlistInputFormat,
 };
 use rflux_sat::{solve_with_metrics, CnfFormula, IncrementalSolver, Lit, SolveResult, SolveStats};
 use rflux_sim::{simulate_file, SimulationError, SimulationReport};
@@ -21,6 +21,8 @@ use rflux_timing::{
     ClockDomainConstraint, CrossingConstraint, CrossingConstraintKind, NodeTimingConstraint,
     PinTimingConstraint,
 };
+use rflux_margin::{Distribution, MarginConfig, MarginMethod, MarginParameter};
+use rflux_route::RoutingReport;
 use rflux_verify::{SynthError, Verifier};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -58,6 +60,7 @@ enum Commands {
     SolveDimacs(SolveDimacsArgs),
     CheckEquivalence(CheckEquivalenceArgs),
     Dse(DseArgs),
+    AnalyzeMargin(AnalyzeMarginArgs),
 }
 
 #[derive(Debug, Args)]
@@ -66,6 +69,14 @@ struct PdkMinimalArgs {
     name: String,
     #[arg(long)]
     output: Option<PathBuf>,
+    #[arg(long, value_enum, default_value = "json")]
+    format: PdkOutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PdkOutputFormat {
+    Json,
+    Yaml,
 }
 
 #[derive(Debug, Args)]
@@ -328,6 +339,40 @@ struct DseArgs {
     min_hold_jtl_length_um: Option<Vec<f64>>,
     #[arg(long, value_delimiter = ',')]
     sfq_phase_count: Option<Vec<usize>>,
+    #[arg(long)]
+    parallel: bool,
+}
+
+#[derive(Debug, Args)]
+struct AnalyzeMarginArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
+    input_format: CliNetlistInputFormat,
+    #[arg(long)]
+    pdk: Option<PathBuf>,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = MarginMethodCli::MonteCarlo)]
+    method: MarginMethodCli,
+    #[arg(long, default_value_t = 1000)]
+    samples: usize,
+    #[arg(long, default_value_t = 3)]
+    steps: usize,
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+    #[arg(long)]
+    clock_period_ps: Option<f64>,
+    #[arg(long)]
+    param: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum MarginMethodCli {
+    #[value(name = "monte-carlo")]
+    MonteCarlo,
+    #[value(name = "boundary-sweep")]
+    BoundarySweep,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -998,6 +1043,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::SolveDimacs(args) => run_solve_dimacs(args),
         Commands::CheckEquivalence(args) => run_check_equivalence(args),
         Commands::Dse(args) => run_dse(args),
+        Commands::AnalyzeMargin(args) => run_analyze_margin(args),
     }
 }
 
@@ -1005,15 +1051,22 @@ fn run_pdk_minimal(args: PdkMinimalArgs) -> Result<()> {
     let pdk = Pdk::minimal(args.name);
 
     if let Some(output_path) = args.output.as_deref() {
-        write_pdk_json(output_path, &pdk)
-            .with_context(|| format!("failed to write PDK JSON to {}", output_path.display()))?;
+        match args.format {
+            PdkOutputFormat::Json => write_pdk_json(output_path, &pdk)
+                .with_context(|| format!("failed to write PDK JSON to {}", output_path.display()))?,
+            PdkOutputFormat::Yaml => write_pdk_yaml(output_path, &pdk)
+                .with_context(|| format!("failed to write PDK YAML to {}", output_path.display()))?,
+        }
         return Ok(());
     }
 
-    println!(
-        "{}",
-        pdk.to_json().context("failed to serialize minimal PDK")?
-    );
+    let content = match args.format {
+        PdkOutputFormat::Json => pdk.to_json().context("failed to serialize minimal PDK")?,
+        PdkOutputFormat::Yaml => {
+            pdk.to_yaml().context("failed to serialize minimal PDK to YAML")?
+        }
+    };
+    println!("{}", content);
     Ok(())
 }
 
@@ -3489,11 +3542,18 @@ fn run_dse(args: DseArgs) -> Result<()> {
         sfq_phase_count_values: args.sfq_phase_count.unwrap_or_else(|| vec![2]),
     };
 
+    let parallel = args.parallel;
     let report = with_loaded_flow_inputs(
         &args.input,
         args.input_format,
         args.pdk.clone(),
-        |flow, netlist, pdk| Ok(flow.run_dse(netlist, pdk, &base_config, &dse_config)),
+        |flow, netlist, pdk| {
+            Ok(if parallel {
+                flow.run_dse_parallel(netlist, pdk, &base_config, &dse_config)
+            } else {
+                flow.run_dse(netlist, pdk, &base_config, &dse_config)
+            })
+        },
     )?;
 
     let report_json = dse_report_to_json(&report);
@@ -3537,6 +3597,66 @@ fn dse_point_to_json(point: &rflux_flow::DsePoint) -> Value {
         "max_reflection_energy": point.max_reflection_energy,
         "is_pareto_optimal": point.is_pareto_optimal,
     })
+}
+
+fn run_analyze_margin(args: AnalyzeMarginArgs) -> Result<()> {
+    let (netlist, pdk) = load_cli_netlist_and_pdk(&args.input, args.input_format, args.pdk.clone())?;
+
+    let parameters: Vec<MarginParameter> = args
+        .param
+        .iter()
+        .map(|p| {
+            let parts: Vec<&str> = p.split(',').collect();
+            if parts.len() < 4 {
+                bail!("--param format: name,min,max,uniform|normal");
+            }
+            let distribution = match parts[3] {
+                "uniform" => Distribution::Uniform,
+                "normal" => Distribution::Normal { sigma_ratio: 0.15 },
+                _ => bail!("distribution must be 'uniform' or 'normal'"),
+            };
+            Ok(MarginParameter {
+                name: parts[0].to_string(),
+                nominal: 0.0,
+                min: parts[1].parse()?,
+                max: parts[2].parse()?,
+                distribution,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let method = match args.method {
+        MarginMethodCli::MonteCarlo => MarginMethod::MonteCarlo { samples: args.samples },
+        MarginMethodCli::BoundarySweep => MarginMethod::BoundarySweep { steps_per_param: args.steps },
+    };
+
+    let clock_period_ps = args.clock_period_ps.unwrap_or(120.0);
+
+    let margin_config = MarginConfig {
+        parameters,
+        method,
+        seed: args.seed,
+        clock_period_ps,
+    };
+
+    let routing = RoutingReport {
+        routes: Vec::new(),
+        total_length_um: 0.0,
+        total_detour_overhead_um: 0.0,
+        detoured_routes: 0,
+        jtl_routes: 0,
+        ptl_routes: 0,
+    };
+
+    let report = rflux_margin::analyze_margin(&netlist, &routing, &pdk, &margin_config);
+
+    let output_json = serde_json::to_string_pretty(&report)?;
+    if let Some(output_path) = &args.output {
+        fs::write(output_path, &output_json)?;
+    } else {
+        println!("{}", output_json);
+    }
+    Ok(())
 }
 
 fn run_verify_layout(args: VerifyLayoutArgs) -> Result<()> {
@@ -3674,8 +3794,8 @@ fn run_check_equivalence(args: CheckEquivalenceArgs) -> Result<()> {
 
 fn load_pdk(path: Option<PathBuf>) -> Result<Pdk> {
     match path {
-        Some(path) => read_pdk_json(&path)
-            .with_context(|| format!("failed to read PDK JSON from {}", path.display())),
+        Some(path) => read_pdk_auto(&path)
+            .with_context(|| format!("failed to read PDK from {}", path.display())),
         None => Ok(Pdk::minimal("minimal-sfq")),
     }
 }

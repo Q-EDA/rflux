@@ -223,6 +223,34 @@ pub fn read_pdk_json(path: impl AsRef<Path>) -> Result<Pdk, IoError> {
     serde_json::from_value(json).map_err(json_error)
 }
 
+#[cfg(feature = "yaml")]
+pub fn read_pdk_yaml(path: impl AsRef<Path>) -> Result<Pdk, IoError> {
+    let content = fs::read_to_string(path)?;
+    Pdk::from_yaml(&content).map_err(|e| IoError::Json(e.to_string()))
+}
+
+#[cfg(feature = "yaml")]
+pub fn write_pdk_yaml(path: impl AsRef<Path>, pdk: &Pdk) -> Result<(), IoError> {
+    let content = pdk.to_yaml().map_err(|e| IoError::Json(e.to_string()))?;
+    fs::write(path, content)?;
+    Ok(())
+}
+
+pub fn read_pdk_auto(path: impl AsRef<Path>) -> Result<Pdk, IoError> {
+    let path_ref = path.as_ref();
+    #[cfg(feature = "yaml")]
+    {
+        if matches!(
+            path_ref.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml")
+        ) {
+            let content = fs::read_to_string(path_ref)?;
+            return Pdk::from_yaml(&content).map_err(|e| IoError::Json(e.to_string()));
+        }
+    }
+    read_pdk_json(path_ref)
+}
+
 fn extract_versioned_payload(
     json: &Value,
     expected_kind: &'static str,

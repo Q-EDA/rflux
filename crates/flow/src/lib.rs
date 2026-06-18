@@ -1640,6 +1640,18 @@ impl DseConfig {
             * self.min_hold_jtl_length_um_values.len()
             * self.sfq_phase_count_values.len()
     }
+
+    pub fn combinations(&self) -> impl Iterator<Item = (f64, f64, f64, f64, usize)> + '_ {
+        self.clock_period_ps_values.iter().flat_map(move |&cp| {
+            self.prefer_ptl_from_length_um_values.iter().flat_map(move |&ptl| {
+                self.detour_margin_um_values.iter().flat_map(move |&dm| {
+                    self.min_hold_jtl_length_um_values.iter().flat_map(move |&jtl| {
+                        self.sfq_phase_count_values.iter().map(move |&pc| (cp, ptl, dm, jtl, pc))
+                    })
+                })
+            })
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1867,6 +1879,60 @@ impl FlowRunner {
             pareto_front,
             total_evaluated: dse_config.total_points(),
             total_failed: failed,
+            recommended,
+        }
+    }
+
+    pub fn run_dse_parallel(
+        &self,
+        netlist: &Netlist,
+        pdk: &Pdk,
+        base_config: &FlowConfig,
+        dse_config: &DseConfig,
+    ) -> DseReport {
+        let combos: Vec<_> = dse_config.combinations().collect();
+
+        let results: Vec<Option<DsePoint>> = std::thread::scope(|s| {
+            let handles: Vec<_> = combos
+                .iter()
+                .map(|&(cp, ptl, dm, jtl, pc)| {
+                    s.spawn(move || {
+                        let config = flow_config_from_dse_params(base_config, cp, ptl, dm, jtl, pc);
+                        let mut flow = FlowRunner::new();
+                        let mut trial_netlist = netlist.clone();
+                        match flow.compile_layout(&mut trial_netlist, pdk, &config) {
+                            Ok(report) => Some(dse_point_from_report(
+                                &report, cp, ptl, dm, jtl, pc, 0.0, 0,
+                            )),
+                            Err(_) => None,
+                        }
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(None))
+                .collect()
+        });
+
+        let mut points: Vec<DsePoint> = results.into_iter().flatten().collect();
+        let total_evaluated = combos.len();
+        let total_failed = total_evaluated - points.len();
+
+        let pareto_indices = compute_pareto_front(&points);
+        for idx in &pareto_indices {
+            points[*idx].is_pareto_optimal = true;
+        }
+        let pareto_front: Vec<DsePoint> = pareto_indices.iter().map(|&i| points[i].clone()).collect();
+        let recommended_idx = select_recommended(&points);
+        let recommended = recommended_idx.map(|i| points[i].clone());
+
+        DseReport {
+            points,
+            pareto_front,
+            total_evaluated,
+            total_failed,
             recommended,
         }
     }

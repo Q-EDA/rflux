@@ -16,8 +16,12 @@ use rflux_io::{read_bench_netlist, read_netlist_as, NetlistInputFormat};
 use std::collections::HashMap;
 
 use rflux_ir::{LogicOp, Netlist, NodeKind, PinRef};
+use rflux_margin::{
+    analyze_margin as analyze_margin_core, Distribution, MarginConfig, MarginMethod,
+    MarginParameter, MarginReport, MarginSample,
+};
 use rflux_place::{FixedNodePlacement, LevelizedPlacer, PlacementConfig, Point};
-use rflux_route::{BlockedRegion, RouteMode};
+use rflux_route::{BlockedRegion, RouteMode, RoutingReport};
 use rflux_sim::{
     is_supported_external_command as is_supported_external_command_core,
     simulate_file as simulate_file_core, simulate_text as simulate_text_core,
@@ -1548,6 +1552,332 @@ struct PyAdvancedConstraintReport {
     violations: Vec<PyAdvancedConstraintViolation>,
 }
 
+#[pyclass]
+#[derive(Clone)]
+struct PyRouteSegment {
+    #[pyo3(get, set)]
+    start_x_um: f64,
+    #[pyo3(get, set)]
+    start_y_um: f64,
+    #[pyo3(get, set)]
+    end_x_um: f64,
+    #[pyo3(get, set)]
+    end_y_um: f64,
+    #[pyo3(get, set)]
+    layer: u8,
+}
+
+#[pymethods]
+impl PyRouteSegment {
+    #[new]
+    fn new(start_x_um: f64, start_y_um: f64, end_x_um: f64, end_y_um: f64, layer: u8) -> Self {
+        Self {
+            start_x_um,
+            start_y_um,
+            end_x_um,
+            end_y_um,
+            layer,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyNetRoute {
+    #[pyo3(get, set)]
+    from_node: usize,
+    #[pyo3(get, set)]
+    from_port: u16,
+    #[pyo3(get, set)]
+    to_node: usize,
+    #[pyo3(get, set)]
+    to_port: u16,
+    #[pyo3(get, set)]
+    mode: String,
+    #[pyo3(get, set)]
+    segments: Vec<PyRouteSegment>,
+    #[pyo3(get, set)]
+    direct_length_um: f64,
+    #[pyo3(get, set)]
+    length_um: f64,
+}
+
+#[pymethods]
+impl PyNetRoute {
+    #[new]
+    fn new(
+        from_node: usize,
+        from_port: u16,
+        to_node: usize,
+        to_port: u16,
+        mode: String,
+        segments: Vec<PyRouteSegment>,
+        direct_length_um: f64,
+        length_um: f64,
+    ) -> Self {
+        Self {
+            from_node,
+            from_port,
+            to_node,
+            to_port,
+            mode,
+            segments,
+            direct_length_um,
+            length_um,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyRoutingReport {
+    #[pyo3(get, set)]
+    routes: Vec<PyNetRoute>,
+    #[pyo3(get, set)]
+    total_length_um: f64,
+    #[pyo3(get, set)]
+    total_detour_overhead_um: f64,
+    #[pyo3(get, set)]
+    detoured_routes: usize,
+    #[pyo3(get, set)]
+    jtl_routes: usize,
+    #[pyo3(get, set)]
+    ptl_routes: usize,
+}
+
+#[pymethods]
+impl PyRoutingReport {
+    #[new]
+    fn new(
+        routes: Vec<PyNetRoute>,
+        total_length_um: f64,
+        total_detour_overhead_um: f64,
+        detoured_routes: usize,
+        jtl_routes: usize,
+        ptl_routes: usize,
+    ) -> Self {
+        Self {
+            routes,
+            total_length_um,
+            total_detour_overhead_um,
+            detoured_routes,
+            jtl_routes,
+            ptl_routes,
+        }
+    }
+}
+
+impl PyRoutingReport {
+    fn to_rust(&self) -> RoutingReport {
+        RoutingReport {
+            routes: self
+                .routes
+                .iter()
+                .map(|r| rflux_route::NetRoute {
+                    from: PinRef {
+                        node: rflux_ir::NodeId(r.from_node),
+                        port: r.from_port,
+                    },
+                    to: PinRef {
+                        node: rflux_ir::NodeId(r.to_node),
+                        port: r.to_port,
+                    },
+                    mode: match r.mode.as_str() {
+                        "ptl" => RouteMode::Ptl,
+                        _ => RouteMode::Jtl,
+                    },
+                    segments: r
+                        .segments
+                        .iter()
+                        .map(|s| rflux_route::RouteSegment {
+                            start: Point {
+                                x_um: s.start_x_um,
+                                y_um: s.start_y_um,
+                            },
+                            end: Point {
+                                x_um: s.end_x_um,
+                                y_um: s.end_y_um,
+                            },
+                            layer: s.layer,
+                        })
+                        .collect(),
+                    direct_length_um: r.direct_length_um,
+                    length_um: r.length_um,
+                })
+                .collect(),
+            total_length_um: self.total_length_um,
+            total_detour_overhead_um: self.total_detour_overhead_um,
+            detoured_routes: self.detoured_routes,
+            jtl_routes: self.jtl_routes,
+            ptl_routes: self.ptl_routes,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyMarginParameter {
+    #[pyo3(get, set)]
+    name: String,
+    #[pyo3(get, set)]
+    nominal: f64,
+    #[pyo3(get, set)]
+    min: f64,
+    #[pyo3(get, set)]
+    max: f64,
+    #[pyo3(get, set)]
+    distribution: String,
+}
+
+#[pymethods]
+impl PyMarginParameter {
+    #[new]
+    fn new(name: String, nominal: f64, min: f64, max: f64, distribution: String) -> Self {
+        Self {
+            name,
+            nominal,
+            min,
+            max,
+            distribution,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyMarginConfig {
+    #[pyo3(get, set)]
+    parameters: Vec<PyMarginParameter>,
+    #[pyo3(get, set)]
+    method: String,
+    #[pyo3(get, set)]
+    samples_or_steps: usize,
+    #[pyo3(get, set)]
+    seed: u64,
+    #[pyo3(get, set)]
+    clock_period_ps: f64,
+}
+
+#[pymethods]
+impl PyMarginConfig {
+    #[new]
+    fn new(
+        parameters: Vec<PyMarginParameter>,
+        method: String,
+        samples_or_steps: usize,
+        seed: u64,
+        clock_period_ps: f64,
+    ) -> Self {
+        Self {
+            parameters,
+            method,
+            samples_or_steps,
+            seed,
+            clock_period_ps,
+        }
+    }
+}
+
+impl PyMarginConfig {
+    fn to_rust(&self) -> MarginConfig {
+        MarginConfig {
+            parameters: self
+                .parameters
+                .iter()
+                .map(|p| MarginParameter {
+                    name: p.name.clone(),
+                    nominal: p.nominal,
+                    min: p.min,
+                    max: p.max,
+                    distribution: match p.distribution.as_str() {
+                        "normal" => Distribution::Normal { sigma_ratio: 0.1 },
+                        _ => Distribution::Uniform,
+                    },
+                })
+                .collect(),
+            method: match self.method.as_str() {
+                "boundary_sweep" => MarginMethod::BoundarySweep {
+                    steps_per_param: self.samples_or_steps,
+                },
+                _ => MarginMethod::MonteCarlo {
+                    samples: self.samples_or_steps,
+                },
+            },
+            seed: self.seed,
+            clock_period_ps: self.clock_period_ps,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyMarginSample {
+    #[pyo3(get)]
+    parameter_values: Vec<(String, f64)>,
+    #[pyo3(get)]
+    worst_setup_slack_ps: f64,
+    #[pyo3(get)]
+    worst_hold_slack_ps: f64,
+    #[pyo3(get)]
+    critical_path_delay_ps: f64,
+    #[pyo3(get)]
+    setup_violations: usize,
+    #[pyo3(get)]
+    hold_violations: usize,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyMarginReport {
+    #[pyo3(get)]
+    method: String,
+    #[pyo3(get)]
+    total_samples: usize,
+    #[pyo3(get)]
+    passed_samples: usize,
+    #[pyo3(get)]
+    yield_estimate: f64,
+    #[pyo3(get)]
+    worst_setup_slack_ps: f64,
+    #[pyo3(get)]
+    worst_hold_slack_ps: f64,
+    #[pyo3(get)]
+    sensitivity: Vec<(String, f64)>,
+    #[pyo3(get)]
+    worst_case_parameters: Vec<(String, f64)>,
+    #[pyo3(get)]
+    samples: Vec<PyMarginSample>,
+}
+
+impl From<MarginSample> for PyMarginSample {
+    fn from(value: MarginSample) -> Self {
+        Self {
+            parameter_values: value.parameter_values,
+            worst_setup_slack_ps: value.worst_setup_slack_ps,
+            worst_hold_slack_ps: value.worst_hold_slack_ps,
+            critical_path_delay_ps: value.critical_path_delay_ps,
+            setup_violations: value.setup_violations,
+            hold_violations: value.hold_violations,
+        }
+    }
+}
+
+impl From<MarginReport> for PyMarginReport {
+    fn from(value: MarginReport) -> Self {
+        Self {
+            method: value.method,
+            total_samples: value.total_samples,
+            passed_samples: value.passed_samples,
+            yield_estimate: value.yield_estimate,
+            worst_setup_slack_ps: value.worst_setup_slack_ps,
+            worst_hold_slack_ps: value.worst_hold_slack_ps,
+            sensitivity: value.sensitivity,
+            worst_case_parameters: value.worst_case_parameters,
+            samples: value.samples.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<LayoutReport> for PyLayoutReport {
     fn from(value: LayoutReport) -> Self {
         Self {
@@ -2911,6 +3241,30 @@ fn analyze_timing_statistical(
 }
 
 #[pyfunction]
+#[pyo3(signature = (circuit, routing, config, pdk=None, characterized_library_json=None, characterized_library_entries=None))]
+fn analyze_margin(
+    circuit: PyRefMut<'_, Circuit>,
+    routing: &PyRoutingReport,
+    config: &PyMarginConfig,
+    pdk: Option<&PyPdk>,
+    characterized_library_json: Option<String>,
+    characterized_library_entries: Option<Vec<String>>,
+) -> PyResult<PyMarginReport> {
+    let rust_routing = routing.to_rust();
+    let rust_config = config.to_rust();
+    let rust_pdk = match pdk {
+        Some(p) => p.inner.clone(),
+        None => build_flow_pdk(
+            "py-minimal-pdk",
+            characterized_library_json.as_deref(),
+            characterized_library_entries,
+        )?,
+    };
+    let report = analyze_margin_core(&circuit.netlist, &rust_routing, &rust_pdk, &rust_config);
+    Ok(report.into())
+}
+
+#[pyfunction]
 #[pyo3(signature = (circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None))]
 fn analyze_ac_bias(
     mut circuit: PyRefMut<'_, Circuit>,
@@ -3411,6 +3765,8 @@ fn export_svg(
 }
 
 #[pyfunction]
+#[pyo3(signature = (circuit, plan=None, fixed_nodes=None, blocked_regions=None, timing_constraints=None, pin_timing_constraints=None, clock_domains=None, crossing_constraints=None, clock_period_ps_values=None, prefer_ptl_from_length_um_values=None, detour_margin_um_values=None, min_hold_jtl_length_um_values=None, sfq_phase_count_values=None, characterized_library_json=None, characterized_library_entries=None))]
+fn run_dse(
     mut circuit: PyRefMut<'_, Circuit>,
     plan: Option<&PyCompilePlan>,
     fixed_nodes: Option<Vec<PyFixedNodePlacement>>,
@@ -3537,6 +3893,9 @@ fn export_svg(
 }
 
 #[pyfunction]
+#[pyo3(signature = (deck_text, simulation_mode=None, external_command=None))]
+fn simulate_text(
+    deck_text: &str,
     simulation_mode: Option<String>,
     external_command: Option<String>,
 ) -> PyResult<PySimulationReport> {
@@ -3719,12 +4078,20 @@ fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCompoundCellCharacterizationReport>()?;
     m.add_class::<PyAdvancedConstraintViolation>()?;
     m.add_class::<PyAdvancedConstraintReport>()?;
+    m.add_class::<PyRouteSegment>()?;
+    m.add_class::<PyNetRoute>()?;
+    m.add_class::<PyRoutingReport>()?;
+    m.add_class::<PyMarginParameter>()?;
+    m.add_class::<PyMarginConfig>()?;
+    m.add_class::<PyMarginSample>()?;
+    m.add_class::<PyMarginReport>()?;
     m.add_function(wrap_pyfunction!(compile_plan, m)?)?;
     m.add_function(wrap_pyfunction!(compile_netlist, m)?)?;
     m.add_function(wrap_pyfunction!(compile_layout, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_timing, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_timing_corners, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_timing_statistical, m)?)?;
+    m.add_function(wrap_pyfunction!(analyze_margin, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_ac_bias, m)?)?;
     m.add_function(wrap_pyfunction!(merge_characterized_library, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_ac_bias, m)?)?;

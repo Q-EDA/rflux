@@ -13,6 +13,7 @@ pyo3.workspace = true
 rflux-flow = { path = "../flow" }
 rflux-ir = { path = "../ir" }
 rflux-io = { path = "../io" }
+rflux-margin = { path = "../margin" }
 rflux-place = { path = "../place" }
 rflux-route = { path = "../route" }
 rflux-sim = { path = "../sim" }

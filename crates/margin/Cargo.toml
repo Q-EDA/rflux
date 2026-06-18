@@ -1,0 +1,15 @@
+[package]
+name = "rflux-margin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+rflux-tech = { path = "../tech" }
+rflux-timing = { path = "../timing" }
+rflux-route = { path = "../route" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = "0.8"
+thiserror.workspace = true

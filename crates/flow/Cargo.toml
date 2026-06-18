@@ -13,6 +13,7 @@ rflux-sim = { path = "../sim" }
 rflux-synth = { path = "../synth" }
 rflux-tech = { path = "../tech" }
 rflux-timing = { path = "../timing" }
+rayon.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

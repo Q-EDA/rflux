@@ -879,6 +879,32 @@ impl Pdk {
         serde_json::to_string_pretty(self)
     }
 
+    #[cfg(feature = "yaml")]
+    pub fn from_yaml(serialized: &str) -> Result<Self, serde_yaml::Error> {
+        serde_yaml::from_str(serialized)
+    }
+
+    #[cfg(feature = "yaml")]
+    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(self)
+    }
+
+    pub fn from_auto(content: &str, path: Option<&std::path::Path>) -> Result<Self, String> {
+        if let Some(path) = path {
+            match path.extension().and_then(|e| e.to_str()) {
+                #[cfg(feature = "yaml")]
+                Some("yaml" | "yml") => {
+                    return Self::from_yaml(content).map_err(|e| e.to_string())
+                }
+                Some("json") => {
+                    return Self::from_json(content).map_err(|e| e.to_string())
+                }
+                _ => {}
+            }
+        }
+        Self::from_json(content).map_err(|e| e.to_string())
+    }
+
     #[must_use]
     pub fn validate(&self) -> PdkValidationReport {
         let mut errors = Vec::new();
@@ -2284,5 +2310,34 @@ mod tests {
     fn routing_config_has_reflection_risk_weight() {
         let pdk = Pdk::minimal("test");
         assert!(pdk.ptl_reflection_coefficient(250.0) < 1.0);
+    }
+
+    #[test]
+    #[cfg(feature = "yaml")]
+    fn pdk_yaml_roundtrip() {
+        let pdk = Pdk::minimal("test");
+        let yaml = pdk.to_yaml().expect("should serialize to yaml");
+        let restored = Pdk::from_yaml(&yaml).expect("should deserialize from yaml");
+        assert_eq!(pdk.name, restored.name);
+        assert_eq!(pdk.metal_layers, restored.metal_layers);
+        assert_eq!(pdk.cell_library.cells.len(), restored.cell_library.cells.len());
+    }
+
+    #[test]
+    #[cfg(feature = "yaml")]
+    fn pdk_from_auto_detects_yaml() {
+        let pdk = Pdk::minimal("test");
+        let yaml = pdk.to_yaml().unwrap();
+        let restored = Pdk::from_auto(&yaml, Some(std::path::Path::new("pdk.yaml"))).unwrap();
+        assert_eq!(restored.name, "test");
+    }
+
+    #[test]
+    #[cfg(feature = "yaml")]
+    fn pdk_from_auto_detects_json() {
+        let pdk = Pdk::minimal("test");
+        let json = pdk.to_json().unwrap();
+        let restored = Pdk::from_auto(&json, Some(std::path::Path::new("pdk.json"))).unwrap();
+        assert_eq!(restored.name, "test");
     }
 }
