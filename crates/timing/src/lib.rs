@@ -61,6 +61,10 @@ pub struct TimingConfig {
     pub crossing_constraints: Vec<CrossingConstraint>,
     #[serde(default)]
     pub use_parasitic_extraction: bool,
+    #[serde(default)]
+    pub waveform: WaveformTimingConfig,
+    #[serde(default)]
+    pub ocv: OcvConfig,
 }
 
 impl Default for TimingConfig {
@@ -75,6 +79,8 @@ impl Default for TimingConfig {
             clock_domains: Vec::new(),
             crossing_constraints: Vec::new(),
             use_parasitic_extraction: false,
+            waveform: WaveformTimingConfig::default(),
+            ocv: OcvConfig::default(),
         }
     }
 }
@@ -103,6 +109,18 @@ pub struct TimingArcReport {
     pub required_ps: f64,
     pub setup_slack_ps: f64,
     pub hold_slack_ps: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pulse_envelope: Option<PulseEnvelope>,
+    #[serde(default)]
+    pub pulse_degradation_violation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocv_early_arrival_ps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocv_late_arrival_ps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocv_early_slack_ps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocv_late_slack_ps: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -197,6 +215,104 @@ impl Default for StatisticalTimingConfig {
             max_delay_cross_domain_uncertainty_sigma_ps: 0.0,
             multicycle_cross_domain_uncertainty_sigma_ps: 0.0,
             sigma_multiplier: 3.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PulseEnvelope {
+    pub arrival_ps: f64,
+    pub amplitude: f64,
+    pub width_ps: f64,
+    pub rise_time_ps: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WaveformTimingConfig {
+    #[serde(default)]
+    pub enable_waveform: bool,
+    #[serde(default = "default_amplitude_threshold")]
+    pub amplitude_threshold: f64,
+    #[serde(default = "default_max_pulse_width_ps")]
+    pub max_pulse_width_ps: f64,
+    #[serde(default = "default_initial_amplitude")]
+    pub initial_amplitude: f64,
+    #[serde(default = "default_initial_width_ps")]
+    pub initial_width_ps: f64,
+    #[serde(default = "default_initial_rise_time_ps")]
+    pub initial_rise_time_ps: f64,
+}
+
+fn default_amplitude_threshold() -> f64 {
+    0.3
+}
+fn default_max_pulse_width_ps() -> f64 {
+    10.0
+}
+fn default_initial_amplitude() -> f64 {
+    1.0
+}
+fn default_initial_width_ps() -> f64 {
+    1.0
+}
+fn default_initial_rise_time_ps() -> f64 {
+    0.5
+}
+
+impl Default for WaveformTimingConfig {
+    fn default() -> Self {
+        Self {
+            enable_waveform: false,
+            amplitude_threshold: 0.3,
+            max_pulse_width_ps: 10.0,
+            initial_amplitude: 1.0,
+            initial_width_ps: 1.0,
+            initial_rise_time_ps: 0.5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OcvConfig {
+    #[serde(default = "default_cell_early_factor")]
+    pub cell_early_factor: f64,
+    #[serde(default = "default_cell_late_factor")]
+    pub cell_late_factor: f64,
+    #[serde(default = "default_wire_early_factor")]
+    pub wire_early_factor: f64,
+    #[serde(default = "default_wire_late_factor")]
+    pub wire_late_factor: f64,
+    #[serde(default)]
+    pub path_based: bool,
+    #[serde(default = "default_path_depth_factor")]
+    pub path_depth_factor: f64,
+}
+
+fn default_cell_early_factor() -> f64 {
+    0.95
+}
+fn default_cell_late_factor() -> f64 {
+    1.05
+}
+fn default_wire_early_factor() -> f64 {
+    0.95
+}
+fn default_wire_late_factor() -> f64 {
+    1.05
+}
+fn default_path_depth_factor() -> f64 {
+    0.005
+}
+
+impl Default for OcvConfig {
+    fn default() -> Self {
+        Self {
+            cell_early_factor: 0.95,
+            cell_late_factor: 1.05,
+            wire_early_factor: 0.95,
+            wire_late_factor: 1.05,
+            path_based: false,
+            path_depth_factor: 0.005,
         }
     }
 }
@@ -484,6 +600,12 @@ impl StaticTimingAnalyzer {
                 required_ps: arc_required_ps,
                 setup_slack_ps,
                 hold_slack_ps,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
             });
         }
 
@@ -874,6 +996,126 @@ fn statistical_route_sensitivity(route_mode: RouteMode, route_length_um: f64) ->
         RouteMode::Ptl => 1.15,
     };
     (mode_factor * length_factor).max(1.0)
+}
+
+pub struct OcvDerater {
+    config: OcvConfig,
+}
+
+impl OcvDerater {
+    pub fn new(config: OcvConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn early_cell_factor(&self, depth: usize) -> f64 {
+        let base = self.config.cell_early_factor;
+        if self.config.path_based {
+            (base - depth as f64 * self.config.path_depth_factor).clamp(0.8, 1.2)
+        } else {
+            base.clamp(0.8, 1.2)
+        }
+    }
+
+    pub fn late_cell_factor(&self, depth: usize) -> f64 {
+        let base = self.config.cell_late_factor;
+        if self.config.path_based {
+            (base + depth as f64 * self.config.path_depth_factor).clamp(0.8, 1.2)
+        } else {
+            base.clamp(0.8, 1.2)
+        }
+    }
+
+    pub fn early_wire_factor(&self, depth: usize) -> f64 {
+        let base = self.config.wire_early_factor;
+        if self.config.path_based {
+            (base - depth as f64 * self.config.path_depth_factor).clamp(0.8, 1.2)
+        } else {
+            base.clamp(0.8, 1.2)
+        }
+    }
+
+    pub fn late_wire_factor(&self, depth: usize) -> f64 {
+        let base = self.config.wire_late_factor;
+        if self.config.path_based {
+            (base + depth as f64 * self.config.path_depth_factor).clamp(0.8, 1.2)
+        } else {
+            base.clamp(0.8, 1.2)
+        }
+    }
+
+    pub fn apply_early(&self, cell_delay: f64, wire_delay: f64, depth: usize) -> (f64, f64) {
+        (
+            cell_delay * self.early_cell_factor(depth),
+            wire_delay * self.early_wire_factor(depth),
+        )
+    }
+
+    pub fn apply_late(&self, cell_delay: f64, wire_delay: f64, depth: usize) -> (f64, f64) {
+        (
+            cell_delay * self.late_cell_factor(depth),
+            wire_delay * self.late_wire_factor(depth),
+        )
+    }
+}
+
+pub struct WaveformPropagator {
+    config: WaveformTimingConfig,
+}
+
+impl WaveformPropagator {
+    pub fn new(config: WaveformTimingConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn initial_envelope(&self) -> PulseEnvelope {
+        PulseEnvelope {
+            arrival_ps: 0.0,
+            amplitude: self.config.initial_amplitude,
+            width_ps: self.config.initial_width_ps,
+            rise_time_ps: self.config.initial_rise_time_ps,
+        }
+    }
+
+    pub fn propagate_through_wire(
+        &self,
+        input: &PulseEnvelope,
+        r_per_um: f64,
+        c_per_um: f64,
+        _l_per_um: f64,
+        length_um: f64,
+    ) -> PulseEnvelope {
+        let z0 = 50.0_f64;
+        let r_total = r_per_um * length_um;
+        let c_total = c_per_um * length_um;
+        let amplitude = input.amplitude * (-r_total / (2.0 * z0) * length_um).exp();
+        let width = input.width_ps + 0.5 * (length_um * c_total).sqrt();
+        let rc_term = 2.2 * r_total * c_total;
+        let rise_time = (input.rise_time_ps.powi(2) + rc_term.powi(2)).sqrt();
+        PulseEnvelope {
+            arrival_ps: input.arrival_ps,
+            amplitude,
+            width_ps: width,
+            rise_time_ps: rise_time,
+        }
+    }
+
+    pub fn propagate_through_gate(
+        &self,
+        input: &PulseEnvelope,
+        gate_delay_ps: f64,
+    ) -> PulseEnvelope {
+        PulseEnvelope {
+            arrival_ps: input.arrival_ps + gate_delay_ps,
+            amplitude: self.config.initial_amplitude,
+            width_ps: input.width_ps,
+            rise_time_ps: input.rise_time_ps,
+        }
+    }
+
+    pub fn is_degraded(&self, envelope: &PulseEnvelope) -> bool {
+        envelope.amplitude < self.config.amplitude_threshold
+            || envelope.width_ps > self.config.max_pulse_width_ps
+    }
 }
 
 fn arc_components_ps(
@@ -1725,6 +1967,8 @@ mod tests {
                     clock_domains: Vec::new(),
                     crossing_constraints: Vec::new(),
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 None,
             )
@@ -1797,6 +2041,8 @@ mod tests {
                     }],
                     crossing_constraints: Vec::new(),
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 None,
             )
@@ -1883,6 +2129,8 @@ mod tests {
                     ],
                     crossing_constraints: Vec::new(),
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 None,
             )
@@ -1967,6 +2215,8 @@ mod tests {
                     clock_domains: Vec::new(),
                     crossing_constraints: Vec::new(),
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 None,
             )
@@ -2059,6 +2309,8 @@ mod tests {
                         cycles: None,
                     }],
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 None,
             )
@@ -2153,6 +2405,8 @@ mod tests {
                         cycles: Some(3),
                     }],
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 None,
             )
@@ -2311,6 +2565,8 @@ mod tests {
                         cycles: None,
                     }],
                     use_parasitic_extraction: false,
+                    waveform: WaveformTimingConfig::default(),
+                    ocv: OcvConfig::default(),
                 },
                 &StatisticalTimingConfig::default(),
                 None,
@@ -2724,6 +2980,8 @@ mod tests {
             ],
             crossing_constraints: Vec::new(),
             use_parasitic_extraction: false,
+            waveform: WaveformTimingConfig::default(),
+            ocv: OcvConfig::default(),
         };
 
         let baseline = StaticTimingAnalyzer::new()
@@ -2858,6 +3116,8 @@ mod tests {
                 cycles: Some(2),
             }],
             use_parasitic_extraction: false,
+            waveform: WaveformTimingConfig::default(),
+            ocv: OcvConfig::default(),
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -2915,6 +3175,12 @@ mod tests {
             required_ps: 120.0,
             setup_slack_ps: 100.0,
             hold_slack_ps: 8.0,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
         };
         let ptl_arc = TimingArcReport {
             route_mode: RouteMode::Ptl,
@@ -2970,6 +3236,12 @@ mod tests {
             required_ps: 120.0,
             setup_slack_ps: 100.0,
             hold_slack_ps: 8.0,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
         };
         let dff_arc = TimingArcReport {
             driver_kind: SfCellKind::Dff,
@@ -3023,6 +3295,12 @@ mod tests {
             required_ps: 120.0,
             setup_slack_ps: 100.0,
             hold_slack_ps: 6.0,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
         };
         let characterized_macro = SfCell {
             name: "macro_buf".to_string(),
@@ -3083,6 +3361,12 @@ mod tests {
             required_ps: 120.0,
             setup_slack_ps: 94.0,
             hold_slack_ps: 6.0,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
         };
         let config = StatisticalTimingConfig {
             cell_delay_sigma_ratio: 0.10,
@@ -3250,6 +3534,12 @@ mod tests {
                 required_ps: 12.0,
                 setup_slack_ps: 2.0,
                 hold_slack_ps: -3.0,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
             }],
             worst_setup_slack_ps: 2.0,
             worst_hold_slack_ps: -3.0,
@@ -3300,6 +3590,12 @@ mod tests {
                 required_ps: 12.0,
                 setup_slack_ps: 2.0,
                 hold_slack_ps: -5.0,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
             }],
             worst_setup_slack_ps: 2.0,
             worst_hold_slack_ps: -5.0,
@@ -3348,6 +3644,12 @@ mod tests {
                 required_ps: 12.0,
                 setup_slack_ps: 2.0,
                 hold_slack_ps: -3.0,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
             }],
             worst_setup_slack_ps: 2.0,
             worst_hold_slack_ps: -3.0,
@@ -3363,5 +3665,114 @@ mod tests {
         };
         let recs = report.hold_fix_recommendations(0.0);
         assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn ocv_derater_default_factors() {
+        let derater = OcvDerater::new(OcvConfig::default());
+        assert!((derater.early_cell_factor(0) - 0.95).abs() < 1e-9);
+        assert!((derater.late_cell_factor(0) - 1.05).abs() < 1e-9);
+        assert!((derater.early_wire_factor(0) - 0.95).abs() < 1e-9);
+        assert!((derater.late_wire_factor(0) - 1.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ocv_derater_path_based_increases_with_depth() {
+        let config = OcvConfig {
+            path_based: true,
+            path_depth_factor: 0.01,
+            ..OcvConfig::default()
+        };
+        let derater = OcvDerater::new(config);
+        assert!(derater.late_cell_factor(5) > derater.late_cell_factor(0));
+        assert!(derater.early_cell_factor(5) < derater.early_cell_factor(0));
+    }
+
+    #[test]
+    fn ocv_derater_clamps_to_bounds() {
+        let config = OcvConfig {
+            path_based: true,
+            path_depth_factor: 1.0,
+            cell_early_factor: 0.95,
+            cell_late_factor: 1.05,
+            ..OcvConfig::default()
+        };
+        let derater = OcvDerater::new(config);
+        assert!((derater.early_cell_factor(100) - 0.8).abs() < 1e-9);
+        assert!((derater.late_cell_factor(100) - 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ocv_derater_apply_early_and_late() {
+        let derater = OcvDerater::new(OcvConfig::default());
+        let (early_cell, early_wire) = derater.apply_early(10.0, 5.0, 0);
+        assert!((early_cell - 9.5).abs() < 1e-9);
+        assert!((early_wire - 4.75).abs() < 1e-9);
+        let (late_cell, late_wire) = derater.apply_late(10.0, 5.0, 0);
+        assert!((late_cell - 10.5).abs() < 1e-9);
+        assert!((late_wire - 5.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn waveform_propagator_initial_envelope() {
+        let propagator = WaveformPropagator::new(WaveformTimingConfig::default());
+        let env = propagator.initial_envelope();
+        assert!((env.amplitude - 1.0).abs() < 1e-9);
+        assert!((env.width_ps - 1.0).abs() < 1e-9);
+        assert!((env.rise_time_ps - 0.5).abs() < 1e-9);
+        assert!((env.arrival_ps - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn waveform_propagator_zero_r_preserves_amplitude() {
+        let propagator = WaveformPropagator::new(WaveformTimingConfig::default());
+        let input = propagator.initial_envelope();
+        let output = propagator.propagate_through_wire(&input, 0.0, 0.0, 0.0, 10.0);
+        assert!((output.amplitude - input.amplitude).abs() < 1e-9);
+    }
+
+    #[test]
+    fn waveform_propagator_width_increases_with_length() {
+        let propagator = WaveformPropagator::new(WaveformTimingConfig::default());
+        let input = propagator.initial_envelope();
+        let short = propagator.propagate_through_wire(&input, 0.0, 0.01, 0.0, 10.0);
+        let long = propagator.propagate_through_wire(&input, 0.0, 0.01, 0.0, 100.0);
+        assert!(long.width_ps > short.width_ps);
+    }
+
+    #[test]
+    fn waveform_propagator_gate_resets_amplitude() {
+        let propagator = WaveformPropagator::new(WaveformTimingConfig::default());
+        let degraded = PulseEnvelope {
+            arrival_ps: 5.0,
+            amplitude: 0.1,
+            width_ps: 3.0,
+            rise_time_ps: 1.0,
+        };
+        let output = propagator.propagate_through_gate(&degraded, 2.0);
+        assert!((output.amplitude - 1.0).abs() < 1e-9);
+        assert!((output.arrival_ps - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn waveform_propagator_degradation_detection() {
+        let propagator = WaveformPropagator::new(WaveformTimingConfig::default());
+        let ok = PulseEnvelope {
+            arrival_ps: 0.0,
+            amplitude: 0.5,
+            width_ps: 1.0,
+            rise_time_ps: 0.5,
+        };
+        assert!(!propagator.is_degraded(&ok));
+        let low_amp = PulseEnvelope {
+            amplitude: 0.1,
+            ..ok
+        };
+        assert!(propagator.is_degraded(&low_amp));
+        let wide = PulseEnvelope {
+            width_ps: 15.0,
+            ..ok
+        };
+        assert!(propagator.is_degraded(&wide));
     }
 }

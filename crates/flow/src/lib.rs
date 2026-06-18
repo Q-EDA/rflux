@@ -28,6 +28,21 @@ pub use rflux_sim::{
 
 const TIMING_CLOSURE_MAX_ACTIONS_PER_CHECK: usize = 3;
 
+fn timing_config_with_flow_overrides(config: &FlowConfig) -> TimingConfig {
+    TimingConfig {
+        waveform: rflux_timing::WaveformTimingConfig {
+            enable_waveform: config.enable_waveform_timing,
+            ..config.timing.waveform
+        },
+        ocv: rflux_timing::OcvConfig {
+            cell_late_factor: config.ocv_cell_late_factor,
+            wire_late_factor: config.ocv_wire_late_factor,
+            ..config.timing.ocv
+        },
+        ..config.timing.clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FlowConfig {
     pub synthesis: SynthesisConfig,
@@ -39,6 +54,9 @@ pub struct FlowConfig {
     /// Multiplier applied to library-aware macro halo after characterization feedback.
     pub placement_halo_scale: f64,
     pub use_parasitic_extraction: bool,
+    pub enable_waveform_timing: bool,
+    pub ocv_cell_late_factor: f64,
+    pub ocv_wire_late_factor: f64,
 }
 
 impl Default for FlowConfig {
@@ -52,6 +70,9 @@ impl Default for FlowConfig {
             min_hold_jtl_length_um: 0.0,
             placement_halo_scale: 1.0,
             use_parasitic_extraction: false,
+            enable_waveform_timing: false,
+            ocv_cell_late_factor: 1.05,
+            ocv_wire_late_factor: 1.05,
         }
     }
 }
@@ -569,12 +590,13 @@ impl FlowRunner {
         config: &FlowConfig,
     ) -> Result<LayoutReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let timing_config = timing_config_with_flow_overrides(config);
         let timing_closure = timing_closure_summary(
             artifacts.timing.setup_violations,
             artifacts.timing.hold_violations,
             &artifacts.timing,
             &artifacts.routing,
-            &config.timing,
+            &timing_config,
         );
         let timing_closure_loop =
             self.timing_closure_loop_report(netlist, pdk, config, &artifacts, &timing_closure)?;
@@ -636,12 +658,13 @@ impl FlowRunner {
         config: &FlowConfig,
     ) -> Result<TimingAnalysisReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let timing_config = timing_config_with_flow_overrides(config);
         let closure = timing_closure_summary(
             artifacts.timing.setup_violations,
             artifacts.timing.hold_violations,
             &artifacts.timing,
             &artifacts.routing,
-            &config.timing,
+            &timing_config,
         );
         Ok(TimingAnalysisReport {
             worst_setup_slack_ps: artifacts.timing.worst_setup_slack_ps,
@@ -666,8 +689,8 @@ impl FlowRunner {
                     route_mode: route_mode_for_arc(&artifacts.routing, arc.from, arc.to)
                         .unwrap_or(RouteMode::Jtl),
                     route_length_um: arc.route_length_um,
-                    from_domain: domain_of_pin_from_config(&config.timing, arc.from),
-                    to_domain: domain_of_pin_from_config(&config.timing, arc.to),
+                    from_domain: domain_of_pin_from_config(&timing_config, arc.from),
+                    to_domain: domain_of_pin_from_config(&timing_config, arc.to),
                     launch_phase: arc.launch_phase,
                     capture_phase: arc.capture_phase,
                     launch_window_start_ps: arc.launch_window_start_ps,
@@ -693,33 +716,34 @@ impl FlowRunner {
         config: &FlowConfig,
     ) -> Result<MultiCornerTimingAnalysisReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let timing_config = timing_config_with_flow_overrides(config);
         let mut corner_reports = Vec::with_capacity(pdk.timing_corners.len() + 1);
         let mut default_pdk = pdk.clone();
         default_pdk.active_timing_corner = None;
         let default_timing =
             self.timing
-                .analyze(netlist, &artifacts.routing, &default_pdk, &config.timing, None)?;
+                .analyze(netlist, &artifacts.routing, &default_pdk, &timing_config, None)?;
         corner_reports.push(timing_corner_analysis_report(
             "default",
             true,
             pdk.active_timing_corner.is_none(),
             &default_timing,
             &artifacts.routing,
-            &config.timing,
+            &timing_config,
         ));
 
         for corner_name in pdk.timing_corner_names() {
             let corner_pdk = pdk.with_active_timing_corner(corner_name);
             let timing =
                 self.timing
-                    .analyze(netlist, &artifacts.routing, &corner_pdk, &config.timing, None)?;
+                    .analyze(netlist, &artifacts.routing, &corner_pdk, &timing_config, None)?;
             corner_reports.push(timing_corner_analysis_report(
                 corner_name,
                 false,
                 pdk.active_timing_corner.as_deref() == Some(corner_name),
                 &timing,
                 &artifacts.routing,
-                &config.timing,
+                &timing_config,
             ));
         }
 
@@ -737,11 +761,12 @@ impl FlowRunner {
         statistical_config: &StatisticalTimingConfig,
     ) -> Result<StatisticalTimingAnalysisReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+        let timing_config = timing_config_with_flow_overrides(config);
         let statistical_report = self.timing.analyze_statistical(
             netlist,
             &artifacts.routing,
             pdk,
-            &config.timing,
+            &timing_config,
             statistical_config,
             None,
         )?;
@@ -764,8 +789,8 @@ impl FlowRunner {
                     route_mode: route_mode_for_arc(&artifacts.routing, arc.from, arc.to)
                         .unwrap_or(RouteMode::Jtl),
                     route_length_um: arc.route_length_um,
-                    from_domain: domain_of_pin_from_config(&config.timing, arc.from),
-                    to_domain: domain_of_pin_from_config(&config.timing, arc.to),
+                    from_domain: domain_of_pin_from_config(&timing_config, arc.from),
+                    to_domain: domain_of_pin_from_config(&timing_config, arc.to),
                     launch_phase: arc.launch_phase,
                     capture_phase: arc.capture_phase,
                     launch_window_start_ps: arc.launch_window_start_ps,
@@ -1308,6 +1333,9 @@ impl FlowRunner {
         pdk: &Pdk,
         config: &FlowConfig,
     ) -> Result<CompiledArtifacts, FlowError> {
+        let mut effective_config = config.clone();
+        effective_config.timing = timing_config_with_flow_overrides(config);
+        let config = &effective_config;
         let synthesis = self
             .compiler
             .compile_netlist(netlist, pdk, &config.synthesis)?;
@@ -1537,6 +1565,7 @@ impl FlowRunner {
             return Ok(report);
         };
 
+        let timing_config = timing_config_with_flow_overrides(config);
         let mut candidate_config =
             routing_config_with_library_feedback(netlist, pdk, &config.routing);
         candidate_config.prefer_ptl_from_length_um = threshold_um;
@@ -1548,7 +1577,7 @@ impl FlowRunner {
                 .route(netlist, &artifacts.placement, pdk, &candidate_config)?;
         let candidate_timing =
             self.timing
-                .analyze(netlist, &candidate_routing, pdk, &config.timing, None)?;
+                .analyze(netlist, &candidate_routing, pdk, &timing_config, None)?;
         let candidate_route = candidate_routing
             .routes
             .iter()

@@ -254,6 +254,12 @@ struct LayoutCommandArgs {
     prefer_ptl_from_length_um: Option<f64>,
     #[arg(long)]
     detour_margin_um: Option<f64>,
+    #[arg(long)]
+    waveform: bool,
+    #[arg(long, default_value = "1.05")]
+    ocv_cell_late: f64,
+    #[arg(long, default_value = "1.05")]
+    ocv_wire_late: f64,
 }
 
 #[derive(Debug, Args)]
@@ -570,6 +576,9 @@ fn flow_config_with_cli_closure_options(
     min_hold_jtl_length_um: Option<f64>,
     prefer_ptl_from_length_um: Option<f64>,
     detour_margin_um: Option<f64>,
+    enable_waveform_timing: bool,
+    ocv_cell_late_factor: f64,
+    ocv_wire_late_factor: f64,
 ) -> Result<FlowConfig> {
     let mut config = FlowConfig::default();
     if let Some(path) = flow_config {
@@ -596,6 +605,9 @@ fn flow_config_with_cli_closure_options(
     if let Some(margin_um) = detour_margin_um {
         config.routing.detour_margin_um = margin_um;
     }
+    config.enable_waveform_timing = enable_waveform_timing;
+    config.ocv_cell_late_factor = ocv_cell_late_factor;
+    config.ocv_wire_late_factor = ocv_wire_late_factor;
     Ok(config)
 }
 
@@ -2111,6 +2123,9 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.min_hold_jtl_length_um,
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
+        false,
+        1.05,
+        1.05,
     )?;
     let timing_constraints = args.timing_constraints.clone();
     let mut timing_constraint_summary = None;
@@ -2244,6 +2259,9 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         args.min_hold_jtl_length_um,
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
+        false,
+        1.05,
+        1.05,
     )?;
     let timing_constraints = args.timing_constraints.clone();
     let mut timing_constraint_summary = None;
@@ -3439,6 +3457,9 @@ fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
         args.min_hold_jtl_length_um,
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
+        args.waveform,
+        args.ocv_cell_late,
+        args.ocv_wire_late,
     )?;
     let gds_output = args.gds_output.clone();
     let gds_library_name = args
@@ -3496,6 +3517,9 @@ fn run_analyze_timing(args: LayoutCommandArgs) -> Result<()> {
         args.min_hold_jtl_length_um,
         args.prefer_ptl_from_length_um,
         args.detour_margin_um,
+        args.waveform,
+        args.ocv_cell_late,
+        args.ocv_wire_late,
     )?;
     let pdk_path = args.pdk.clone();
     let report = with_loaded_flow_inputs(
@@ -3539,6 +3563,9 @@ fn run_dse(args: DseArgs) -> Result<()> {
         None,
         None,
         None,
+        false,
+        1.05,
+        1.05,
     )?;
     let dse_config = rflux_flow::DseConfig {
         clock_period_ps_values: args
@@ -6907,6 +6934,9 @@ mod tests {
             min_hold_jtl_length_um: Some(20.0),
             prefer_ptl_from_length_um: Some(70.0),
             detour_margin_um: Some(8.0),
+            waveform: false,
+            ocv_cell_late: 1.05,
+            ocv_wire_late: 1.05,
         })
         .expect("compile-layout should write report and patch");
 
@@ -6955,6 +6985,9 @@ mod tests {
             min_hold_jtl_length_um: None,
             prefer_ptl_from_length_um: None,
             detour_margin_um: None,
+            waveform: false,
+            ocv_cell_late: 1.05,
+            ocv_wire_late: 1.05,
         })
         .expect("compile-layout should replay generated flow config patch");
 
@@ -7046,6 +7079,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: Some(20.0),
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7161,6 +7197,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7235,6 +7274,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7313,6 +7355,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7392,6 +7437,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7473,6 +7521,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7546,6 +7597,9 @@ mod tests {
                 min_hold_jtl_length_um: None,
                 prefer_ptl_from_length_um: None,
                 detour_margin_um: None,
+                waveform: false,
+                ocv_cell_late: 1.05,
+                ocv_wire_late: 1.05,
             }),
         })
         .expect_err("bad timing constraints should fail");
