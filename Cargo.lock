@@ -1026,6 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rflux-extract",
  "rflux-flow",
  "rflux-io",
  "rflux-ir",
@@ -1043,11 +1044,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rflux-extract"
+version = "0.1.0"
+dependencies = [
+ "rflux-ir",
+ "rflux-route",
+ "rflux-tech",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rflux-flow"
 version = "0.1.0"
 dependencies = [
  "criterion",
  "rayon",
+ "rflux-extract",
  "rflux-io",
  "rflux-ir",
  "rflux-place",
@@ -1136,6 +1150,7 @@ dependencies = [
  "rflux-ir",
  "rflux-place",
  "rflux-tech",
+ "serde",
  "thiserror",
 ]
 
@@ -1180,9 +1195,11 @@ dependencies = [
 name = "rflux-timing"
 version = "0.1.0"
 dependencies = [
+ "rflux-extract",
  "rflux-ir",
  "rflux-route",
  "rflux-tech",
+ "serde",
  "thiserror",
 ]
 

@@ -314,6 +314,28 @@ pub struct LengthRange {
     pub max_um: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SfqMaterialParams {
+    pub london_depth_nm: f64,
+    pub trace_thickness_um: f64,
+    pub dielectric_constant: f64,
+    pub dielectric_height_um: f64,
+    pub kinetic_inductance_ratio: f64,
+}
+
+impl SfqMaterialParams {
+    #[must_use]
+    pub fn default_sfq5ee() -> Self {
+        Self {
+            london_depth_nm: 150.0,
+            trace_thickness_um: 0.2,
+            dielectric_constant: 4.0,
+            dielectric_height_um: 1.0,
+            kinetic_inductance_ratio: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// A complete process design kit for SFQ design.
 ///
@@ -336,6 +358,8 @@ pub struct Pdk {
     pub named_cell_timing: Vec<NamedCellTimingModel>,
     pub characterized_cell_metadata: Vec<NamedCharacterizationMetadata>,
     pub interconnect_timing: Vec<InterconnectTimingModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<SfqMaterialParams>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +475,7 @@ impl Pdk {
                     ],
                 },
             ],
+            material: Some(SfqMaterialParams::default_sfq5ee()),
         }
     }
 

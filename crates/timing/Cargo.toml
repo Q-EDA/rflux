@@ -8,4 +8,6 @@ license.workspace = true
 rflux-ir = { path = "../ir" }
 rflux-route = { path = "../route" }
 rflux-tech = { path = "../tech" }
+rflux-extract = { path = "../extract" }
+serde = { workspace = true }
 thiserror.workspace = true

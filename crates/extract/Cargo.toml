@@ -1,12 +1,13 @@
 [package]
-name = "rflux-route"
+name = "rflux-extract"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 rflux-ir = { path = "../ir" }
-rflux-place = { path = "../place" }
 rflux-tech = { path = "../tech" }
+rflux-route = { path = "../route" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror.workspace = true

@@ -61,6 +61,7 @@ enum Commands {
     CheckEquivalence(CheckEquivalenceArgs),
     Dse(DseArgs),
     AnalyzeMargin(AnalyzeMarginArgs),
+    ExtractParasitics(ExtractParasiticsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -365,6 +366,18 @@ struct AnalyzeMarginArgs {
     clock_period_ps: Option<f64>,
     #[arg(long)]
     param: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ExtractParasiticsArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
+    input_format: CliNetlistInputFormat,
+    #[arg(long)]
+    pdk: Option<PathBuf>,
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -1044,6 +1057,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::CheckEquivalence(args) => run_check_equivalence(args),
         Commands::Dse(args) => run_dse(args),
         Commands::AnalyzeMargin(args) => run_analyze_margin(args),
+        Commands::ExtractParasitics(args) => run_extract_parasitics(args),
     }
 }
 
@@ -3655,6 +3669,28 @@ fn run_analyze_margin(args: AnalyzeMarginArgs) -> Result<()> {
         fs::write(output_path, &output_json)?;
     } else {
         println!("{}", output_json);
+    }
+    Ok(())
+}
+
+fn run_extract_parasitics(args: ExtractParasiticsArgs) -> Result<()> {
+    let (mut netlist, pdk) = load_cli_netlist_and_pdk(&args.input, args.input_format, args.pdk.clone())?;
+    let mut flow_config = FlowConfig::default();
+    flow_config.use_parasitic_extraction = true;
+    let report = with_flow_runner(|flow| {
+        flow.compile_layout(&mut netlist, &pdk, &flow_config)
+            .context("extract-parasitics failed")
+    })?;
+
+    if let Some(ref extraction) = report.extraction_report {
+        let output_json = serde_json::to_string_pretty(extraction)?;
+        if let Some(ref output_path) = args.output {
+            fs::write(output_path, &output_json)?;
+        } else {
+            println!("{}", output_json);
+        }
+    } else {
+        println!("No extraction report available");
     }
     Ok(())
 }

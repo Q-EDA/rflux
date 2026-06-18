@@ -38,6 +38,7 @@ pub struct FlowConfig {
     pub min_hold_jtl_length_um: f64,
     /// Multiplier applied to library-aware macro halo after characterization feedback.
     pub placement_halo_scale: f64,
+    pub use_parasitic_extraction: bool,
 }
 
 impl Default for FlowConfig {
@@ -50,6 +51,7 @@ impl Default for FlowConfig {
             clock_phase_count: 2,
             min_hold_jtl_length_um: 0.0,
             placement_halo_scale: 1.0,
+            use_parasitic_extraction: false,
         }
     }
 }
@@ -456,6 +458,7 @@ pub struct LayoutReport {
     pub timing_closure_loop: TimingClosureLoopReport,
     pub initial_total_detour_overhead_um: f64,
     pub detour_feedback_applied: bool,
+    pub extraction_report: Option<rflux_extract::ExtractionReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +579,13 @@ impl FlowRunner {
         let timing_closure_loop =
             self.timing_closure_loop_report(netlist, pdk, config, &artifacts, &timing_closure)?;
 
+        let extraction_report = if config.use_parasitic_extraction {
+            let extractor = rflux_extract::ParasiticExtractor::from_pdk(pdk);
+            Some(extractor.extract_report(&artifacts.routing))
+        } else {
+            None
+        };
+
         Ok(LayoutReport {
             synthesis: artifacts.synthesis,
             placement: PlacementReport {
@@ -615,6 +625,7 @@ impl FlowRunner {
             timing_closure_loop,
             initial_total_detour_overhead_um: artifacts.initial_total_detour_overhead_um,
             detour_feedback_applied: artifacts.detour_feedback_applied,
+            extraction_report,
         })
     }
 
@@ -4582,6 +4593,7 @@ mod tests {
                 capture_window_violations: 0,
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
+                extraction_report: None,
             },
             initial_total_detour_overhead_um: 0.0,
             initial_hold_violations: 0,
@@ -4741,6 +4753,7 @@ mod tests {
                 capture_window_violations: 0,
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
+                extraction_report: None,
             },
             initial_total_detour_overhead_um: 0.0,
             initial_hold_violations: 0,

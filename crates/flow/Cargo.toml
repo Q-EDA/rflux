@@ -9,6 +9,7 @@ rflux-io = { path = "../io" }
 rflux-ir = { path = "../ir" }
 rflux-place = { path = "../place" }
 rflux-route = { path = "../route" }
+rflux-extract = { path = "../extract" }
 rflux-sim = { path = "../sim" }
 rflux-synth = { path = "../synth" }
 rflux-tech = { path = "../tech" }

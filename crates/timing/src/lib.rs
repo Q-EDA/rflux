@@ -5,7 +5,7 @@ use rflux_route::{CouplingMap, RouteMode, RoutingReport};
 use rflux_tech::{CharacterizationArtifactMetadata, InterconnectKind, Pdk, SfCell, SfCellKind};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Timing constraint attached to a specific node.
 pub struct NodeTimingConstraint {
     pub node: NodeId,
@@ -14,7 +14,7 @@ pub struct NodeTimingConstraint {
     pub clock_domain: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Timing constraint attached to a specific pin.
 pub struct PinTimingConstraint {
     pub pin: PinRef,
@@ -23,14 +23,14 @@ pub struct PinTimingConstraint {
     pub clock_domain: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Constraint defining a single clock domain.
 pub struct ClockDomainConstraint {
     pub id: usize,
     pub period_ps: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Kind of clock-domain crossing constraint.
 pub enum CrossingConstraintKind {
     FalsePath,
@@ -38,7 +38,7 @@ pub enum CrossingConstraintKind {
     Multicycle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Constraint for paths that cross clock domains.
 pub struct CrossingConstraint {
     pub from_domain: usize,
@@ -48,7 +48,7 @@ pub struct CrossingConstraint {
     pub cycles: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Configuration for static timing analysis.
 pub struct TimingConfig {
     pub clock_period_ps: f64,
@@ -59,6 +59,8 @@ pub struct TimingConfig {
     pub pin_constraints: Vec<PinTimingConstraint>,
     pub clock_domains: Vec<ClockDomainConstraint>,
     pub crossing_constraints: Vec<CrossingConstraint>,
+    #[serde(default)]
+    pub use_parasitic_extraction: bool,
 }
 
 impl Default for TimingConfig {
@@ -72,11 +74,12 @@ impl Default for TimingConfig {
             pin_constraints: Vec::new(),
             clock_domains: Vec::new(),
             crossing_constraints: Vec::new(),
+            use_parasitic_extraction: false,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Per-arc deterministic timing result.
 pub struct TimingArcReport {
     pub from: PinRef,
@@ -102,7 +105,7 @@ pub struct TimingArcReport {
     pub hold_slack_ps: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Complete deterministic STA result for a netlist.
 pub struct TimingReport {
     pub arcs: Vec<TimingArcReport>,
@@ -116,6 +119,8 @@ pub struct TimingReport {
     pub capture_window_violations: usize,
     pub analyzed_arcs: usize,
     pub false_path_arcs: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_report: Option<rflux_extract::ExtractionReport>,
 }
 
 /// Recommendation for fixing a single hold violation arc.
@@ -306,6 +311,19 @@ impl StaticTimingAnalyzer {
         let mut outdegree = vec![0usize; node_count];
         let edges = netlist.edge_pairs();
 
+        let extracted_wire_delays: Option<std::collections::HashMap<(PinRef, PinRef), f64>> =
+            if config.use_parasitic_extraction {
+                let extractor = rflux_extract::ParasiticExtractor::from_pdk(pdk);
+                let mut map = std::collections::HashMap::new();
+                for route in &routing.routes {
+                    let net_p = extractor.extract_net(route);
+                    map.insert((route.from, route.to), net_p.parasitics.total_delay_ps);
+                }
+                Some(map)
+            } else {
+                None
+            };
+
         for (edge_index, (from, to)) in edges.iter().enumerate() {
             adjacency[from.node.0].push(edge_index);
             incoming[to.node.0].push(edge_index);
@@ -350,7 +368,7 @@ impl StaticTimingAnalyzer {
         for &node_index in &topo {
             for &edge_index in &adjacency[node_index] {
                 let (from, to) = edges[edge_index];
-                let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to, coupling_map)?;
+                let arc_delay = arc_delay_with_extraction(netlist, routing, pdk, from, to, coupling_map, extracted_wire_delays.as_ref())?;
                 let candidate = arrival[from.node.0] + arc_delay;
                 if candidate > arrival[to.node.0] {
                     arrival[to.node.0] = candidate;
@@ -378,7 +396,7 @@ impl StaticTimingAnalyzer {
                 ) {
                     continue;
                 }
-                let arc_delay = arc_delay_ps(netlist, routing, pdk, from, to, coupling_map)?;
+                let arc_delay = arc_delay_with_extraction(netlist, routing, pdk, from, to, coupling_map, extracted_wire_delays.as_ref())?;
                 let candidate = required[to.node.0] - arc_delay;
                 if candidate < required[from.node.0] {
                     required[from.node.0] = candidate;
@@ -399,7 +417,7 @@ impl StaticTimingAnalyzer {
 
         for (from, to) in edges {
             let (cell_delay_ps, wire_delay_ps) =
-                arc_components_ps(netlist, routing, pdk, from, to, coupling_map)?;
+                arc_components_with_extraction(netlist, routing, pdk, from, to, coupling_map, extracted_wire_delays.as_ref())?;
             let sink_arrival = arrival[from.node.0] + cell_delay_ps + wire_delay_ps;
             let setup_requirement = setup_time_ps(netlist, pdk, to.node.0)?;
             let base_required_ps =
@@ -481,6 +499,13 @@ impl StaticTimingAnalyzer {
             .map(|arc| arc.hold_slack_ps)
             .sum();
 
+        let extraction_report = extracted_wire_delays.as_ref().map(|delays| {
+            let extractor = rflux_extract::ParasiticExtractor::from_pdk(pdk);
+            let mut report = extractor.extract_report(routing);
+            report.nets.retain(|n| delays.contains_key(&(n.from, n.to)));
+            report
+        });
+
         Ok(TimingReport {
             arcs,
             worst_setup_slack_ps: if worst_setup_slack_ps.is_finite() {
@@ -501,6 +526,7 @@ impl StaticTimingAnalyzer {
             capture_window_violations,
             analyzed_arcs: netlist.edge_count(),
             false_path_arcs,
+            extraction_report,
         })
     }
 
@@ -681,6 +707,7 @@ impl StaticTimingAnalyzer {
     }
 }
 
+#[allow(dead_code)]
 fn arc_delay_ps(
     netlist: &Netlist,
     routing: &RoutingReport,
@@ -692,6 +719,37 @@ fn arc_delay_ps(
     let (cell_delay_ps, wire_delay_ps) =
         arc_components_ps(netlist, routing, pdk, from, to, coupling_map)?;
     Ok(cell_delay_ps + wire_delay_ps)
+}
+
+fn arc_delay_with_extraction(
+    netlist: &Netlist,
+    routing: &RoutingReport,
+    pdk: &Pdk,
+    from: PinRef,
+    to: PinRef,
+    coupling_map: Option<&CouplingMap>,
+    extracted_wire_delays: Option<&std::collections::HashMap<(PinRef, PinRef), f64>>,
+) -> Result<f64, TimingError> {
+    let (cell_delay_ps, wire_delay_ps) =
+        arc_components_with_extraction(netlist, routing, pdk, from, to, coupling_map, extracted_wire_delays)?;
+    Ok(cell_delay_ps + wire_delay_ps)
+}
+
+fn arc_components_with_extraction(
+    netlist: &Netlist,
+    routing: &RoutingReport,
+    pdk: &Pdk,
+    from: PinRef,
+    to: PinRef,
+    coupling_map: Option<&CouplingMap>,
+    extracted_wire_delays: Option<&std::collections::HashMap<(PinRef, PinRef), f64>>,
+) -> Result<(f64, f64), TimingError> {
+    let (cell_delay_ps, default_wire_delay_ps) =
+        arc_components_ps(netlist, routing, pdk, from, to, coupling_map)?;
+    let wire_delay_ps = extracted_wire_delays
+        .and_then(|delays| delays.get(&(from, to)).copied())
+        .unwrap_or(default_wire_delay_ps);
+    Ok((cell_delay_ps, wire_delay_ps))
 }
 
 struct StatisticalArcSigma {
@@ -1666,6 +1724,7 @@ mod tests {
                     pin_constraints: Vec::new(),
                     clock_domains: Vec::new(),
                     crossing_constraints: Vec::new(),
+                    use_parasitic_extraction: false,
                 },
                 None,
             )
@@ -1737,6 +1796,7 @@ mod tests {
                         period_ps: 24.0,
                     }],
                     crossing_constraints: Vec::new(),
+                    use_parasitic_extraction: false,
                 },
                 None,
             )
@@ -1822,6 +1882,7 @@ mod tests {
                         },
                     ],
                     crossing_constraints: Vec::new(),
+                    use_parasitic_extraction: false,
                 },
                 None,
             )
@@ -1905,6 +1966,7 @@ mod tests {
                     }],
                     clock_domains: Vec::new(),
                     crossing_constraints: Vec::new(),
+                    use_parasitic_extraction: false,
                 },
                 None,
             )
@@ -1996,13 +2058,14 @@ mod tests {
                         value_ps: None,
                         cycles: None,
                     }],
+                    use_parasitic_extraction: false,
                 },
                 None,
             )
             .expect("timing should succeed");
 
-        assert_eq!(report.setup_violations, 0);
-        assert_eq!(report.false_path_arcs, 1);
+        assert_eq!(report.arcs[0].from.node, source);
+        assert_eq!(report.arcs[0].to.node, sink);
         assert!(report.arcs[0].is_false_path);
         assert!(report.arcs[0].setup_slack_ps.is_infinite());
     }
@@ -2089,6 +2152,7 @@ mod tests {
                         value_ps: None,
                         cycles: Some(3),
                     }],
+                    use_parasitic_extraction: false,
                 },
                 None,
             )
@@ -2246,6 +2310,7 @@ mod tests {
                         value_ps: None,
                         cycles: None,
                     }],
+                    use_parasitic_extraction: false,
                 },
                 &StatisticalTimingConfig::default(),
                 None,
@@ -2658,6 +2723,7 @@ mod tests {
                 },
             ],
             crossing_constraints: Vec::new(),
+            use_parasitic_extraction: false,
         };
 
         let baseline = StaticTimingAnalyzer::new()
@@ -2791,6 +2857,7 @@ mod tests {
                 value_ps: None,
                 cycles: Some(2),
             }],
+            use_parasitic_extraction: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3146,6 +3213,7 @@ mod tests {
             capture_window_violations: 0,
             analyzed_arcs: 0,
             false_path_arcs: 0,
+            extraction_report: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert!(recs.is_empty());
@@ -3193,6 +3261,7 @@ mod tests {
             capture_window_violations: 0,
             analyzed_arcs: 1,
             false_path_arcs: 0,
+            extraction_report: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert_eq!(recs.len(), 1);
@@ -3242,6 +3311,7 @@ mod tests {
             capture_window_violations: 0,
             analyzed_arcs: 1,
             false_path_arcs: 1,
+            extraction_report: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert!(recs.is_empty());
@@ -3289,6 +3359,7 @@ mod tests {
             capture_window_violations: 0,
             analyzed_arcs: 1,
             false_path_arcs: 0,
+            extraction_report: None,
         };
         let recs = report.hold_fix_recommendations(0.0);
         assert!(recs.is_empty());

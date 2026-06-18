@@ -5,9 +5,10 @@ use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use rflux_ir::{Netlist, NodeKind, PinRef};
 use rflux_place::{Placement, Point};
 use rflux_tech::{InterconnectKind, Pdk};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouteMode {
     Jtl,
     Ptl,
