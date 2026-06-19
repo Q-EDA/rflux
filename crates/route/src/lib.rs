@@ -57,6 +57,7 @@ pub struct RoutingConfig {
     pub blocked_regions: Vec<BlockedRegion>,
     pub detour_margin_um: f64,
     pub congestion_weight: f64,
+    pub coupling_weight: f64,
     pub ptl_reflection_risk_weight: f64,
 }
 
@@ -69,6 +70,7 @@ impl Default for RoutingConfig {
             blocked_regions: Vec::new(),
             detour_margin_um: 12.0,
             congestion_weight: 0.0,
+            coupling_weight: 0.0,
             ptl_reflection_risk_weight: 0.0,
         }
     }
@@ -147,6 +149,7 @@ impl SimpleRouter {
         let mut jtl_routes = 0usize;
         let mut ptl_routes = 0usize;
         let mut congestion = CongestionMap::default();
+        let coupling_radius_um = 10.0;
 
         for (from, to) in netlist.edge_pairs() {
             let source = placement
@@ -155,7 +158,12 @@ impl SimpleRouter {
             let sink = placement
                 .point_of(to.node)
                 .ok_or(RouteError::MissingPlacement)?;
-            let path = choose_route_path(source, sink, config, &congestion);
+            let coupling_map = if config.coupling_weight > 0.0 && !routes.is_empty() {
+                Some(CouplingMap::build(&routes, coupling_radius_um))
+            } else {
+                None
+            };
+            let path = choose_route_path(source, sink, config, &congestion, coupling_map.as_ref());
             let direct_length_um = manhattan_length(source, sink);
             let length_um = path_length(&path);
             let touches_boundary_port =
@@ -231,8 +239,9 @@ fn choose_route_path(
     sink: Point,
     config: &RoutingConfig,
     congestion: &CongestionMap,
+    coupling_map: Option<&CouplingMap>,
 ) -> Vec<(Point, Point)> {
-    shortest_grid_path(source, sink, config, congestion)
+    shortest_grid_path(source, sink, config, congestion, coupling_map)
         .or_else(|| {
             let mut candidates = base_route_candidates(source, sink);
             for region in &config.blocked_regions {
@@ -253,7 +262,18 @@ fn choose_route_path(
                         .iter()
                         .map(|(start, end)| congestion.usage(*start, *end) as f64 * config.congestion_weight)
                         .sum();
-                    let cost = length + congestion_cost;
+                    let coupling_cost: f64 = if let Some(cm) = coupling_map {
+                        candidate
+                            .iter()
+                            .map(|(start, end)| {
+                                cm.estimate_segment_coupling(*start, *end, config.jtl_layer)
+                                    * config.coupling_weight
+                            })
+                            .sum()
+                    } else {
+                        0.0
+                    };
+                    let cost = length + congestion_cost + coupling_cost;
                     if cost < best_cost {
                         best_cost = cost;
                         best_clear = Some(candidate);
@@ -305,6 +325,7 @@ fn shortest_grid_path(
     sink: Point,
     config: &RoutingConfig,
     congestion: &CongestionMap,
+    coupling_map: Option<&CouplingMap>,
 ) -> Option<Vec<(Point, Point)>> {
     let points = grid_points(source, sink, config);
     let source_index = points.iter().position(|point| *point == source)?;
@@ -334,7 +355,13 @@ fn shortest_grid_path(
         for &(next, weight) in adjacent_nodes {
             let congestion_penalty =
                 congestion.usage(points[node], points[next]) as f64 * config.congestion_weight;
-            let next_cost = cost + weight + congestion_penalty;
+            let coupling_penalty = if let Some(cm) = coupling_map {
+                cm.estimate_segment_coupling(points[node], points[next], config.jtl_layer)
+                    * config.coupling_weight
+            } else {
+                0.0
+            };
+            let next_cost = cost + weight + congestion_penalty + coupling_penalty;
             if next_cost < dist[next] {
                 dist[next] = next_cost;
                 prev[next] = Some(node);
@@ -843,6 +870,28 @@ impl CouplingMap {
             return 0.0;
         };
         base_delay_ps * info.max_coefficient * coeff
+    }
+
+    pub fn estimate_segment_coupling(&self, start: Point, end: Point, layer: u8) -> f64 {
+        let seg = RouteSegment { start, end, layer };
+        let candidate_bins = bins_covered_by_segment(&seg, self.bin_size_um);
+        let mut total = 0.0;
+        for bin_key in candidate_bins {
+            if let Some(bin) = self.bins.get(&bin_key) {
+                for other in &bin.segments {
+                    if other.layer != layer {
+                        continue;
+                    }
+                    let (parallel_len, distance) =
+                        parallel_length_and_distance(start, end, other.start, other.end);
+                    if distance > self.coupling_radius_um || parallel_len < 0.1 {
+                        continue;
+                    }
+                    total += coupling_coefficient(parallel_len, distance);
+                }
+            }
+        }
+        total
     }
 }
 
@@ -1968,5 +2017,104 @@ mod tests {
         let pdk = Pdk::minimal("test");
         assert_eq!(pdk.boundary_reflection_coefficient(InterconnectKind::Jtl, InterconnectKind::Jtl), 0.0);
         assert_eq!(pdk.boundary_reflection_coefficient(InterconnectKind::Ptl, InterconnectKind::Ptl), 0.0);
+    }
+
+    #[test]
+    fn coupling_weight_affects_routing() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        let d = netlist.add_node(NodeKind::CellInstance, "d");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+        netlist
+            .connect(PinRef { node: c, port: 0 }, PinRef { node: d, port: 0 })
+            .expect("c to d");
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 80.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .expect("placement");
+
+        let report_no_coupling = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+
+        let report_with_coupling = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig {
+                    coupling_weight: 10.0,
+                    ..RoutingConfig::default()
+                },
+            )
+            .expect("route");
+
+        assert_eq!(report_no_coupling.routes.len(), 2);
+        assert_eq!(report_with_coupling.routes.len(), 2);
+        assert!(report_no_coupling.total_length_um > 0.0);
+        assert!(report_with_coupling.total_length_um >= report_no_coupling.total_length_um);
+    }
+
+    #[test]
+    fn coupling_weight_zero_is_default() {
+        let config = RoutingConfig::default();
+        assert_eq!(config.coupling_weight, 0.0);
+    }
+
+    #[test]
+    fn estimate_segment_coupling_returns_zero_when_empty() {
+        let routes: Vec<NetRoute> = Vec::new();
+        let cmap = CouplingMap::build(&routes, 10.0);
+        let score = cmap.estimate_segment_coupling(
+            Point { x_um: 0.0, y_um: 0.0 },
+            Point { x_um: 40.0, y_um: 0.0 },
+            1,
+        );
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn estimate_segment_coupling_detects_nearby_route() {
+        let routes = vec![NetRoute {
+            from: PinRef { node: NodeId(0), port: 0 },
+            to: PinRef { node: NodeId(1), port: 0 },
+            mode: RouteMode::Jtl,
+            segments: vec![RouteSegment {
+                start: Point { x_um: 0.0, y_um: 0.0 },
+                end: Point { x_um: 40.0, y_um: 0.0 },
+                layer: 1,
+            }],
+            direct_length_um: 40.0,
+            length_um: 40.0,
+        }];
+        let cmap = CouplingMap::build(&routes, 10.0);
+        let close = cmap.estimate_segment_coupling(
+            Point { x_um: 0.0, y_um: 3.0 },
+            Point { x_um: 40.0, y_um: 3.0 },
+            1,
+        );
+        let far = cmap.estimate_segment_coupling(
+            Point { x_um: 0.0, y_um: 50.0 },
+            Point { x_um: 40.0, y_um: 50.0 },
+            1,
+        );
+        assert!(close > 0.0);
+        assert_eq!(far, 0.0);
     }
 }

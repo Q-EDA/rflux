@@ -72,6 +72,7 @@ pub struct FlowConfig {
     pub enable_drc: bool,
     pub cskew_target_ps: f64,
     pub enable_clock_gating: bool,
+    pub coupling_aware_routing_weight: f64,
 }
 
 impl Default for FlowConfig {
@@ -93,6 +94,7 @@ impl Default for FlowConfig {
             enable_drc: false,
             cskew_target_ps: 2.0,
             enable_clock_gating: false,
+            coupling_aware_routing_weight: 0.0,
         }
     }
 }
@@ -1382,7 +1384,8 @@ impl FlowRunner {
             config.placement_halo_scale,
         );
         let placement = self.placer.place(netlist, &placement_config)?;
-        let routing_config = routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        let mut routing_config = routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        routing_config.coupling_weight = config.coupling_aware_routing_weight;
         let initial_routing = self
             .router
             .route(netlist, &placement, pdk, &routing_config)?;
@@ -1502,6 +1505,7 @@ impl FlowRunner {
         let initial_violations = initial_timing.hold_violations;
         let mut routing_config =
             routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        routing_config.coupling_weight = config.coupling_aware_routing_weight;
         if config.min_hold_jtl_length_um <= 0.0 || initial_violations == 0 {
             return Ok((initial_routing, initial_timing, routing_config, false));
         }
@@ -1537,8 +1541,9 @@ impl FlowRunner {
         initial_timing: TimingReport,
         initial_closure: &TimingClosureSummary,
     ) -> Result<(RoutingReport, RoutingConfig, TimingReport, bool, bool), FlowError> {
-        let base_routing_config =
+        let mut base_routing_config =
             routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        base_routing_config.coupling_weight = config.coupling_aware_routing_weight;
         let reduce_route_delay_actions = reduce_route_delay_actions(initial_closure);
         let Some(threshold_um) = recommended_prefer_ptl_from_length_um(&reduce_route_delay_actions)
         else {
@@ -1604,6 +1609,7 @@ impl FlowRunner {
         let timing_config = timing_config_with_flow_overrides(config);
         let mut candidate_config =
             routing_config_with_library_feedback(netlist, pdk, &config.routing);
+        candidate_config.coupling_weight = config.coupling_aware_routing_weight;
         candidate_config.prefer_ptl_from_length_um = threshold_um;
         if let Some(detour_margin_um) = report.recommended_detour_margin_um {
             candidate_config.detour_margin_um = detour_margin_um;
