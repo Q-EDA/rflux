@@ -283,6 +283,9 @@ impl Parser {
                 // Could be a module instance
                 self.parse_module_instance()
             }
+            Token::Generate => self.parse_generate_block(),
+            Token::Task => self.parse_task_decl(),
+            Token::Function => self.parse_function_decl(),
             _ => Err(self.error("module item")),
         }
     }
@@ -539,6 +542,166 @@ impl Parser {
             name,
             connections,
         }))
+    }
+
+    fn parse_generate_block(&mut self) -> Result<ModuleItem, ParseError> {
+        self.advance(); // consume 'generate'
+        let kind = match self.peek() {
+            Token::If => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let condition = self.parse_expr()?;
+                self.expect(&Token::RParen)?;
+                let then_body = self.parse_generate_block_items()?;
+                let else_body = if self.peek() == &Token::Else {
+                    self.advance();
+                    Some(self.parse_generate_block_items()?)
+                } else {
+                    None
+                };
+                GenerateKind::If { condition, then_body, else_body }
+            }
+            Token::For => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let init_name = self.expect_ident()?;
+                self.expect(&Token::Equals)?;
+                let init_value = self.expect_number()?;
+                self.expect(&Token::Semicolon)?;
+                let condition = self.parse_expr()?;
+                self.expect(&Token::Semicolon)?;
+                let step_name = self.expect_ident()?;
+                let step = match self.peek() {
+                    Token::Equals => {
+                        self.advance();
+                        // Handle pattern: i = i + 1 or i = i - 1
+                        if let Token::Ident(ref name) = self.peek().clone() {
+                            if *name == step_name {
+                                self.advance(); // consume the ident
+                                match self.peek() {
+                                    Token::Plus => {
+                                        self.advance();
+                                        let val = self.expect_number()?;
+                                        GenVarStep { name: step_name, op: GenVarOp::AddAssign, value: val }
+                                    }
+                                    Token::Minus => {
+                                        self.advance();
+                                        let val = self.expect_number()?;
+                                        GenVarStep { name: step_name, op: GenVarOp::SubAssign, value: val }
+                                    }
+                                    _ => return Err(self.error("'+' or '-' in generate step")),
+                                }
+                            } else {
+                                return Err(self.error("loop variable in generate step"));
+                            }
+                        } else {
+                            let val = self.expect_number()?;
+                            GenVarStep { name: step_name, op: GenVarOp::Assign, value: val }
+                        }
+                    }
+                    Token::Plus => {
+                        self.advance();
+                        self.expect(&Token::Equals)?;
+                        let val = self.expect_number()?;
+                        GenVarStep { name: step_name, op: GenVarOp::AddAssign, value: val }
+                    }
+                    Token::Minus => {
+                        self.advance();
+                        self.expect(&Token::Equals)?;
+                        let val = self.expect_number()?;
+                        GenVarStep { name: step_name, op: GenVarOp::SubAssign, value: val }
+                    }
+                    _ => return Err(self.error("'=' or '+=' or '-=' in generate step")),
+                };
+                self.expect(&Token::RParen)?;
+                let body = self.parse_generate_block_items()?;
+                GenerateKind::For {
+                    init: GenVarInit { name: init_name, value: init_value },
+                    condition,
+                    step,
+                    body,
+                }
+            }
+            _ => GenerateKind::Block(self.parse_generate_block_items()?),
+        };
+        self.expect(&Token::Endgenerate)?;
+        Ok(ModuleItem::GenerateBlock(GenerateBlock { label: None, kind }))
+    }
+
+    fn parse_generate_block_items(&mut self) -> Result<Vec<ModuleItem>, ParseError> {
+        let mut items = Vec::new();
+        while self.peek() != &Token::Endgenerate && self.peek() != &Token::Else && self.peek() != &Token::Eof {
+            if self.peek() == &Token::Begin {
+                // Named begin block: begin : label ... end
+                self.advance(); // consume 'begin'
+                if self.peek() == &Token::Colon {
+                    self.advance(); // consume ':'
+                    let _label = self.expect_ident()?; // consume label
+                }
+                while self.peek() != &Token::End && self.peek() != &Token::Eof {
+                    items.push(self.parse_module_item()?);
+                }
+                self.expect(&Token::End)?;
+            } else {
+                items.push(self.parse_module_item()?);
+            }
+        }
+        Ok(items)
+    }
+
+    fn parse_task_decl(&mut self) -> Result<ModuleItem, ParseError> {
+        self.advance(); // consume 'task'
+        let name = self.expect_ident()?;
+        self.expect(&Token::Semicolon)?;
+        let mut ports = Vec::new();
+        let mut body = Vec::new();
+        while self.peek() != &Token::Endtask && self.peek() != &Token::Eof {
+            match self.peek() {
+                Token::Input | Token::Output | Token::Inout => {
+                    let direction = match self.advance() {
+                        Token::Input => PortDirection::Input,
+                        Token::Output => PortDirection::Output,
+                        Token::Inout => PortDirection::Inout,
+                        _ => unreachable!(),
+                    };
+                    self.parse_optional_range()?; // skip range if present
+                    let pname = self.expect_ident()?;
+                    self.expect(&Token::Semicolon)?;
+                    ports.push(TaskPort { direction, name: pname });
+                }
+                _ => body.push(self.parse_statement()?),
+            }
+        }
+        self.expect(&Token::Endtask)?;
+        Ok(ModuleItem::TaskDecl(TaskDecl { name, ports, body }))
+    }
+
+    fn parse_function_decl(&mut self) -> Result<ModuleItem, ParseError> {
+        self.advance(); // consume 'function'
+        let return_range = self.parse_optional_range()?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Semicolon)?;
+        let mut ports = Vec::new();
+        let mut body = Vec::new();
+        while self.peek() != &Token::Endfunction && self.peek() != &Token::Eof {
+            match self.peek() {
+                Token::Input | Token::Output | Token::Inout => {
+                    let direction = match self.advance() {
+                        Token::Input => PortDirection::Input,
+                        Token::Output => PortDirection::Output,
+                        Token::Inout => PortDirection::Inout,
+                        _ => unreachable!(),
+                    };
+                    self.parse_optional_range()?; // skip range if present
+                    let pname = self.expect_ident()?;
+                    self.expect(&Token::Semicolon)?;
+                    ports.push(TaskPort { direction, name: pname });
+                }
+                _ => body.push(self.parse_statement()?),
+            }
+        }
+        self.expect(&Token::Endfunction)?;
+        Ok(ModuleItem::FunctionDecl(FunctionDecl { name, return_range, ports, body }))
     }
 
     // Expression parser with proper precedence (lowest to highest):
@@ -1076,5 +1239,79 @@ endmodule
             }
             _ => panic!("expected ternary expression"),
         }
+    }
+
+    #[test]
+    fn parse_generate_for() {
+        let input = r#"
+module top(a, b, y);
+    input a;
+    input b;
+    output y;
+    generate
+        for (i = 0; i < 4; i = i + 1) begin : gen_loop
+            and g(a, b, y);
+        end
+    endgenerate
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let has_generate = m.items.iter().any(|item| matches!(item, ModuleItem::GenerateBlock(_)));
+        assert!(has_generate, "expected generate block");
+    }
+
+    #[test]
+    fn parse_task_decl() {
+        let input = r#"
+module top();
+    task my_task;
+        input a;
+        input b;
+        output y;
+        y = a & b;
+    endtask
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let task = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::TaskDecl(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(task.name, "my_task");
+        assert_eq!(task.ports.len(), 3);
+        assert_eq!(task.body.len(), 1);
+    }
+
+    #[test]
+    fn parse_function_decl() {
+        let input = r#"
+module top();
+    function [7:0] add;
+        input [7:0] a;
+        input [7:0] b;
+        add = a + b;
+    endfunction
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let func = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::FunctionDecl(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(func.name, "add");
+        assert_eq!(func.return_range, Some((7, 0)));
+        assert_eq!(func.ports.len(), 2);
+        assert_eq!(func.body.len(), 1);
     }
 }

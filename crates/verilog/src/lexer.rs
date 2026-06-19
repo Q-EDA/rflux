@@ -36,6 +36,15 @@ pub enum Token {
     Xnor,
     Mux,
     Dff,
+    // Generate/task/function keywords
+    Generate,
+    Endgenerate,
+    Genvar,
+    Task,
+    Endtask,
+    Function,
+    Endfunction,
+    For,
     // Symbols
     LParen,
     RParen,
@@ -449,6 +458,14 @@ impl Lexer {
                         "xnor" => Token::Xnor,
                         "mux" => Token::Mux,
                         "dff" => Token::Dff,
+                        "generate" => Token::Generate,
+                        "endgenerate" => Token::Endgenerate,
+                        "genvar" => Token::Genvar,
+                        "task" => Token::Task,
+                        "endtask" => Token::Endtask,
+                        "function" => Token::Function,
+                        "endfunction" => Token::Endfunction,
+                        "for" => Token::For,
                         _ => Token::Ident(ident),
                     };
                     tokens.push(keyword);

@@ -100,6 +100,15 @@ pub fn elaborate_to_ir(
             ModuleItem::Parameter(_) => {
                 // Parameters don't generate nodes
             }
+            ModuleItem::GenerateBlock(gen) => {
+                elaborate_generate_block(&mut netlist, gen, &mut wire_map, &module.name)?;
+            }
+            ModuleItem::TaskDecl(_) => {
+                // Tasks are stored for inlining at call sites (not yet implemented)
+            }
+            ModuleItem::FunctionDecl(_) => {
+                // Functions are stored for inlining at call sites (not yet implemented)
+            }
         }
     }
 
@@ -249,6 +258,191 @@ fn elaborate_always(
         elaborate_sequential_statement(netlist, &always.body, wire_map, prefix, &always.sensitivity)
     } else {
         elaborate_combinational_statement(netlist, &always.body, wire_map, prefix)
+    }
+}
+
+fn elaborate_generate_block(
+    netlist: &mut Netlist,
+    gen: &GenerateBlock,
+    wire_map: &mut HashMap<String, Vec<(rflux_ir::NodeId, u16)>>,
+    module_name: &str,
+) -> Result<(), ElabError> {
+    match &gen.kind {
+        GenerateKind::For { init, condition, step, body } => {
+            let mut var = init.value;
+            loop {
+                if !evaluate_gen_condition(condition, var) {
+                    break;
+                }
+                let suffix = format!("_{}", var);
+                for item in body {
+                    elaborate_module_item_with_suffix(
+                        netlist,
+                        item,
+                        wire_map,
+                        &format!("{}_{}", module_name, suffix),
+                        Some(&suffix),
+                        var,
+                    )?;
+                }
+                var = apply_gen_step(step, var);
+            }
+            Ok(())
+        }
+        GenerateKind::If { condition, then_body, else_body } => {
+            let cond_val = evaluate_gen_condition_bool(condition);
+            let empty = vec![];
+            let items = if cond_val {
+                then_body
+            } else {
+                else_body.as_ref().unwrap_or(&empty)
+            };
+            for item in items {
+                elaborate_module_item(netlist, item, wire_map, module_name)?;
+            }
+            Ok(())
+        }
+        GenerateKind::Block(items) => {
+            for item in items {
+                elaborate_module_item(netlist, item, wire_map, module_name)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn evaluate_gen_condition(condition: &Expr, var: i64) -> bool {
+    match condition {
+        Expr::BinOp(op, left, right) => {
+            let left_val = eval_gen_expr(left, var);
+            let right_val = eval_gen_expr(right, var);
+            match op {
+                BinOp::Lt => left_val < right_val,
+                BinOp::Gt => left_val > right_val,
+                BinOp::Le => left_val <= right_val,
+                BinOp::Ge => left_val >= right_val,
+                BinOp::Eq => left_val == right_val,
+                BinOp::Neq => left_val != right_val,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn evaluate_gen_condition_bool(condition: &Expr) -> bool {
+    match condition {
+        Expr::Literal(n) => *n != 0,
+        Expr::BinOp(op, left, right) => {
+            let left_val = eval_gen_expr_static(left);
+            let right_val = eval_gen_expr_static(right);
+            match op {
+                BinOp::Lt => left_val < right_val,
+                BinOp::Gt => left_val > right_val,
+                BinOp::Le => left_val <= right_val,
+                BinOp::Ge => left_val >= right_val,
+                BinOp::Eq => left_val == right_val,
+                BinOp::Neq => left_val != right_val,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn eval_gen_expr(expr: &Expr, var: i64) -> i64 {
+    match expr {
+        Expr::Ident(_) => var,
+        Expr::Literal(n) => *n,
+        Expr::BinOp(op, left, right) => {
+            let l = eval_gen_expr(left, var);
+            let r = eval_gen_expr(right, var);
+            match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                BinOp::Div => if r != 0 { l / r } else { 0 },
+                BinOp::Mod => if r != 0 { l % r } else { 0 },
+                _ => 0,
+            }
+        }
+        Expr::UnaryOp(UnaryOp::Negate, inner) => -eval_gen_expr(inner, var),
+        _ => 0,
+    }
+}
+
+fn eval_gen_expr_static(expr: &Expr) -> i64 {
+    eval_gen_expr(expr, 0)
+}
+
+fn apply_gen_step(step: &GenVarStep, var: i64) -> i64 {
+    match step.op {
+        GenVarOp::AddAssign => var + step.value,
+        GenVarOp::SubAssign => var - step.value,
+        GenVarOp::Assign => step.value,
+    }
+}
+
+fn elaborate_module_item(
+    netlist: &mut Netlist,
+    item: &ModuleItem,
+    wire_map: &mut HashMap<String, Vec<(rflux_ir::NodeId, u16)>>,
+    module_name: &str,
+) -> Result<(), ElabError> {
+    elaborate_module_item_with_suffix(netlist, item, wire_map, module_name, None, 0)
+}
+
+fn elaborate_module_item_with_suffix(
+    netlist: &mut Netlist,
+    item: &ModuleItem,
+    wire_map: &mut HashMap<String, Vec<(rflux_ir::NodeId, u16)>>,
+    module_name: &str,
+    suffix: Option<&str>,
+    _var: i64,
+) -> Result<(), ElabError> {
+    match item {
+        ModuleItem::Net(net) => {
+            let name = if let Some(suf) = suffix {
+                format!("{}{}", net.name, suf)
+            } else {
+                net.name.clone()
+            };
+            wire_map.entry(name).or_default();
+            Ok(())
+        }
+        ModuleItem::Instance(inst) => {
+            let inst = if let Some(suf) = suffix {
+                InstanceDecl {
+                    module_name: inst.module_name.clone(),
+                    name: format!("{}{}", inst.name, suf),
+                    connections: inst.connections.iter().map(|c| PortConnection {
+                        port_name: c.port_name.clone(),
+                        signal: format!("{}{}", c.signal, suf),
+                    }).collect(),
+                }
+            } else {
+                inst.clone()
+            };
+            elaborate_instance(netlist, &inst, wire_map)
+        }
+        ModuleItem::Assign(assign) => {
+            let assign = if let Some(suf) = suffix {
+                Assignment {
+                    target: format!("{}{}", assign.target, suf),
+                    expr: assign.expr.clone(),
+                }
+            } else {
+                assign.clone()
+            };
+            elaborate_assign(netlist, &assign, wire_map)
+        }
+        ModuleItem::AlwaysBlock(always) => {
+            elaborate_always(netlist, always, wire_map, module_name)
+        }
+        ModuleItem::GenerateBlock(gen) => {
+            elaborate_generate_block(netlist, gen, wire_map, module_name)
+        }
+        ModuleItem::Parameter(_) | ModuleItem::TaskDecl(_) | ModuleItem::FunctionDecl(_) => Ok(()),
     }
 }
 
@@ -1519,5 +1713,26 @@ endmodule
         let has_not = netlist.nodes().iter().any(|n| n.logic_op == Some(LogicOp::Not));
         assert!(has_xor, "expected XOR node for equality");
         assert!(has_not, "expected NOT node for equality");
+    }
+
+    #[test]
+    fn elaborate_generate_for_creates_instances() {
+        let input = r#"
+module top(a, b, y);
+    input a;
+    input b;
+    output y;
+    generate
+        for (i = 0; i < 4; i = i + 1) begin : gen_loop
+            and g(y, a, b);
+        end
+    endgenerate
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let netlist = elaborate_to_ir(&source, "top").unwrap();
+
+        // Should have: 3 port nodes + 4 AND gates = 7 nodes minimum
+        assert!(netlist.node_count() >= 7);
     }
 }

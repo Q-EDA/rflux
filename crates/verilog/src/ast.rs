@@ -33,6 +33,9 @@ pub enum ModuleItem {
     Assign(Assignment),
     Parameter(ParamDecl),
     AlwaysBlock(AlwaysBlock),
+    GenerateBlock(GenerateBlock),
+    TaskDecl(TaskDecl),
+    FunctionDecl(FunctionDecl),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,4 +165,67 @@ pub enum UnaryOp {
     Not,
     Negate,
     LogicalNot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateBlock {
+    pub label: Option<String>,
+    pub kind: GenerateKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GenerateKind {
+    For {
+        init: GenVarInit,
+        condition: Expr,
+        step: GenVarStep,
+        body: Vec<ModuleItem>,
+    },
+    If {
+        condition: Expr,
+        then_body: Vec<ModuleItem>,
+        else_body: Option<Vec<ModuleItem>>,
+    },
+    Block(Vec<ModuleItem>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenVarInit {
+    pub name: String,
+    pub value: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenVarStep {
+    pub name: String,
+    pub op: GenVarOp,
+    pub value: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GenVarOp {
+    AddAssign,
+    SubAssign,
+    Assign,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDecl {
+    pub name: String,
+    pub ports: Vec<TaskPort>,
+    pub body: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPort {
+    pub direction: PortDirection,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionDecl {
+    pub name: String,
+    pub return_range: Option<(i32, i32)>,
+    pub ports: Vec<TaskPort>,
+    pub body: Vec<Statement>,
 }
