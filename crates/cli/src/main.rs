@@ -265,6 +265,8 @@ struct LayoutCommandArgs {
     noise_margin: bool,
     #[arg(long, default_value = "4.2")]
     temperature_k: f64,
+    #[arg(long, default_value = "0")]
+    paths: usize,
 }
 
 #[derive(Debug, Args)]
@@ -3499,6 +3501,7 @@ fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
         args.noise_margin,
         args.temperature_k,
     )?;
+    flow_config.critical_path_count = args.paths;
     let gds_output = args.gds_output.clone();
     let gds_library_name = args
         .gds_library_name
@@ -3561,6 +3564,7 @@ fn run_analyze_timing(args: LayoutCommandArgs) -> Result<()> {
         args.noise_margin,
         args.temperature_k,
     )?;
+    flow_config.critical_path_count = args.paths;
     let pdk_path = args.pdk.clone();
     let report = with_loaded_flow_inputs(
         &args.input,
@@ -4218,7 +4222,7 @@ fn layout_flow_config_patch(report: &rflux_flow::LayoutReport, flow_config: &Flo
 }
 
 fn timing_analysis_to_json(report: &rflux_flow::TimingAnalysisReport) -> Value {
-    json!({
+    let mut value = json!({
         "worst_setup_slack_ps": report.worst_setup_slack_ps,
         "worst_hold_slack_ps": report.worst_hold_slack_ps,
         "critical_path_delay_ps": report.critical_path_delay_ps,
@@ -4252,7 +4256,16 @@ fn timing_analysis_to_json(report: &rflux_flow::TimingAnalysisReport) -> Value {
             "setup_slack_ps": arc.setup_slack_ps,
             "hold_slack_ps": arc.hold_slack_ps,
         })).collect::<Vec<_>>()
-    })
+    });
+    if let Some(ref path_report) = report.path_report {
+        if let Value::Object(ref mut map) = value {
+            map.insert(
+                "path_report".to_string(),
+                serde_json::to_value(path_report).unwrap_or(Value::Null),
+            );
+        }
+    }
+    value
 }
 
 fn multi_corner_timing_analysis_to_json(
@@ -7032,6 +7045,7 @@ mod tests {
             ocv_wire_late: 1.05,
             noise_margin: false,
             temperature_k: 4.2,
+            paths: 0,
         })
         .expect("compile-layout should write report and patch");
 
@@ -7085,6 +7099,7 @@ mod tests {
             ocv_wire_late: 1.05,
             noise_margin: false,
             temperature_k: 4.2,
+            paths: 0,
         })
         .expect("compile-layout should replay generated flow config patch");
 
@@ -7181,6 +7196,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7301,6 +7317,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7380,6 +7397,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7463,6 +7481,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7547,6 +7566,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7633,6 +7653,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7711,6 +7732,7 @@ mod tests {
                 ocv_wire_late: 1.05,
                 noise_margin: false,
                 temperature_k: 4.2,
+                paths: 0,
             }),
         })
         .expect_err("bad timing constraints should fail");

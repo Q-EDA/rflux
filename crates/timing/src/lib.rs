@@ -144,6 +144,8 @@ pub struct TimingReport {
     pub extraction_report: Option<rflux_extract::ExtractionReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub noise_margin: Option<NoiseMarginReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_report: Option<PathReport>,
 }
 
 /// Recommendation for fixing a single hold violation arc.
@@ -163,6 +165,23 @@ pub struct HoldFixRecommendation {
     /// The recommended JTL length in micrometers to achieve the required delay.
     /// Computed as: required_delay_ps / jtl_delay_per_um.
     pub recommended_jtl_length_um: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CriticalPath {
+    pub pins: Vec<PinRef>,
+    pub total_delay_ps: f64,
+    pub total_slack_ps: f64,
+    pub is_setup_violation: bool,
+    pub is_hold_violation: bool,
+    pub arc_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PathReport {
+    pub paths: Vec<CriticalPath>,
+    pub requested_count: usize,
+    pub found_count: usize,
 }
 
 impl TimingReport {
@@ -191,6 +210,123 @@ impl TimingReport {
                 }
             })
             .collect()
+    }
+
+    /// Enumerate the top-K critical paths by tracing backward from endpoints.
+    #[must_use]
+    pub fn enumerate_critical_paths(&self, k: usize) -> PathReport {
+        if k == 0 || self.arcs.is_empty() {
+            return PathReport {
+                paths: vec![],
+                requested_count: k,
+                found_count: 0,
+            };
+        }
+
+        let mut adj: std::collections::HashMap<PinRef, Vec<(PinRef, usize)>> =
+            std::collections::HashMap::new();
+        let mut all_pins: std::collections::HashSet<PinRef> = std::collections::HashSet::new();
+        for (i, arc) in self.arcs.iter().enumerate() {
+            if arc.is_false_path {
+                continue;
+            }
+            adj.entry(arc.from).or_default().push((arc.to, i));
+            all_pins.insert(arc.from);
+            all_pins.insert(arc.to);
+        }
+
+        let endpoints: Vec<PinRef> = all_pins
+            .iter()
+            .filter(|p| !adj.contains_key(p))
+            .copied()
+            .collect();
+
+        let mut paths: Vec<CriticalPath> = Vec::new();
+        for &endpoint in &endpoints {
+            if let Some(path) = self.trace_worst_path(endpoint, &adj) {
+                paths.push(path);
+            }
+        }
+
+        paths.sort_by(|a, b| {
+            b.total_delay_ps
+                .partial_cmp(&a.total_delay_ps)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        paths.truncate(k);
+
+        let found = paths.len();
+        PathReport {
+            paths,
+            requested_count: k,
+            found_count: found,
+        }
+    }
+
+    fn trace_worst_path(
+        &self,
+        endpoint: PinRef,
+        adj: &std::collections::HashMap<PinRef, Vec<(PinRef, usize)>>,
+    ) -> Option<CriticalPath> {
+        let mut pins = vec![endpoint];
+        let mut current = endpoint;
+        let mut total_delay = 0.0f64;
+        let mut total_slack = f64::INFINITY;
+        let mut arc_count = 0usize;
+        let mut is_setup_violation = false;
+        let mut is_hold_violation = false;
+
+        loop {
+            let mut best_predecessor: Option<(PinRef, usize)> = None;
+            let mut best_arrival = f64::NEG_INFINITY;
+
+            for (from_pin, arcs) in adj.iter() {
+                for &(to_pin, arc_idx) in arcs {
+                    if to_pin == current {
+                        let arc = &self.arcs[arc_idx];
+                        if arc.arrival_ps > best_arrival {
+                            best_arrival = arc.arrival_ps;
+                            best_predecessor = Some((*from_pin, arc_idx));
+                        }
+                    }
+                }
+            }
+
+            if let Some((pred_pin, arc_idx)) = best_predecessor {
+                let arc = &self.arcs[arc_idx];
+                total_delay += arc.cell_delay_ps + arc.wire_delay_ps;
+                total_slack = total_slack.min(arc.setup_slack_ps);
+                if arc.setup_slack_ps < 0.0 {
+                    is_setup_violation = true;
+                }
+                if arc.hold_slack_ps < 0.0 {
+                    is_hold_violation = true;
+                }
+                pins.push(pred_pin);
+                current = pred_pin;
+                arc_count += 1;
+
+                if arc_count > 1000 {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        pins.reverse();
+        if pins.len() < 2 {
+            return None;
+        }
+
+        Some(CriticalPath {
+            pins,
+            total_delay_ps: total_delay,
+            total_slack_ps: total_slack,
+            is_setup_violation,
+            is_hold_violation,
+            arc_count,
+        })
     }
 }
 
@@ -736,6 +872,7 @@ impl StaticTimingAnalyzer {
             false_path_arcs,
             extraction_report,
             noise_margin,
+            path_report: None,
         })
     }
 
@@ -3692,6 +3829,7 @@ mod tests {
             false_path_arcs: 0,
             extraction_report: None,
             noise_margin: None,
+            path_report: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert!(recs.is_empty());
@@ -3747,6 +3885,7 @@ mod tests {
             false_path_arcs: 0,
             extraction_report: None,
             noise_margin: None,
+            path_report: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert_eq!(recs.len(), 1);
@@ -3804,6 +3943,7 @@ mod tests {
             false_path_arcs: 1,
             extraction_report: None,
             noise_margin: None,
+            path_report: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert!(recs.is_empty());
@@ -3859,6 +3999,7 @@ mod tests {
             false_path_arcs: 0,
             extraction_report: None,
             noise_margin: None,
+            path_report: None,
         };
         let recs = report.hold_fix_recommendations(0.0);
         assert!(recs.is_empty());
@@ -4100,5 +4241,330 @@ mod tests {
         assert!(config.enable_thermal);
         assert!(config.enable_crosstalk);
         assert!(config.enable_process_spread);
+    }
+
+    #[test]
+    fn enumerate_critical_paths_returns_paths() {
+        let report = TimingReport {
+            arcs: vec![
+                TimingArcReport {
+                    from: PinRef { node: rflux_ir::NodeId(0), port: 0 },
+                    to: PinRef { node: rflux_ir::NodeId(1), port: 0 },
+                    is_false_path: false,
+                    driver_kind: rflux_tech::SfCellKind::GenericGate,
+                    route_mode: rflux_route::RouteMode::Jtl,
+                    route_length_um: 10.0,
+                    cell_delay_ps: 5.0,
+                    wire_delay_ps: 3.0,
+                    launch_phase: 0,
+                    capture_phase: 0,
+                    launch_window_start_ps: 0.0,
+                    launch_window_end_ps: 4.0,
+                    capture_window_start_ps: 0.0,
+                    capture_window_end_ps: 4.0,
+                    arrival_phase_offset_ps: 1.0,
+                    capture_window_slack_ps: 3.0,
+                    capture_window_violation: false,
+                    arrival_ps: 8.0,
+                    required_ps: 120.0,
+                    setup_slack_ps: 112.0,
+                    hold_slack_ps: 3.0,
+                    pulse_envelope: None,
+                    pulse_degradation_violation: false,
+                    ocv_early_arrival_ps: None,
+                    ocv_late_arrival_ps: None,
+                    ocv_early_slack_ps: None,
+                    ocv_late_slack_ps: None,
+                },
+                TimingArcReport {
+                    from: PinRef { node: rflux_ir::NodeId(1), port: 0 },
+                    to: PinRef { node: rflux_ir::NodeId(2), port: 0 },
+                    is_false_path: false,
+                    driver_kind: rflux_tech::SfCellKind::GenericGate,
+                    route_mode: rflux_route::RouteMode::Jtl,
+                    route_length_um: 15.0,
+                    cell_delay_ps: 6.0,
+                    wire_delay_ps: 4.0,
+                    launch_phase: 0,
+                    capture_phase: 0,
+                    launch_window_start_ps: 0.0,
+                    launch_window_end_ps: 4.0,
+                    capture_window_start_ps: 0.0,
+                    capture_window_end_ps: 4.0,
+                    arrival_phase_offset_ps: 1.0,
+                    capture_window_slack_ps: 3.0,
+                    capture_window_violation: false,
+                    arrival_ps: 18.0,
+                    required_ps: 120.0,
+                    setup_slack_ps: 102.0,
+                    hold_slack_ps: 4.0,
+                    pulse_envelope: None,
+                    pulse_degradation_violation: false,
+                    ocv_early_arrival_ps: None,
+                    ocv_late_arrival_ps: None,
+                    ocv_early_slack_ps: None,
+                    ocv_late_slack_ps: None,
+                },
+            ],
+            worst_setup_slack_ps: 102.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 18.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 2,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let path_report = report.enumerate_critical_paths(5);
+        assert_eq!(path_report.requested_count, 5);
+        assert!(path_report.found_count >= 1);
+        assert!(!path_report.paths.is_empty());
+        assert!(path_report.paths[0].total_delay_ps > 0.0);
+        assert!(path_report.paths[0].arc_count > 0);
+    }
+
+    #[test]
+    fn enumerate_critical_paths_zero_returns_empty() {
+        let report = TimingReport {
+            arcs: vec![TimingArcReport {
+                from: PinRef { node: rflux_ir::NodeId(0), port: 0 },
+                to: PinRef { node: rflux_ir::NodeId(1), port: 0 },
+                is_false_path: false,
+                driver_kind: rflux_tech::SfCellKind::GenericGate,
+                route_mode: rflux_route::RouteMode::Jtl,
+                route_length_um: 10.0,
+                cell_delay_ps: 5.0,
+                wire_delay_ps: 3.0,
+                launch_phase: 0,
+                capture_phase: 0,
+                launch_window_start_ps: 0.0,
+                launch_window_end_ps: 4.0,
+                capture_window_start_ps: 0.0,
+                capture_window_end_ps: 4.0,
+                arrival_phase_offset_ps: 1.0,
+                capture_window_slack_ps: 3.0,
+                capture_window_violation: false,
+                arrival_ps: 8.0,
+                required_ps: 120.0,
+                setup_slack_ps: 112.0,
+                hold_slack_ps: 3.0,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
+            }],
+            worst_setup_slack_ps: 112.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 8.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let path_report = report.enumerate_critical_paths(0);
+        assert!(path_report.paths.is_empty());
+        assert_eq!(path_report.requested_count, 0);
+        assert_eq!(path_report.found_count, 0);
+    }
+
+    #[test]
+    fn enumerate_critical_paths_respects_k_limit() {
+        let arcs: Vec<TimingArcReport> = (0..10)
+            .map(|i| TimingArcReport {
+                from: PinRef { node: rflux_ir::NodeId(i), port: 0 },
+                to: PinRef { node: rflux_ir::NodeId(i + 1), port: 0 },
+                is_false_path: false,
+                driver_kind: rflux_tech::SfCellKind::GenericGate,
+                route_mode: rflux_route::RouteMode::Jtl,
+                route_length_um: 10.0,
+                cell_delay_ps: 5.0,
+                wire_delay_ps: 3.0,
+                launch_phase: 0,
+                capture_phase: 0,
+                launch_window_start_ps: 0.0,
+                launch_window_end_ps: 4.0,
+                capture_window_start_ps: 0.0,
+                capture_window_end_ps: 4.0,
+                arrival_phase_offset_ps: 1.0,
+                capture_window_slack_ps: 3.0,
+                capture_window_violation: false,
+                arrival_ps: (i as f64 + 1.0) * 8.0,
+                required_ps: 1200.0,
+                setup_slack_ps: 112.0,
+                hold_slack_ps: 3.0,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
+            })
+            .collect();
+        let report = TimingReport {
+            arcs,
+            worst_setup_slack_ps: 112.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 80.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 10,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let path_report = report.enumerate_critical_paths(3);
+        assert!(path_report.paths.len() <= 3);
+        assert_eq!(path_report.requested_count, 3);
+    }
+
+    #[test]
+    fn enumerate_critical_paths_skips_false_paths() {
+        let report = TimingReport {
+            arcs: vec![TimingArcReport {
+                from: PinRef { node: rflux_ir::NodeId(0), port: 0 },
+                to: PinRef { node: rflux_ir::NodeId(1), port: 0 },
+                is_false_path: true,
+                driver_kind: rflux_tech::SfCellKind::GenericGate,
+                route_mode: rflux_route::RouteMode::Jtl,
+                route_length_um: 10.0,
+                cell_delay_ps: 5.0,
+                wire_delay_ps: 3.0,
+                launch_phase: 0,
+                capture_phase: 0,
+                launch_window_start_ps: 0.0,
+                launch_window_end_ps: 4.0,
+                capture_window_start_ps: 0.0,
+                capture_window_end_ps: 4.0,
+                arrival_phase_offset_ps: 1.0,
+                capture_window_slack_ps: 3.0,
+                capture_window_violation: false,
+                arrival_ps: 8.0,
+                required_ps: 120.0,
+                setup_slack_ps: 112.0,
+                hold_slack_ps: 3.0,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
+            }],
+            worst_setup_slack_ps: 112.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 8.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 1,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let path_report = report.enumerate_critical_paths(5);
+        assert!(path_report.paths.is_empty());
+        assert_eq!(path_report.found_count, 0);
+    }
+
+    #[test]
+    fn enumerate_critical_paths_detects_setup_violation() {
+        let report = TimingReport {
+            arcs: vec![
+                TimingArcReport {
+                    from: PinRef { node: rflux_ir::NodeId(0), port: 0 },
+                    to: PinRef { node: rflux_ir::NodeId(1), port: 0 },
+                    is_false_path: false,
+                    driver_kind: rflux_tech::SfCellKind::GenericGate,
+                    route_mode: rflux_route::RouteMode::Jtl,
+                    route_length_um: 10.0,
+                    cell_delay_ps: 50.0,
+                    wire_delay_ps: 30.0,
+                    launch_phase: 0,
+                    capture_phase: 0,
+                    launch_window_start_ps: 0.0,
+                    launch_window_end_ps: 4.0,
+                    capture_window_start_ps: 0.0,
+                    capture_window_end_ps: 4.0,
+                    arrival_phase_offset_ps: 1.0,
+                    capture_window_slack_ps: 3.0,
+                    capture_window_violation: false,
+                    arrival_ps: 80.0,
+                    required_ps: 120.0,
+                    setup_slack_ps: -10.0,
+                    hold_slack_ps: 3.0,
+                    pulse_envelope: None,
+                    pulse_degradation_violation: false,
+                    ocv_early_arrival_ps: None,
+                    ocv_late_arrival_ps: None,
+                    ocv_early_slack_ps: None,
+                    ocv_late_slack_ps: None,
+                },
+                TimingArcReport {
+                    from: PinRef { node: rflux_ir::NodeId(1), port: 0 },
+                    to: PinRef { node: rflux_ir::NodeId(2), port: 0 },
+                    is_false_path: false,
+                    driver_kind: rflux_tech::SfCellKind::GenericGate,
+                    route_mode: rflux_route::RouteMode::Jtl,
+                    route_length_um: 15.0,
+                    cell_delay_ps: 60.0,
+                    wire_delay_ps: 40.0,
+                    launch_phase: 0,
+                    capture_phase: 0,
+                    launch_window_start_ps: 0.0,
+                    launch_window_end_ps: 4.0,
+                    capture_window_start_ps: 0.0,
+                    capture_window_end_ps: 4.0,
+                    arrival_phase_offset_ps: 1.0,
+                    capture_window_slack_ps: 3.0,
+                    capture_window_violation: false,
+                    arrival_ps: 180.0,
+                    required_ps: 120.0,
+                    setup_slack_ps: -20.0,
+                    hold_slack_ps: 4.0,
+                    pulse_envelope: None,
+                    pulse_degradation_violation: false,
+                    ocv_early_arrival_ps: None,
+                    ocv_late_arrival_ps: None,
+                    ocv_early_slack_ps: None,
+                    ocv_late_slack_ps: None,
+                },
+            ],
+            worst_setup_slack_ps: -20.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: -30.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 180.0,
+            setup_violations: 2,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 2,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let path_report = report.enumerate_critical_paths(5);
+        assert!(!path_report.paths.is_empty());
+        assert!(path_report.paths[0].is_setup_violation);
+        assert!(path_report.paths[0].total_slack_ps < 0.0);
     }
 }

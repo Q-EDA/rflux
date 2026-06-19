@@ -806,6 +806,8 @@ struct PyTimingAnalysisReport {
     closure: PyTimingClosureSummary,
     #[pyo3(get)]
     timing_arcs: Vec<PyTimingArcReport>,
+    #[pyo3(get)]
+    path_report_json: Option<String>,
 }
 
 #[pyclass]
@@ -2081,6 +2083,10 @@ impl From<TimingAnalysisReport> for PyTimingAnalysisReport {
                     hold_slack_ps: arc.hold_slack_ps,
                 })
                 .collect(),
+            path_report_json: value
+                .path_report
+                .as_ref()
+                .and_then(|pr| serde_json::to_string(pr).ok()),
         }
     }
 }

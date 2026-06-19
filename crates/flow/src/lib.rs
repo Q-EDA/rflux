@@ -73,6 +73,7 @@ pub struct FlowConfig {
     pub cskew_target_ps: f64,
     pub enable_clock_gating: bool,
     pub coupling_aware_routing_weight: f64,
+    pub critical_path_count: usize,
 }
 
 impl Default for FlowConfig {
@@ -95,6 +96,7 @@ impl Default for FlowConfig {
             cskew_target_ps: 2.0,
             enable_clock_gating: false,
             coupling_aware_routing_weight: 0.0,
+            critical_path_count: 0,
         }
     }
 }
@@ -260,6 +262,7 @@ pub struct TimingAnalysisReport {
     pub hold_fix_applied: bool,
     pub closure: TimingClosureSummary,
     pub timing_arcs: Vec<TimingArcSummary>,
+    pub path_report: Option<rflux_timing::PathReport>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -762,6 +765,11 @@ impl FlowRunner {
                     hold_slack_ps: arc.hold_slack_ps,
                 })
                 .collect(),
+            path_report: if config.critical_path_count > 0 {
+                Some(artifacts.timing.enumerate_critical_paths(config.critical_path_count))
+            } else {
+                None
+            },
         })
     }
 
@@ -4759,6 +4767,7 @@ mod tests {
                 false_path_arcs: 0,
                 extraction_report: None,
                 noise_margin: None,
+                path_report: None,
             },
             initial_total_detour_overhead_um: 0.0,
             initial_hold_violations: 0,
@@ -4922,6 +4931,7 @@ mod tests {
                 false_path_arcs: 0,
                 extraction_report: None,
                 noise_margin: None,
+                path_report: None,
             },
             initial_total_detour_overhead_um: 0.0,
             initial_hold_violations: 0,
