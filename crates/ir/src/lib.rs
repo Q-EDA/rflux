@@ -275,6 +275,65 @@ impl Netlist {
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }
+
+    /// Removes nodes with no connections and reindexes remaining nodes.
+    ///
+    /// After compaction, [`NodeId`]s are reassigned contiguously from 0.
+    /// This can significantly reduce memory for netlists with many
+    /// disconnected placeholder nodes.
+    pub fn compact(&mut self) {
+        let node_count = self.nodes.len();
+        let mut has_connection = vec![false; node_count];
+        for (from, to) in &self.edges {
+            has_connection[from.node.0] = true;
+            has_connection[to.node.0] = true;
+        }
+
+        let mut old_to_new: Vec<Option<usize>> = vec![None; node_count];
+        let mut kept = Vec::new();
+        for (old_idx, node) in self.nodes.iter().enumerate() {
+            if has_connection[old_idx] {
+                old_to_new[old_idx] = Some(kept.len());
+                kept.push(node.clone());
+            }
+        }
+
+        for node in &mut kept {
+            node.id = NodeId(old_to_new[node.id.0].unwrap());
+        }
+
+        let mut new_edges = HashMap::new();
+        let mut new_driven = HashSet::new();
+        for (from, to) in &self.edges {
+            if let (Some(&new_from), Some(&new_to)) =
+                (old_to_new.get(from.node.0).and_then(|v| v.as_ref()), old_to_new.get(to.node.0).and_then(|v| v.as_ref()))
+            {
+                let new_from_ref = PinRef {
+                    node: NodeId(new_from),
+                    port: from.port,
+                };
+                let new_to_ref = PinRef {
+                    node: NodeId(new_to),
+                    port: to.port,
+                };
+                new_edges.insert(new_from_ref, new_to_ref);
+                new_driven.insert(new_to_ref);
+            }
+        }
+
+        self.nodes = kept;
+        self.edges = new_edges;
+        self.driven_inputs = new_driven;
+    }
+
+    /// Estimates total memory usage in bytes.
+    #[must_use]
+    pub fn memory_usage_bytes(&self) -> usize {
+        let nodes_size = self.nodes.len() * std::mem::size_of::<Node>();
+        let edges_size = self.edges.len() * std::mem::size_of::<(PinRef, PinRef)>();
+        let driven_size = self.driven_inputs.len() * std::mem::size_of::<PinRef>();
+        nodes_size + edges_size + driven_size
+    }
 }
 
 #[cfg(test)]
@@ -307,5 +366,50 @@ mod tests {
         );
         assert!(!IrError::SourceAlreadyConnected.suggestion().is_empty());
         assert!(!IrError::DestinationAlreadyDriven.suggestion().is_empty());
+    }
+
+    #[test]
+    fn netlist_memory_usage() {
+        let mut netlist = Netlist::new();
+        netlist.add_node(NodeKind::Port, "a".to_string());
+        let usage = netlist.memory_usage_bytes();
+        assert!(usage > 0);
+    }
+
+    #[test]
+    fn compact_removes_disconnected_nodes() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let _disconnected = netlist.add_node(NodeKind::CellInstance, "disc");
+        let b = netlist.add_node(NodeKind::Port, "b");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        assert_eq!(netlist.node_count(), 3);
+        netlist.compact();
+        assert_eq!(netlist.node_count(), 2);
+        assert_eq!(netlist.edge_count(), 1);
+    }
+
+    #[test]
+    fn compact_reindexes_contiguously() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        netlist.add_node(NodeKind::CellInstance, "disc1");
+        netlist.add_node(NodeKind::CellInstance, "disc2");
+        let b = netlist.add_node(NodeKind::Port, "b");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        netlist.compact();
+        let nodes = netlist.nodes();
+        assert_eq!(nodes[0].id.0, 0);
+        assert_eq!(nodes[1].id.0, 1);
+        assert_eq!(nodes[0].name, "a");
+        assert_eq!(nodes[1].name, "b");
     }
 }

@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Write as _;
+use std::path::Path;
 
 use rflux_ir::{Netlist, NodeId, NodeKind, PinRef};
 use thiserror::Error;
@@ -31,6 +33,18 @@ impl Placement {
             .iter()
             .find(|placed| placed.node == node)
             .map(|placed| placed.point)
+    }
+
+    pub fn write_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+        for node in &self.nodes {
+            writeln!(
+                file,
+                "{} {} {} {}",
+                node.node.0, node.level, node.slot, node.point.x_um
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -1525,5 +1539,33 @@ mod tests {
     fn sa_placer_timing_weight_zero_is_default() {
         let config = SaConfig::default();
         assert_eq!(config.cost_weight_timing, 0.0);
+    }
+
+    #[test]
+    fn placement_write_to_file() {
+        let placer = LevelizedPlacer::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        let placement = placer
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement should succeed");
+
+        let dir = std::env::temp_dir().join("rflux_place_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_placement.txt");
+        placement.write_to_file(&path).expect("write should succeed");
+
+        let contents = std::fs::read_to_string(&path).expect("read should succeed");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("0 "));
+
+        let _ = std::fs::remove_file(&path);
     }
 }

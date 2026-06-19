@@ -126,6 +126,56 @@ impl RouteError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RoutingCache {
+    cached_routes: HashMap<(PinRef, PinRef), NetRoute>,
+}
+
+impl RoutingCache {
+    pub fn new() -> Self {
+        Self {
+            cached_routes: HashMap::new(),
+        }
+    }
+
+    pub fn from_report(report: &RoutingReport) -> Self {
+        let mut cache = Self::new();
+        for route in &report.routes {
+            cache
+                .cached_routes
+                .insert((route.from, route.to), route.clone());
+        }
+        cache
+    }
+
+    pub fn get(&self, from: PinRef, to: PinRef) -> Option<&NetRoute> {
+        self.cached_routes.get(&(from, to))
+    }
+
+    pub fn insert(&mut self, route: NetRoute) {
+        self.cached_routes
+            .insert((route.from, route.to), route);
+    }
+
+    pub fn invalidate(&mut self, from: PinRef, to: PinRef) {
+        self.cached_routes.remove(&(from, to));
+    }
+
+    pub fn len(&self) -> usize {
+        self.cached_routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cached_routes.is_empty()
+    }
+}
+
+impl Default for RoutingCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SimpleRouter;
 
@@ -133,6 +183,170 @@ impl SimpleRouter {
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    #[allow(dead_code)]
+    fn route_single_net(
+        &self,
+        from: PinRef,
+        to: PinRef,
+        placement: &Placement,
+        pdk: &Pdk,
+        config: &RoutingConfig,
+    ) -> Option<NetRoute> {
+        let source = placement.point_of(from.node)?;
+        let sink = placement.point_of(to.node)?;
+        let path = choose_route_path(source, sink, config, &CongestionMap::default(), None);
+        let direct_length_um = manhattan_length(source, sink);
+        let length_um = path_length(&path);
+        let touches_boundary_port = false;
+        let ptl_allowed = !touches_boundary_port
+            && length_um >= config.prefer_ptl_from_length_um
+            && pdk.is_ptl_length_allowed(length_um);
+        let reflection_risk = if ptl_allowed && config.ptl_reflection_risk_weight > 0.0 {
+            pdk.ptl_reflection_coefficient(length_um)
+        } else {
+            0.0
+        };
+        let use_ptl = ptl_allowed && reflection_risk < 0.3;
+        let mode = if use_ptl {
+            RouteMode::Ptl
+        } else {
+            RouteMode::Jtl
+        };
+        let layer = if use_ptl {
+            config.ptl_layer
+        } else {
+            config.jtl_layer
+        };
+        let segments: Vec<RouteSegment> = path
+            .iter()
+            .map(|(start, end)| RouteSegment {
+                start: *start,
+                end: *end,
+                layer,
+            })
+            .collect();
+
+        Some(NetRoute {
+            from,
+            to,
+            mode,
+            segments,
+            direct_length_um,
+            length_um,
+        })
+    }
+
+    pub fn route_with_cache(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+        pdk: &Pdk,
+        config: &RoutingConfig,
+        cache: &RoutingCache,
+    ) -> Result<(RoutingReport, RoutingCache), RouteError> {
+        let mut routes = Vec::with_capacity(netlist.edge_count());
+        let mut new_cache = cache.clone();
+        let mut total_length_um = 0.0;
+        let mut total_detour_overhead_um = 0.0;
+        let mut detoured_routes = 0usize;
+        let mut jtl_routes = 0usize;
+        let mut ptl_routes = 0usize;
+
+        for (from, to) in netlist.edge_pairs() {
+            if let Some(cached) = cache.get(from, to) {
+                let route = cached.clone();
+                total_length_um += route.length_um;
+                let detour_overhead_um =
+                    (route.length_um - route.direct_length_um).max(0.0);
+                total_detour_overhead_um += detour_overhead_um;
+                if detour_overhead_um > 0.0 {
+                    detoured_routes += 1;
+                }
+                match route.mode {
+                    RouteMode::Jtl => jtl_routes += 1,
+                    RouteMode::Ptl => ptl_routes += 1,
+                }
+                routes.push(route);
+            } else {
+                let source = placement
+                    .point_of(from.node)
+                    .ok_or(RouteError::MissingPlacement)?;
+                let sink = placement
+                    .point_of(to.node)
+                    .ok_or(RouteError::MissingPlacement)?;
+                let path = choose_route_path(
+                    source,
+                    sink,
+                    config,
+                    &CongestionMap::default(),
+                    None,
+                );
+                let direct_length_um = manhattan_length(source, sink);
+                let length_um = path_length(&path);
+                let touches_boundary_port =
+                    is_boundary_port(netlist, from.node) || is_boundary_port(netlist, to.node);
+                let ptl_allowed = !touches_boundary_port
+                    && length_um >= config.prefer_ptl_from_length_um
+                    && pdk.is_ptl_length_allowed(length_um);
+                let reflection_risk = if ptl_allowed && config.ptl_reflection_risk_weight > 0.0 {
+                    pdk.ptl_reflection_coefficient(length_um)
+                } else {
+                    0.0
+                };
+                let use_ptl = ptl_allowed && reflection_risk < 0.3;
+                let mode = if use_ptl {
+                    RouteMode::Ptl
+                } else {
+                    RouteMode::Jtl
+                };
+                let layer = if use_ptl {
+                    config.ptl_layer
+                } else {
+                    config.jtl_layer
+                };
+                let segments: Vec<RouteSegment> = path
+                    .iter()
+                    .map(|(start, end)| RouteSegment {
+                        start: *start,
+                        end: *end,
+                        layer,
+                    })
+                    .collect();
+
+                match mode {
+                    RouteMode::Jtl => jtl_routes += 1,
+                    RouteMode::Ptl => ptl_routes += 1,
+                }
+                total_length_um += length_um;
+                let detour_overhead_um = (length_um - direct_length_um).max(0.0);
+                total_detour_overhead_um += detour_overhead_um;
+                if detour_overhead_um > 0.0 {
+                    detoured_routes += 1;
+                }
+                let route = NetRoute {
+                    from,
+                    to,
+                    mode,
+                    segments,
+                    direct_length_um,
+                    length_um,
+                };
+                new_cache.insert(route.clone());
+                routes.push(route);
+            }
+        }
+
+        let report = RoutingReport {
+            routes,
+            total_length_um,
+            total_detour_overhead_um,
+            detoured_routes,
+            jtl_routes,
+            ptl_routes,
+        };
+        Ok((report, new_cache))
     }
 
     pub fn route(
@@ -2116,5 +2330,160 @@ mod tests {
         );
         assert!(close > 0.0);
         assert_eq!(far, 0.0);
+    }
+
+    #[test]
+    fn routing_cache_stores_and_retrieves() {
+        let mut cache = RoutingCache::new();
+        let from = PinRef { node: NodeId(0), port: 0 };
+        let to = PinRef { node: NodeId(1), port: 0 };
+        let route = NetRoute {
+            from,
+            to,
+            mode: RouteMode::Jtl,
+            segments: vec![],
+            direct_length_um: 10.0,
+            length_um: 10.0,
+        };
+        cache.insert(route);
+        assert!(cache.get(from, to).is_some());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn routing_cache_returns_none_for_missing() {
+        let cache = RoutingCache::new();
+        let from = PinRef { node: NodeId(0), port: 0 };
+        let to = PinRef { node: NodeId(1), port: 0 };
+        assert!(cache.get(from, to).is_none());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn routing_cache_invalidate_removes_entry() {
+        let mut cache = RoutingCache::new();
+        let from = PinRef { node: NodeId(0), port: 0 };
+        let to = PinRef { node: NodeId(1), port: 0 };
+        cache.insert(NetRoute {
+            from,
+            to,
+            mode: RouteMode::Jtl,
+            segments: vec![],
+            direct_length_um: 10.0,
+            length_um: 10.0,
+        });
+        assert_eq!(cache.len(), 1);
+        cache.invalidate(from, to);
+        assert!(cache.get(from, to).is_none());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn routing_cache_from_report() {
+        let report = RoutingReport {
+            routes: vec![NetRoute {
+                from: PinRef { node: NodeId(0), port: 0 },
+                to: PinRef { node: NodeId(1), port: 0 },
+                mode: RouteMode::Jtl,
+                segments: vec![],
+                direct_length_um: 10.0,
+                length_um: 10.0,
+            }],
+            total_length_um: 10.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 1,
+            ptl_routes: 0,
+        };
+        let cache = RoutingCache::from_report(&report);
+        assert_eq!(cache.len(), 1);
+        let from = PinRef { node: NodeId(0), port: 0 };
+        let to = PinRef { node: NodeId(1), port: 0 };
+        assert!(cache.get(from, to).is_some());
+    }
+
+    #[test]
+    fn route_with_cache_reuses_cached_route() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+
+        let placement = LevelizedPlacer::new()
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement");
+
+        let first_report = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+
+        let cache = RoutingCache::from_report(&first_report);
+        let (second_report, new_cache) = SimpleRouter::new()
+            .route_with_cache(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+                &cache,
+            )
+            .expect("route_with_cache");
+
+        assert_eq!(second_report.routes.len(), 1);
+        assert_eq!(second_report.routes[0].mode, RouteMode::Jtl);
+        assert_eq!(new_cache.len(), 1);
+    }
+
+    #[test]
+    fn route_with_cache_routes_uncached_nets() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+        netlist
+            .connect(PinRef { node: b, port: 1 }, PinRef { node: c, port: 0 })
+            .expect("b to c");
+
+        let placement = LevelizedPlacer::new()
+            .place(&netlist, &PlacementConfig::default())
+            .expect("placement");
+
+        let first_report = SimpleRouter::new()
+            .route(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+            )
+            .expect("route");
+
+        let mut cache = RoutingCache::from_report(&first_report);
+        cache.invalidate(
+            PinRef { node: b, port: 1 },
+            PinRef { node: c, port: 0 },
+        );
+        assert_eq!(cache.len(), 1);
+
+        let (second_report, new_cache) = SimpleRouter::new()
+            .route_with_cache(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+                &cache,
+            )
+            .expect("route_with_cache");
+
+        assert_eq!(second_report.routes.len(), 2);
+        assert_eq!(new_cache.len(), 2);
     }
 }
