@@ -8,14 +8,14 @@ use thiserror::Error;
 ///
 /// Internally wraps a usize index. Created by [`Netlist::add_node`]
 /// and [`Netlist::add_node_with_logic`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
 /// Reference to a specific pin on a node.
 ///
 /// Combines a [`NodeId`] with a port number so callers can
 /// distinguish multiple input/output pins on the same cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PinRef {
     pub node: NodeId,
     pub port: u16,
@@ -261,7 +261,10 @@ impl Netlist {
     /// All edges as a flat vector of (source, destination) pairs.
     #[must_use]
     pub fn edge_pairs(&self) -> Vec<(PinRef, PinRef)> {
-        self.edges.iter().map(|(from, to)| (*from, *to)).collect()
+        let mut pairs: Vec<(PinRef, PinRef)> =
+            self.edges.iter().map(|(from, to)| (*from, *to)).collect();
+        pairs.sort();
+        pairs
     }
 
     /// Number of nodes in the netlist.
