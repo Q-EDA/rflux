@@ -98,6 +98,7 @@ pub struct SaConfig {
     pub moves_per_temp: usize,
     pub cost_weight_hpwl: f64,
     pub cost_weight_congestion: f64,
+    pub cost_weight_timing: f64,
 }
 
 impl Default for SaConfig {
@@ -109,6 +110,7 @@ impl Default for SaConfig {
             moves_per_temp: 1000,
             cost_weight_hpwl: 1.0,
             cost_weight_congestion: 0.5,
+            cost_weight_timing: 0.0,
         }
     }
 }
@@ -355,19 +357,32 @@ impl SaPlacer {
     }
 
     pub fn place(&self, netlist: &Netlist) -> Result<Placement, PlaceError> {
+        self.place_with_critical_nets(netlist, &[])
+    }
+
+    pub fn place_with_critical_nets(
+        &self,
+        netlist: &Netlist,
+        critical_nets: &[(PinRef, PinRef)],
+    ) -> Result<Placement, PlaceError> {
         let initial = LevelizedPlacer::new().place(netlist, &self.config)?;
 
         if netlist.node_count() < 3 {
             return Ok(initial);
         }
 
-        let optimized = self.simulated_annealing(netlist, initial);
+        let optimized = self.simulated_annealing_with_timing(netlist, initial, critical_nets);
         Ok(optimized)
     }
 
-    fn simulated_annealing(&self, netlist: &Netlist, initial: Placement) -> Placement {
+    fn simulated_annealing_with_timing(
+        &self,
+        netlist: &Netlist,
+        initial: Placement,
+        critical_nets: &[(PinRef, PinRef)],
+    ) -> Placement {
         let mut current = initial.clone();
-        let mut current_cost = self.total_cost(netlist, &current);
+        let mut current_cost = self.total_cost_with_timing(netlist, &current, critical_nets);
         let mut best = current.clone();
         let mut best_cost = current_cost;
         let mut temp = self.sa_config.initial_temperature;
@@ -377,7 +392,7 @@ impl SaPlacer {
             for _ in 0..self.sa_config.moves_per_temp {
                 let mut candidate = current.clone();
                 self.random_move(&mut candidate, &mut rng);
-                let candidate_cost = self.total_cost(netlist, &candidate);
+                let candidate_cost = self.total_cost_with_timing(netlist, &candidate, critical_nets);
                 let delta = candidate_cost - current_cost;
 
                 if delta < 0.0 || rng.gen_f64() < (-delta / temp).exp() {
@@ -395,11 +410,13 @@ impl SaPlacer {
         best
     }
 
-    fn total_cost(&self, netlist: &Netlist, placement: &Placement) -> f64 {
+    fn total_cost_with_timing(&self, netlist: &Netlist, placement: &Placement, critical_nets: &[(PinRef, PinRef)]) -> f64 {
         let hpwl = self.compute_hpwl(netlist, placement);
         let congestion = self.compute_congestion(placement);
+        let timing = self.compute_timing_penalty(netlist, placement, critical_nets);
         self.sa_config.cost_weight_hpwl * hpwl
             + self.sa_config.cost_weight_congestion * congestion
+            + self.sa_config.cost_weight_timing * timing
     }
 
     fn compute_hpwl(&self, netlist: &Netlist, placement: &Placement) -> f64 {
@@ -437,6 +454,26 @@ impl SaPlacer {
                 }
             })
             .sum()
+    }
+
+    fn compute_timing_penalty(
+        &self,
+        _netlist: &Netlist,
+        placement: &Placement,
+        critical_nets: &[(PinRef, PinRef)],
+    ) -> f64 {
+        if critical_nets.is_empty() || self.sa_config.cost_weight_timing <= 0.0 {
+            return 0.0;
+        }
+        let mut total_penalty = 0.0;
+        for &(from, to) in critical_nets {
+            if let (Some(p_from), Some(p_to)) = (placement.point_of(from.node), placement.point_of(to.node)) {
+                let dx = (p_from.x_um - p_to.x_um).abs();
+                let dy = (p_from.y_um - p_to.y_um).abs();
+                total_penalty += dx + dy;
+            }
+        }
+        total_penalty
     }
 
     fn random_move(&self, placement: &mut Placement, rng: &mut SimpleRng) {
@@ -1444,5 +1481,49 @@ mod tests {
         assert_eq!(config.moves_per_temp, 1000);
         assert_eq!(config.cost_weight_hpwl, 1.0);
         assert_eq!(config.cost_weight_congestion, 0.5);
+        assert_eq!(config.cost_weight_timing, 0.0);
+    }
+
+    #[test]
+    fn sa_placer_timing_weight_affects_placement() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).ok();
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 }).ok();
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: d, port: 0 }).ok();
+
+        let config = PlacementConfig::default();
+        let critical_nets = vec![
+            (PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }),
+            (PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 }),
+        ];
+
+        let sa_config_no_timing = SaConfig {
+            cost_weight_timing: 0.0,
+            moves_per_temp: 100,
+            ..Default::default()
+        };
+        let placer_no_timing = SaPlacer::new(config.clone(), sa_config_no_timing);
+        let placement_no_timing = placer_no_timing.place_with_critical_nets(&netlist, &critical_nets).unwrap();
+
+        let sa_config_timing = SaConfig {
+            cost_weight_timing: 2.0,
+            moves_per_temp: 100,
+            ..Default::default()
+        };
+        let placer_timing = SaPlacer::new(config, sa_config_timing);
+        let placement_timing = placer_timing.place_with_critical_nets(&netlist, &critical_nets).unwrap();
+
+        assert_eq!(placement_no_timing.nodes.len(), 4);
+        assert_eq!(placement_timing.nodes.len(), 4);
+    }
+
+    #[test]
+    fn sa_placer_timing_weight_zero_is_default() {
+        let config = SaConfig::default();
+        assert_eq!(config.cost_weight_timing, 0.0);
     }
 }
