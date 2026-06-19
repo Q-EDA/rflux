@@ -320,6 +320,10 @@ pub struct SfqDrcRules {
     pub min_trace_spacing_um: f64,
     pub min_jj_spacing_um: f64,
     pub cell_boundary_margin_um: f64,
+    pub max_metal_density: f64,
+    pub min_metal_density: f64,
+    pub max_antenna_ratio: f64,
+    pub min_via_spacing_um: f64,
 }
 
 impl Default for SfqDrcRules {
@@ -329,6 +333,10 @@ impl Default for SfqDrcRules {
             min_trace_spacing_um: 1.0,
             min_jj_spacing_um: 5.0,
             cell_boundary_margin_um: 2.0,
+            max_metal_density: 0.8,
+            min_metal_density: 0.2,
+            max_antenna_ratio: 100.0,
+            min_via_spacing_um: 2.0,
         }
     }
 }

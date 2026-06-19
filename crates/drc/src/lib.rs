@@ -43,6 +43,69 @@ pub struct DrcReport {
     pub passed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DrcSvgConfig {
+    pub width_um: f64,
+    pub height_um: f64,
+    pub show_errors: bool,
+    pub show_warnings: bool,
+}
+
+impl Default for DrcSvgConfig {
+    fn default() -> Self {
+        Self {
+            width_um: 1000.0,
+            height_um: 1000.0,
+            show_errors: true,
+            show_warnings: true,
+        }
+    }
+}
+
+impl DrcReport {
+    pub fn to_svg(&self, config: &DrcSvgConfig) -> String {
+        let mut svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="{}" height="{}">"#,
+            config.width_um, config.height_um, config.width_um, config.height_um
+        );
+
+        svg.push_str(&format!(
+            r##"<rect width="{}" height="{}" fill="#f8f8f8"/>"##,
+            config.width_um, config.height_um
+        ));
+
+        for violation in &self.violations {
+            let show = match violation.severity {
+                DrcSeverity::Error => config.show_errors,
+                DrcSeverity::Warning => config.show_warnings,
+            };
+            if !show {
+                continue;
+            }
+
+            if let Some(loc) = violation.location {
+                let (color, radius) = match violation.severity {
+                    DrcSeverity::Error => ("#ff0000", 5.0),
+                    DrcSeverity::Warning => ("#ffaa00", 3.0),
+                };
+                svg.push_str(&format!(
+                    r#"<circle cx="{}" cy="{}" r="{}" fill="{}" opacity="0.7"/>"#,
+                    loc.x_um, loc.y_um, radius, color
+                ));
+                svg.push_str(&format!(
+                    r##"<text x="{}" y="{}" font-size="4" fill="#333">{}</text>"##,
+                    loc.x_um + radius + 1.0,
+                    loc.y_um,
+                    violation.rule
+                ));
+            }
+        }
+
+        svg.push_str("</svg>");
+        svg
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetMismatch {
     pub net_name: String,
@@ -71,7 +134,7 @@ pub struct LvsReport {
     pub parameter_mismatches: Vec<ParameterMismatch>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DrcRuleSet {
     pub min_trace_spacing_um: f64,
     pub min_jj_spacing_um: f64,
@@ -87,15 +150,20 @@ pub struct DrcRuleSet {
 
 impl DrcRuleSet {
     pub fn from_pdk(pdk: &Pdk, width_um: f64, height_um: f64) -> Self {
-        let (spacing, jj_spacing, boundary_margin) = if let Some(rules) = &pdk.drc_rules {
-            (
-                rules.min_trace_spacing_um,
-                rules.min_jj_spacing_um,
-                rules.cell_boundary_margin_um,
-            )
-        } else {
-            (1.0, 5.0, 2.0)
-        };
+        let (spacing, jj_spacing, boundary_margin, max_density, min_density, antenna, via_spacing) =
+            if let Some(rules) = &pdk.drc_rules {
+                (
+                    rules.min_trace_spacing_um,
+                    rules.min_jj_spacing_um,
+                    rules.cell_boundary_margin_um,
+                    rules.max_metal_density,
+                    rules.min_metal_density,
+                    rules.max_antenna_ratio,
+                    rules.min_via_spacing_um,
+                )
+            } else {
+                (1.0, 5.0, 2.0, 0.8, 0.2, 100.0, 2.0)
+            };
         Self {
             min_trace_spacing_um: spacing,
             min_jj_spacing_um: jj_spacing,
@@ -103,10 +171,22 @@ impl DrcRuleSet {
             cell_boundary_margin_um: boundary_margin,
             layout_width_um: width_um,
             layout_height_um: height_um,
-            max_metal_density: 0.8,
-            min_metal_density: 0.2,
-            max_antenna_ratio: 100.0,
-            min_via_spacing_um: 2.0,
+            max_metal_density: max_density,
+            min_metal_density: min_density,
+            max_antenna_ratio: antenna,
+            min_via_spacing_um: via_spacing,
+        }
+    }
+
+    pub fn from_yaml(yaml: &str) -> Result<Self, String> {
+        #[cfg(feature = "yaml")]
+        {
+            serde_yaml::from_str(yaml).map_err(|e| e.to_string())
+        }
+        #[cfg(not(feature = "yaml"))]
+        {
+            let _ = yaml;
+            Err("YAML support not enabled".to_string())
         }
     }
 }
@@ -1007,5 +1087,70 @@ mod tests {
             !report.net_mismatches.is_empty(),
             "hierarchical check should flag single-device levels"
         );
+    }
+
+    #[test]
+    fn drc_rules_from_pdk_uses_drc_rules() {
+        let mut pdk = Pdk::minimal("test");
+        pdk.drc_rules = Some(rflux_tech::SfqDrcRules {
+            min_trace_spacing_um: 2.0,
+            ..Default::default()
+        });
+        let rules = DrcRuleSet::from_pdk(&pdk, 1000.0, 1000.0);
+        assert_eq!(rules.min_trace_spacing_um, 2.0);
+        assert_eq!(rules.max_metal_density, 0.8);
+        assert_eq!(rules.min_metal_density, 0.2);
+        assert_eq!(rules.max_antenna_ratio, 100.0);
+        assert_eq!(rules.min_via_spacing_um, 2.0);
+    }
+
+    #[test]
+    fn drc_rules_from_pdk_defaults_without_drc_rules() {
+        let pdk = Pdk::minimal("test");
+        let rules = DrcRuleSet::from_pdk(&pdk, 500.0, 500.0);
+        assert_eq!(rules.min_trace_spacing_um, 1.0);
+        assert_eq!(rules.min_jj_spacing_um, 5.0);
+        assert_eq!(rules.cell_boundary_margin_um, 2.0);
+        assert_eq!(rules.max_metal_density, 0.8);
+        assert_eq!(rules.min_metal_density, 0.2);
+        assert_eq!(rules.max_antenna_ratio, 100.0);
+        assert_eq!(rules.min_via_spacing_um, 2.0);
+    }
+
+    #[test]
+    fn drc_report_to_svg_contains_violations() {
+        let report = DrcReport {
+            violations: vec![DrcViolation {
+                rule: "trace_spacing".to_string(),
+                severity: DrcSeverity::Error,
+                location: Some(Point {
+                    x_um: 100.0,
+                    y_um: 200.0,
+                }),
+                detail: "too close".to_string(),
+            }],
+            checked_rules: vec!["trace_spacing".to_string()],
+            error_count: 1,
+            warning_count: 0,
+            passed: false,
+        };
+        let svg = report.to_svg(&DrcSvgConfig::default());
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("trace_spacing"));
+        assert!(svg.contains("circle"));
+    }
+
+    #[test]
+    fn drc_report_to_svg_empty() {
+        let report = DrcReport {
+            violations: vec![],
+            checked_rules: vec!["trace_spacing".to_string()],
+            error_count: 0,
+            warning_count: 0,
+            passed: true,
+        };
+        let svg = report.to_svg(&DrcSvgConfig::default());
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("circle"));
     }
 }
