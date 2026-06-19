@@ -1405,6 +1405,76 @@ impl Pdk {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PdkRegistry {
+    pdks: BTreeMap<String, Pdk>,
+    active_name: Option<String>,
+}
+
+impl PdkRegistry {
+    pub fn new() -> Self {
+        Self {
+            pdks: BTreeMap::new(),
+            active_name: None,
+        }
+    }
+
+    pub fn register(&mut self, name: String, pdk: Pdk) {
+        self.pdks.insert(name, pdk);
+    }
+
+    pub fn set_active(&mut self, name: &str) -> Result<(), String> {
+        if self.pdks.contains_key(name) {
+            self.active_name = Some(name.to_string());
+            Ok(())
+        } else {
+            Err(format!("PDK '{}' not found", name))
+        }
+    }
+
+    pub fn active(&self) -> Option<&Pdk> {
+        self.active_name
+            .as_ref()
+            .and_then(|name| self.pdks.get(name))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Pdk> {
+        self.pdks.get(name)
+    }
+
+    pub fn list(&self) -> Vec<&str> {
+        self.pdks.keys().map(|s| s.as_str()).collect()
+    }
+
+    pub fn load_from_dir(&mut self, dir: &std::path::Path) -> Result<usize, String> {
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path
+                .extension()
+                .map_or(false, |e| e == "json" || e == "yaml" || e == "yml")
+            {
+                let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                let pdk = Pdk::from_auto(&content, Some(&path))?;
+                let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                self.register(name, pdk);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
+impl Default for PdkRegistry {
+    fn default() -> Self {
+        let mut registry = Self::new();
+        registry.register("minimal-sfq".to_string(), Pdk::minimal("minimal-sfq"));
+        registry.set_active("minimal-sfq").ok();
+        registry
+    }
+}
+
 fn interpolate_delay(points: &[TimingPoint], length_um: f64) -> Option<f64> {
     let first = points.first()?;
     if length_um <= first.length_um {
@@ -2400,5 +2470,50 @@ mod tests {
         let json = pdk.to_json().unwrap();
         let restored = Pdk::from_auto(&json, Some(std::path::Path::new("pdk.json"))).unwrap();
         assert_eq!(restored.name, "test");
+    }
+
+    #[test]
+    fn pdk_registry_register_and_get() {
+        let mut registry = PdkRegistry::new();
+        registry.register("test".to_string(), Pdk::minimal("test"));
+        assert!(registry.get("test").is_some());
+        assert!(registry.get("missing").is_none());
+    }
+
+    #[test]
+    fn pdk_registry_set_active() {
+        let mut registry = PdkRegistry::new();
+        registry.register("a".to_string(), Pdk::minimal("a"));
+        registry.register("b".to_string(), Pdk::minimal("b"));
+        registry.set_active("b").unwrap();
+        assert_eq!(registry.active().unwrap().name, "b");
+    }
+
+    #[test]
+    fn pdk_registry_list() {
+        let mut registry = PdkRegistry::new();
+        registry.register("x".to_string(), Pdk::minimal("x"));
+        registry.register("y".to_string(), Pdk::minimal("y"));
+        let list = registry.list();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn pdk_registry_set_active_missing_name_errors() {
+        let mut registry = PdkRegistry::new();
+        assert!(registry.set_active("nope").is_err());
+    }
+
+    #[test]
+    fn pdk_registry_default_has_minimal_sfq() {
+        let registry = PdkRegistry::default();
+        assert_eq!(registry.list(), vec!["minimal-sfq"]);
+        assert_eq!(registry.active().unwrap().name, "minimal-sfq");
+    }
+
+    #[test]
+    fn pdk_registry_active_returns_none_when_unset() {
+        let registry = PdkRegistry::new();
+        assert!(registry.active().is_none());
     }
 }

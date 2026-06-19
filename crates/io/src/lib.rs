@@ -38,6 +38,7 @@ pub enum NetlistInputFormat {
     Verilog,
     Spice,
     Blif,
+    Edif,
 }
 
 #[derive(Debug, Error)]
@@ -59,6 +60,8 @@ pub enum IoError {
     SpiceParse(String),
     #[error("blif parse error: {0}")]
     BlifParse(String),
+    #[error("edif parse error: {0}")]
+    EdifParse(String),
     #[error("lef writing is not supported by libreda-lefdef")]
     LefWriteUnsupported,
     #[error("unsupported {kind} schema version {version}")]
@@ -123,6 +126,7 @@ impl IoError {
             IoError::BenchParse(_) => "RFLOW-INPUT-002",
             IoError::SpiceParse(_) => "RFLOW-INPUT-002",
             IoError::BlifParse(_) => "RFLOW-INPUT-002",
+            IoError::EdifParse(_) => "RFLOW-INPUT-002",
             IoError::LefWriteUnsupported => "RFLOW-LIMIT-001",
             IoError::UnsupportedSchemaVersion { .. } => "RFLOW-SCHEMA-001",
             IoError::InvalidJsonEnvelope { .. } => "RFLOW-SCHEMA-002",
@@ -147,6 +151,9 @@ impl IoError {
             }
             IoError::BlifParse(_) => {
                 "Check the BLIF netlist syntax. Supported directives: .model, .inputs, .outputs, .names, .latch, .end."
+            }
+            IoError::EdifParse(_) => {
+                "Check the EDIF netlist syntax. Supported constructs: edif, library, cell, view, interface, port, design, instance, cellRef, libraryRef, connect, portRef."
             }
             IoError::LefWriteUnsupported => {
                 "Use DEF export for now; LEF writing is not part of the supported output surface yet."
@@ -203,6 +210,8 @@ pub fn detect_netlist_input_format(path: impl AsRef<Path>) -> NetlistInputFormat
         NetlistInputFormat::Spice
     } else if ext.eq_ignore_ascii_case("blif") {
         NetlistInputFormat::Blif
+    } else if ext.eq_ignore_ascii_case("edif") || ext.eq_ignore_ascii_case("edf") {
+        NetlistInputFormat::Edif
     } else {
         NetlistInputFormat::IrJson
     }
@@ -236,6 +245,10 @@ pub fn read_netlist_as(
         NetlistInputFormat::Blif => {
             let content = fs::read_to_string(path)?;
             parse_blif(&content).map(|(netlist, _name)| netlist)
+        }
+        NetlistInputFormat::Edif => {
+            let content = fs::read_to_string(path)?;
+            parse_edif(&content).map(|(netlist, _name)| netlist)
         }
     }
 }
@@ -461,6 +474,688 @@ fn determine_blif_gate_op(inputs: &[String], truth_table: &[String]) -> Option<L
 
     let _ = has_only_one_true_minterm;
     Some(LogicOp::And)
+}
+
+pub fn read_edif(path: impl AsRef<Path>) -> Result<(Netlist, String), IoError> {
+    let content = fs::read_to_string(path)?;
+    parse_edif(&content)
+}
+
+pub fn parse_edif(content: &str) -> Result<(Netlist, String), IoError> {
+    let tokens = tokenize_edif(content);
+    let mut pos = 0;
+
+    let edif_block = find_edif_block(&tokens, &mut pos)?;
+    let design_name = edif_block.name.clone();
+
+    let mut cell_defs: HashMap<String, Vec<EdifPort>> = HashMap::new();
+    for lib in &edif_block.libraries {
+        for cell in &lib.cells {
+            cell_defs.insert(cell.name.clone(), cell.ports.clone());
+        }
+    }
+
+    let mut netlist = Netlist::new();
+    let mut wire_map: HashMap<String, rflux_ir::NodeId> = HashMap::new();
+    let mut port_index: HashMap<String, HashMap<String, usize>> = HashMap::new();
+
+    for (cell_name, ports) in &cell_defs {
+        let mut pin_map = HashMap::new();
+        for (i, port) in ports.iter().enumerate() {
+            pin_map.insert(port.name.clone(), i);
+        }
+        port_index.insert(cell_name.clone(), pin_map);
+    }
+
+    for inst in &edif_block.instances {
+        let ports = cell_defs.get(&inst.cell_ref).cloned().unwrap_or_default();
+        let logic_op = match inst.cell_ref.as_str() {
+            "AND2" | "AND" => Some(LogicOp::And),
+            "OR2" | "OR" => Some(LogicOp::Or),
+            "NOT" | "INV" => Some(LogicOp::Not),
+            "XOR2" | "XOR" => Some(LogicOp::Xor),
+            "NAND2" | "NAND" => Some(LogicOp::And),
+            "NOR2" | "NOR" => Some(LogicOp::Or),
+            "XNOR2" | "XNOR" => Some(LogicOp::Xor),
+            "MUX2" | "MUX" => Some(LogicOp::Mux2),
+            "DFF" => Some(LogicOp::DffEnable),
+            "BUF" | "BUFF" => Some(LogicOp::Buf),
+            _ => None,
+        };
+        let kind = if inst.cell_ref == "DFF" {
+            NodeKind::Dff
+        } else {
+            NodeKind::CellInstance
+        };
+        let node = netlist.add_node_with_logic(kind, &inst.name, logic_op);
+        wire_map.insert(inst.name.clone(), node);
+
+        for (i, _port) in ports.iter().enumerate() {
+            let pin_key = format!("{}.{}", inst.name, i);
+            wire_map.entry(pin_key).or_insert(node);
+        }
+    }
+
+    for conn in &edif_block.connections {
+        let src = edif_resolve_wire(&mut netlist, &mut wire_map, &conn.src_net);
+        let dst = edif_resolve_wire(&mut netlist, &mut wire_map, &conn.dst_net);
+        if src != dst {
+            let src_port = conn.src_port.unwrap_or(0);
+            let dst_port = conn.dst_port.unwrap_or(0);
+            let _ = netlist.connect(
+                PinRef {
+                    node: src,
+                    port: src_port as u16,
+                },
+                PinRef {
+                    node: dst,
+                    port: dst_port as u16,
+                },
+            );
+        }
+    }
+
+    Ok((netlist, design_name))
+}
+
+fn edif_resolve_wire(
+    netlist: &mut Netlist,
+    wire_map: &mut HashMap<String, rflux_ir::NodeId>,
+    name: &str,
+) -> rflux_ir::NodeId {
+    if let Some(&node) = wire_map.get(name) {
+        node
+    } else {
+        let node = netlist.add_node(NodeKind::Port, name.to_string());
+        wire_map.insert(name.to_string(), node);
+        node
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EdifPort {
+    name: String,
+    _direction: String,
+}
+
+#[derive(Debug, Clone)]
+struct EdifCell {
+    name: String,
+    ports: Vec<EdifPort>,
+}
+
+#[derive(Debug, Clone)]
+struct EdifLibrary {
+    _name: String,
+    cells: Vec<EdifCell>,
+}
+
+#[derive(Debug, Clone)]
+struct EdifInstance {
+    name: String,
+    cell_ref: String,
+    _connections: Vec<EdifConnect>,
+}
+
+#[derive(Debug, Clone)]
+struct EdifConnect {
+    _src_net: String,
+    _src_port: Option<usize>,
+    _dst_net: String,
+    _dst_port: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct EdifConnection {
+    src_net: String,
+    src_port: Option<usize>,
+    dst_net: String,
+    dst_port: Option<usize>,
+}
+
+#[derive(Debug)]
+struct EdifDesign {
+    name: String,
+    libraries: Vec<EdifLibrary>,
+    instances: Vec<EdifInstance>,
+    connections: Vec<EdifConnection>,
+}
+
+fn find_edif_block(tokens: &[String], pos: &mut usize) -> Result<EdifDesign, IoError> {
+    while *pos < tokens.len() {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "edif" {
+                *pos += 1;
+                let name = if *pos < tokens.len() {
+                    tokens[*pos].clone()
+                } else {
+                    return Err(IoError::EdifParse("missing edif name".into()));
+                };
+                *pos += 1;
+
+                let mut libraries = Vec::new();
+                let mut design_cell_ref = String::new();
+                let mut instances = Vec::new();
+                let mut connections = Vec::new();
+
+                while *pos < tokens.len() && tokens[*pos] != ")" {
+                    if tokens[*pos] == "(" {
+                        *pos += 1;
+                        if *pos < tokens.len() {
+                            match tokens[*pos].as_str() {
+                                "library" => {
+                                    *pos += 1;
+                                    let lib = parse_edif_library(tokens, pos)?;
+                                    libraries.push(lib);
+                                }
+                                "design" => {
+                                    *pos += 1;
+                                    parse_edif_design_block(
+                                        tokens,
+                                        pos,
+                                        &mut design_cell_ref,
+                                        &mut instances,
+                                        &mut connections,
+                                    )?;
+                                }
+                                _ => skip_edif_form(tokens, pos)?,
+                            }
+                        }
+                    } else {
+                        *pos += 1;
+                    }
+                }
+                if *pos < tokens.len() {
+                    *pos += 1;
+                }
+
+                return Ok(EdifDesign {
+                    name,
+                    libraries,
+                    instances,
+                    connections,
+                });
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    Err(IoError::EdifParse("no (edif ...) block found".into()))
+}
+
+fn parse_edif_library(tokens: &[String], pos: &mut usize) -> Result<EdifLibrary, IoError> {
+    let name = if *pos < tokens.len() {
+        tokens[*pos].clone()
+    } else {
+        return Err(IoError::EdifParse("missing library name".into()));
+    };
+    *pos += 1;
+
+    let mut cells = Vec::new();
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "cell" {
+                *pos += 1;
+                let cell = parse_edif_cell(tokens, pos)?;
+                cells.push(cell);
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    Ok(EdifLibrary { _name: name, cells })
+}
+
+fn parse_edif_cell(tokens: &[String], pos: &mut usize) -> Result<EdifCell, IoError> {
+    let name = if *pos < tokens.len() {
+        tokens[*pos].clone()
+    } else {
+        return Err(IoError::EdifParse("missing cell name".into()));
+    };
+    *pos += 1;
+
+    let mut ports = Vec::new();
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "view" {
+                *pos += 1;
+                parse_edif_view(tokens, pos, &mut ports)?;
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    Ok(EdifCell { name, ports })
+}
+
+fn parse_edif_view(
+    tokens: &[String],
+    pos: &mut usize,
+    ports: &mut Vec<EdifPort>,
+) -> Result<(), IoError> {
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "interface" {
+                *pos += 1;
+                parse_edif_interface(tokens, pos, ports)?;
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+    Ok(())
+}
+
+fn parse_edif_interface(
+    tokens: &[String],
+    pos: &mut usize,
+    ports: &mut Vec<EdifPort>,
+) -> Result<(), IoError> {
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "port" {
+                *pos += 1;
+                let port = parse_edif_port(tokens, pos)?;
+                ports.push(port);
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+    Ok(())
+}
+
+fn parse_edif_port(tokens: &[String], pos: &mut usize) -> Result<EdifPort, IoError> {
+    let mut direction = String::from("input");
+    let mut name = String::new();
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "direction" {
+                *pos += 1;
+                if *pos < tokens.len() {
+                    direction = tokens[*pos].clone();
+                    *pos += 1;
+                }
+                skip_to_close(tokens, pos)?;
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else if name.is_empty() {
+            name = tokens[*pos].clone();
+            *pos += 1;
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    if name.is_empty() {
+        return Err(IoError::EdifParse("port missing name".into()));
+    }
+
+    Ok(EdifPort { name, _direction: direction })
+}
+
+fn parse_edif_design_block(
+    tokens: &[String],
+    pos: &mut usize,
+    design_cell_ref: &mut String,
+    instances: &mut Vec<EdifInstance>,
+    connections: &mut Vec<EdifConnection>,
+) -> Result<(), IoError> {
+    if *pos < tokens.len() && tokens[*pos] != "(" {
+        *design_cell_ref = tokens[*pos].clone();
+        *pos += 1;
+    }
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() {
+                match tokens[*pos].as_str() {
+                    "cellRef" => {
+                        *pos += 1;
+                        if *pos < tokens.len() {
+                            *design_cell_ref = tokens[*pos].clone();
+                            *pos += 1;
+                        }
+                        skip_to_close(tokens, pos)?;
+                    }
+                    "instance" => {
+                        *pos += 1;
+                        let inst = parse_edif_instance(tokens, pos)?;
+                        instances.push(inst);
+                    }
+                    "net" => {
+                        *pos += 1;
+                        parse_edif_net(tokens, pos, connections)?;
+                    }
+                    _ => skip_edif_form(tokens, pos)?,
+                }
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    Ok(())
+}
+
+fn parse_edif_instance(tokens: &[String], pos: &mut usize) -> Result<EdifInstance, IoError> {
+    let name = if *pos < tokens.len() {
+        tokens[*pos].clone()
+    } else {
+        return Err(IoError::EdifParse("missing instance name".into()));
+    };
+    *pos += 1;
+
+    let mut cell_ref = String::new();
+    let mut connects = Vec::new();
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() {
+                match tokens[*pos].as_str() {
+                    "cellRef" => {
+                        *pos += 1;
+                        if *pos < tokens.len() {
+                            cell_ref = tokens[*pos].clone();
+                            *pos += 1;
+                        }
+                        skip_to_close(tokens, pos)?;
+                    }
+                    "connect" => {
+                        *pos += 1;
+                        let conn = parse_edif_connect(tokens, pos)?;
+                        connects.push(conn);
+                    }
+                    _ => skip_edif_form(tokens, pos)?,
+                }
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    Ok(EdifInstance {
+        name,
+        cell_ref,
+        _connections: connects,
+    })
+}
+
+fn parse_edif_connect(tokens: &[String], pos: &mut usize) -> Result<EdifConnect, IoError> {
+    let _net_name = if *pos < tokens.len() {
+        tokens[*pos].clone()
+    } else {
+        return Err(IoError::EdifParse("missing connect net name".into()));
+    };
+    *pos += 1;
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "portRef" {
+                *pos += 1;
+                if *pos < tokens.len() {
+                    *pos += 1;
+                }
+                skip_to_close(tokens, pos)?;
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    Ok(EdifConnect {
+        _src_net: String::new(),
+        _src_port: None,
+        _dst_net: String::new(),
+        _dst_port: None,
+    })
+}
+
+fn parse_edif_net(
+    tokens: &[String],
+    pos: &mut usize,
+    connections: &mut Vec<EdifConnection>,
+) -> Result<(), IoError> {
+    let _net_name = if *pos < tokens.len() {
+        tokens[*pos].clone()
+    } else {
+        return Err(IoError::EdifParse("missing net name".into()));
+    };
+    *pos += 1;
+
+    let mut joined_refs: Vec<(String, Option<String>)> = Vec::new();
+
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "joined" {
+                *pos += 1;
+                parse_edif_joined(tokens, pos, &mut joined_refs)?;
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+
+    for i in 0..joined_refs.len() {
+        for j in (i + 1)..joined_refs.len() {
+            let (ref inst_a, ref port_a) = joined_refs[i];
+            let (ref inst_b, ref port_b) = joined_refs[j];
+            let port_a_idx = port_a.as_ref().and_then(|p| p.parse::<usize>().ok());
+            let port_b_idx = port_b.as_ref().and_then(|p| p.parse::<usize>().ok());
+            connections.push(EdifConnection {
+                src_net: inst_a.clone(),
+                src_port: port_a_idx,
+                dst_net: inst_b.clone(),
+                dst_port: port_b_idx,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_edif_joined(
+    tokens: &[String],
+    pos: &mut usize,
+    refs: &mut Vec<(String, Option<String>)>,
+) -> Result<(), IoError> {
+    while *pos < tokens.len() && tokens[*pos] != ")" {
+        if tokens[*pos] == "(" {
+            *pos += 1;
+            if *pos < tokens.len() && tokens[*pos] == "portRef" {
+                *pos += 1;
+                let port_name = if *pos < tokens.len() && tokens[*pos] != "(" && tokens[*pos] != ")" {
+                    let n = tokens[*pos].clone();
+                    *pos += 1;
+                    n
+                } else {
+                    String::new()
+                };
+                let mut inst_ref = None;
+                while *pos < tokens.len() && tokens[*pos] != ")" {
+                    if tokens[*pos] == "(" {
+                        *pos += 1;
+                        if *pos < tokens.len() && tokens[*pos] == "instanceRef" {
+                            *pos += 1;
+                            if *pos < tokens.len() {
+                                inst_ref = Some(tokens[*pos].clone());
+                                *pos += 1;
+                            }
+                            skip_to_close(tokens, pos)?;
+                        } else {
+                            skip_edif_form(tokens, pos)?;
+                        }
+                    } else {
+                        *pos += 1;
+                    }
+                }
+                if *pos < tokens.len() {
+                    *pos += 1;
+                }
+                if let Some(inst) = inst_ref {
+                    refs.push((inst, Some(port_name)));
+                } else {
+                    refs.push((port_name, None));
+                }
+            } else {
+                skip_edif_form(tokens, pos)?;
+            }
+        } else {
+            *pos += 1;
+        }
+    }
+    if *pos < tokens.len() {
+        *pos += 1;
+    }
+    Ok(())
+}
+
+fn skip_to_close(tokens: &[String], pos: &mut usize) -> Result<(), IoError> {
+    let mut depth = 0;
+    while *pos < tokens.len() {
+        if tokens[*pos] == "(" {
+            depth += 1;
+        } else if tokens[*pos] == ")" {
+            if depth == 0 {
+                *pos += 1;
+                return Ok(());
+            }
+            depth -= 1;
+        }
+        *pos += 1;
+    }
+    Ok(())
+}
+
+fn skip_edif_form(tokens: &[String], pos: &mut usize) -> Result<(), IoError> {
+    let mut depth = 1;
+    while *pos < tokens.len() {
+        if tokens[*pos] == "(" {
+            depth += 1;
+        } else if tokens[*pos] == ")" {
+            depth -= 1;
+            if depth == 0 {
+                *pos += 1;
+                return Ok(());
+            }
+        }
+        *pos += 1;
+    }
+    Ok(())
+}
+
+fn tokenize_edif(content: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_comment = false;
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '(' | ')' => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                tokens.push(ch.to_string());
+            }
+            ' ' | '\n' | '\r' | '\t' => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            '"' => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                let mut s = String::new();
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    s.push(chars[i]);
+                    i += 1;
+                }
+                tokens.push(s);
+            }
+            ';' => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                in_comment = true;
+            }
+            _ => current.push(ch),
+        }
+        i += 1;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 pub fn write_pdk_json(path: impl AsRef<Path>, pdk: &Pdk) -> Result<(), IoError> {
@@ -9448,6 +10143,115 @@ mod tests {
         let (netlist, name) = read_blif(&path).expect("blif should load");
         assert_eq!(name, "top");
         assert!(netlist.node_count() >= 3);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_edif_simple() {
+        let edif = r#"(edif my_design
+  (library work
+    (cell AND2
+      (view netlist
+        (viewType netlist)
+        (interface
+          (port (direction input) a)
+          (port (direction input) b)
+          (port (direction output) y)
+        )
+      )
+    )
+  )
+)
+"#;
+        let (netlist, name) = parse_edif(edif).unwrap();
+        assert_eq!(name, "my_design");
+        assert_eq!(netlist.node_count(), 0);
+    }
+
+    #[test]
+    fn parse_edif_with_instance() {
+        let edif = r#"(edif test_design
+  (library work
+    (cell AND2
+      (view netlist
+        (viewType netlist)
+        (interface
+          (port (direction input) a)
+          (port (direction input) b)
+          (port (direction output) y)
+        )
+      )
+    )
+  )
+  (design top
+    (cellRef AND2 (libraryRef work))
+    (instance g1 (cellRef AND2 (libraryRef work))
+      (connect a (portRef a))
+      (connect b (portRef b))
+      (connect y (portRef y))
+    )
+  )
+)
+"#;
+        let (netlist, name) = parse_edif(edif).unwrap();
+        assert_eq!(name, "test_design");
+        assert!(netlist.node_count() >= 1);
+    }
+
+    #[test]
+    fn parse_edif_with_comments() {
+        let edif = r#"; this is a comment
+(edif my_design
+  ; another comment
+  (library work
+    (cell BUF
+      (view netlist
+        (viewType netlist)
+        (interface
+          (port (direction input) a)
+          (port (direction output) y)
+        )
+      )
+    )
+  )
+)
+"#;
+        let (netlist, name) = parse_edif(edif).unwrap();
+        assert_eq!(name, "my_design");
+        assert_eq!(netlist.node_count(), 0);
+    }
+
+    #[test]
+    fn detect_edif_format_by_extension() {
+        assert_eq!(
+            detect_netlist_input_format(Path::new("test.edif")),
+            NetlistInputFormat::Edif
+        );
+        assert_eq!(
+            detect_netlist_input_format(Path::new("test.edf")),
+            NetlistInputFormat::Edif
+        );
+    }
+
+    #[test]
+    fn read_edif_from_file() {
+        let path = env::temp_dir().join(format!(
+            "rflux-io-edif-{}.edif",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            "(edif my_design\n  (library work\n    (cell AND2\n      (view netlist\n        (viewType netlist)\n        (interface\n          (port (direction input) a)\n          (port (direction input) b)\n          (port (direction output) y)\n        )\n      )\n    )\n  )\n)\n",
+        )
+        .expect("edif should write");
+
+        let (netlist, name) = read_edif(&path).expect("edif should load");
+        assert_eq!(name, "my_design");
+        assert_eq!(netlist.node_count(), 0);
 
         let _ = fs::remove_file(path);
     }
