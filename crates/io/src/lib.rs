@@ -37,6 +37,7 @@ pub enum NetlistInputFormat {
     Bench,
     Verilog,
     Spice,
+    Blif,
 }
 
 #[derive(Debug, Error)]
@@ -56,6 +57,8 @@ pub enum IoError {
     BenchParse(String),
     #[error("spice parse error: {0}")]
     SpiceParse(String),
+    #[error("blif parse error: {0}")]
+    BlifParse(String),
     #[error("lef writing is not supported by libreda-lefdef")]
     LefWriteUnsupported,
     #[error("unsupported {kind} schema version {version}")]
@@ -119,6 +122,7 @@ impl IoError {
             IoError::TopCellNotFound => "RFLOW-INPUT-002",
             IoError::BenchParse(_) => "RFLOW-INPUT-002",
             IoError::SpiceParse(_) => "RFLOW-INPUT-002",
+            IoError::BlifParse(_) => "RFLOW-INPUT-002",
             IoError::LefWriteUnsupported => "RFLOW-LIMIT-001",
             IoError::UnsupportedSchemaVersion { .. } => "RFLOW-SCHEMA-001",
             IoError::InvalidJsonEnvelope { .. } => "RFLOW-SCHEMA-002",
@@ -140,6 +144,9 @@ impl IoError {
             }
             IoError::SpiceParse(_) => {
                 "Check the SPICE netlist syntax. Supported elements: X (subckt), J (jj), R, L, C, T (tline), K (mutual), V (voltage source), I (current source)."
+            }
+            IoError::BlifParse(_) => {
+                "Check the BLIF netlist syntax. Supported directives: .model, .inputs, .outputs, .names, .latch, .end."
             }
             IoError::LefWriteUnsupported => {
                 "Use DEF export for now; LEF writing is not part of the supported output surface yet."
@@ -194,6 +201,8 @@ pub fn detect_netlist_input_format(path: impl AsRef<Path>) -> NetlistInputFormat
         NetlistInputFormat::Verilog
     } else if ext.eq_ignore_ascii_case("cir") || ext.eq_ignore_ascii_case("sp") || ext.eq_ignore_ascii_case("spice") {
         NetlistInputFormat::Spice
+    } else if ext.eq_ignore_ascii_case("blif") {
+        NetlistInputFormat::Blif
     } else {
         NetlistInputFormat::IrJson
     }
@@ -223,6 +232,10 @@ pub fn read_netlist_as(
             let devices = rflux_sim::parse_spice_netlist(&content)
                 .map_err(|e| IoError::SpiceParse(e.to_string()))?;
             spice_to_ir(&devices)
+        }
+        NetlistInputFormat::Blif => {
+            let content = fs::read_to_string(path)?;
+            parse_blif(&content).map(|(netlist, _name)| netlist)
         }
     }
 }
@@ -294,6 +307,160 @@ pub fn spice_to_ir(devices: &[rflux_sim::SpiceDevice]) -> Result<Netlist, IoErro
     }
 
     Ok(netlist)
+}
+
+pub fn read_blif(path: impl AsRef<Path>) -> Result<(Netlist, String), IoError> {
+    let content = fs::read_to_string(path)?;
+    parse_blif(&content)
+}
+
+pub fn parse_blif(content: &str) -> Result<(Netlist, String), IoError> {
+    let mut netlist = Netlist::new();
+    let mut model_name = String::new();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    let mut wire_map: HashMap<String, rflux_ir::NodeId> = HashMap::new();
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        i += 1;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with(".model ") {
+            model_name = line[7..].trim().to_string();
+        } else if line.starts_with(".inputs ") {
+            inputs = line[8..].split_whitespace().map(String::from).collect();
+        } else if line.starts_with(".outputs ") {
+            outputs = line[9..].split_whitespace().map(String::from).collect();
+        } else if line.starts_with(".names ") {
+            let parts: Vec<&str> = line[7..].split_whitespace().collect();
+            if parts.is_empty() {
+                continue;
+            }
+
+            let (input_names, output_name) = if parts.len() == 1 {
+                (Vec::new(), parts[0].to_string())
+            } else {
+                (
+                    parts[..parts.len() - 1]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    parts.last().unwrap().to_string(),
+                )
+            };
+
+            let mut truth_table_rows = Vec::new();
+            while i < lines.len() {
+                let next = lines[i].trim();
+                if next.is_empty() || next.starts_with('.') {
+                    break;
+                }
+                truth_table_rows.push(next.to_string());
+                i += 1;
+            }
+
+            let logic_op = determine_blif_gate_op(&input_names, &truth_table_rows);
+            let kind = NodeKind::CellInstance;
+            let node = netlist.add_node_with_logic(kind, format!("gate_{}", output_name), logic_op);
+            wire_map.insert(output_name, node);
+
+            for (idx, input_name) in input_names.iter().enumerate() {
+                let input_node =
+                    blif_get_or_create_wire(&mut netlist, &mut wire_map, input_name);
+                let _ = netlist.connect(
+                    PinRef {
+                        node: input_node,
+                        port: 0,
+                    },
+                    PinRef {
+                        node,
+                        port: (idx + 1) as u16,
+                    },
+                );
+            }
+        } else if line.starts_with(".latch ") {
+            let parts: Vec<&str> = line[7..].split_whitespace().collect();
+            if parts.len() >= 2 {
+                let input_name = parts[0].to_string();
+                let output_name = parts[1].to_string();
+                let node = netlist.add_node_with_logic(
+                    NodeKind::Dff,
+                    format!("latch_{}", output_name),
+                    Some(LogicOp::DffEnable),
+                );
+                wire_map.insert(output_name, node);
+                let input_node =
+                    blif_get_or_create_wire(&mut netlist, &mut wire_map, &input_name);
+                let _ = netlist.connect(
+                    PinRef {
+                        node: input_node,
+                        port: 0,
+                    },
+                    PinRef {
+                        node,
+                        port: 1,
+                    },
+                );
+            }
+        } else if line.starts_with(".end") {
+            break;
+        }
+    }
+
+    for input in &inputs {
+        blif_get_or_create_wire(&mut netlist, &mut wire_map, input);
+    }
+    for output in &outputs {
+        blif_get_or_create_wire(&mut netlist, &mut wire_map, output);
+    }
+
+    Ok((netlist, model_name))
+}
+
+fn blif_get_or_create_wire(
+    netlist: &mut Netlist,
+    wire_map: &mut HashMap<String, rflux_ir::NodeId>,
+    name: &str,
+) -> rflux_ir::NodeId {
+    if let Some(&node) = wire_map.get(name) {
+        node
+    } else {
+        let node = netlist.add_node(NodeKind::Port, name.to_string());
+        wire_map.insert(name.to_string(), node);
+        node
+    }
+}
+
+fn determine_blif_gate_op(inputs: &[String], truth_table: &[String]) -> Option<LogicOp> {
+    if inputs.is_empty() {
+        return Some(LogicOp::Buf);
+    }
+
+    let has_only_one_true_minterm = truth_table.len() == 1
+        && truth_table[0].contains('1')
+        && !truth_table[0].starts_with('0')
+        || (truth_table.len() == 1 && truth_table[0].len() >= 2);
+
+    if inputs.len() == 1 {
+        if truth_table.len() == 1 {
+            let row = &truth_table[0];
+            if row.starts_with('0') {
+                return Some(LogicOp::Not);
+            }
+            if row.starts_with('1') {
+                return Some(LogicOp::Buf);
+            }
+        }
+        return Some(LogicOp::Buf);
+    }
+
+    let _ = has_only_one_true_minterm;
+    Some(LogicOp::And)
 }
 
 pub fn write_pdk_json(path: impl AsRef<Path>, pdk: &Pdk) -> Result<(), IoError> {
@@ -9197,6 +9364,90 @@ mod tests {
         assert!(matches!(netlist.nodes()[11].logic_op, Some(LogicOp::And)));
         assert!(matches!(netlist.nodes()[12].logic_op, Some(LogicOp::And)));
         assert!(matches!(netlist.nodes()[13].logic_op, Some(LogicOp::Not)));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_blif_simple_and_gate() {
+        let blif = r#".model top
+.inputs a b
+.outputs y
+.names a b y
+11 1
+.end
+"#;
+        let (netlist, name) = parse_blif(blif).unwrap();
+        assert_eq!(name, "top");
+        assert!(netlist.node_count() >= 3);
+    }
+
+    #[test]
+    fn parse_blif_with_latch() {
+        let blif = r#".model top
+.inputs d clk
+.outputs q
+.latch d q
+.end
+"#;
+        let (netlist, _) = parse_blif(blif).unwrap();
+        assert!(netlist.node_count() >= 3);
+    }
+
+    #[test]
+    fn parse_blif_not_gate() {
+        let blif = r#".model top
+.inputs a
+.outputs y
+.names a y
+0 1
+.end
+"#;
+        let (netlist, _) = parse_blif(blif).unwrap();
+        assert!(netlist.node_count() >= 2);
+    }
+
+    #[test]
+    fn parse_blif_comment_and_blank_lines() {
+        let blif = r#"# comment
+.model top
+.inputs a b
+.outputs y
+
+.names a b y
+11 1
+# another comment
+.end
+"#;
+        let (netlist, name) = parse_blif(blif).unwrap();
+        assert_eq!(name, "top");
+        assert!(netlist.node_count() >= 3);
+    }
+
+    #[test]
+    fn detect_blif_format_by_extension() {
+        let path = Path::new("test.blif");
+        assert_eq!(detect_netlist_input_format(path), NetlistInputFormat::Blif);
+    }
+
+    #[test]
+    fn read_blif_from_file() {
+        let path = env::temp_dir().join(format!(
+            "rflux-io-blif-{}.blif",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            ".model top\n.inputs a b\n.outputs y\n.names a b y\n11 1\n.end\n",
+        )
+        .expect("blif should write");
+
+        let (netlist, name) = read_blif(&path).expect("blif should load");
+        assert_eq!(name, "top");
+        assert!(netlist.node_count() >= 3);
 
         let _ = fs::remove_file(path);
     }

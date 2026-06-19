@@ -457,6 +457,8 @@ enum CliNetlistInputFormat {
     Verilog,
     #[value(name = "spice", aliases = ["cir", "sp"])]
     Spice,
+    #[value(name = "blif")]
+    Blif,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -2923,6 +2925,7 @@ fn cli_netlist_input_format_name(format: CliNetlistInputFormat) -> &'static str 
         CliNetlistInputFormat::Bench => "bench",
         CliNetlistInputFormat::Verilog => "verilog",
         CliNetlistInputFormat::Spice => "spice",
+        CliNetlistInputFormat::Blif => "blif",
     }
 }
 
@@ -3284,6 +3287,7 @@ fn lint_netlist_report(
         NetlistInputFormat::Bench => format!("{input_kind} netlist"),
         NetlistInputFormat::Verilog => "Verilog netlist".to_string(),
         NetlistInputFormat::Spice => "SPICE netlist".to_string(),
+        NetlistInputFormat::Blif => "BLIF netlist".to_string(),
     };
     let netlist = read_netlist_as(input, format).with_context(|| {
         format!(
@@ -3304,6 +3308,7 @@ fn lint_netlist_report(
         NetlistInputFormat::Bench => ("bench_text", None, false),
         NetlistInputFormat::Verilog => ("verilog_text", None, false),
         NetlistInputFormat::Spice => ("spice_text", None, false),
+        NetlistInputFormat::Blif => ("blif_text", None, false),
     };
 
     Ok(json!({
@@ -3961,6 +3966,7 @@ fn resolve_cli_netlist_input_format(
         CliNetlistInputFormat::Bench => NetlistInputFormat::Bench,
         CliNetlistInputFormat::Verilog => NetlistInputFormat::Verilog,
         CliNetlistInputFormat::Spice => NetlistInputFormat::Spice,
+        CliNetlistInputFormat::Blif => NetlistInputFormat::Blif,
     }
 }
 
@@ -3971,7 +3977,8 @@ fn load_cli_netlist(input: &Path, format: CliNetlistInputFormat) -> Result<rflux
         CliNetlistInputFormat::Ir
         | CliNetlistInputFormat::Bench
         | CliNetlistInputFormat::Verilog
-        | CliNetlistInputFormat::Spice => read_netlist_as(input, resolved_format),
+        | CliNetlistInputFormat::Spice
+        | CliNetlistInputFormat::Blif => read_netlist_as(input, resolved_format),
     };
     load_result.with_context(|| match resolved_format {
         NetlistInputFormat::IrJson => format!("failed to read IR JSON from {}", input.display()),
@@ -3983,6 +3990,9 @@ fn load_cli_netlist(input: &Path, format: CliNetlistInputFormat) -> Result<rflux
         }
         NetlistInputFormat::Spice => {
             format!("failed to read SPICE netlist from {}", input.display())
+        }
+        NetlistInputFormat::Blif => {
+            format!("failed to read BLIF netlist from {}", input.display())
         }
     })
 }
