@@ -1577,6 +1577,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         }
     }
 

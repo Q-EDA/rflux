@@ -139,6 +139,13 @@ pub struct TimingArcReport {
     pub ocv_early_slack_ps: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocv_late_slack_ps: Option<f64>,
+    /// Reflection margin for PTL paths (P1-4).  Positive means safe;
+    /// negative means the reflection coefficient exceeds the risk threshold.
+    #[serde(default)]
+    pub reflection_margin: f64,
+    /// Whether this arc has a PTL reflection risk.
+    #[serde(default)]
+    pub has_reflection_risk: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -909,6 +916,18 @@ impl StaticTimingAnalyzer {
             }
             worst_setup_slack_ps = worst_setup_slack_ps.min(setup_slack_ps);
             worst_hold_slack_ps = worst_hold_slack_ps.min(hold_slack_ps);
+
+            // Compute reflection margin for PTL paths (P1-4)
+            let (reflection_margin_val, has_reflection_risk_val) =
+                if matches!(route_mode_for_arc(routing, from, to)?, RouteMode::Ptl) {
+                    let tline = TLineDelayModel::from_pdk(pdk);
+                    let length = route_length_um(routing, from, to)?;
+                    let result = tline.compute(length);
+                    (result.reflection_margin, result.is_danger_zone)
+                } else {
+                    (0.0, false)
+                };
+
             arcs.push(TimingArcReport {
                 from,
                 to,
@@ -937,6 +956,8 @@ impl StaticTimingAnalyzer {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+                reflection_margin: reflection_margin_val,
+                has_reflection_risk: has_reflection_risk_val,
             });
         }
 
@@ -1224,6 +1245,17 @@ impl StaticTimingAnalyzer {
             }
             worst_setup_slack_ps = worst_setup_slack_ps.min(setup_slack_ps);
             worst_hold_slack_ps = worst_hold_slack_ps.min(hold_slack_ps);
+
+            let (reflection_margin_val, has_reflection_risk_val) =
+                if matches!(route_mode_for_arc(routing, from, to)?, RouteMode::Ptl) {
+                    let tline = TLineDelayModel::from_pdk(pdk);
+                    let length = route_length_um(routing, from, to)?;
+                    let result = tline.compute(length);
+                    (result.reflection_margin, result.is_danger_zone)
+                } else {
+                    (0.0, false)
+                };
+
             arcs.push(TimingArcReport {
                 from,
                 to,
@@ -1252,6 +1284,8 @@ impl StaticTimingAnalyzer {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+                reflection_margin: reflection_margin_val,
+                has_reflection_risk: has_reflection_risk_val,
             });
         }
 
@@ -2146,9 +2180,17 @@ fn arc_components_ps(
         .enumerate()
         .find(|(_, route)| route.from == from && route.to == to)
         .ok_or(TimingError::MissingRoute(from, to))?;
-    let wire_delay_ps = pdk
-        .interconnect_delay_ps(interconnect_kind(route.mode), route.length_um)
-        .ok_or(TimingError::MissingInterconnectTiming(route.mode))?;
+
+    // Use transmission line model for PTL paths (P1-4).
+    let wire_delay_ps = if matches!(route.mode, RouteMode::Ptl) {
+        let tline = TLineDelayModel::from_pdk(pdk);
+        let result = tline.compute(route.length_um);
+        result.delay_ps
+    } else {
+        pdk.interconnect_delay_ps(interconnect_kind(route.mode), route.length_um)
+            .ok_or(TimingError::MissingInterconnectTiming(route.mode))?
+    };
+
     let coupling_extra = coupling_map
         .map(|cm| cm.coupling_delay_ps(route_index, wire_delay_ps, pdk.coupling_delay_coefficient))
         .unwrap_or(0.0);
@@ -2193,6 +2235,99 @@ fn hold_time_ps(netlist: &Netlist, pdk: &Pdk, node_index: usize) -> Result<f64, 
         .cell_timing_for_cell(&node.name, sf_cell_kind(kind))
         .ok_or_else(|| TimingError::MissingCellTiming(kind.clone()))?
         .hold_ps)
+}
+
+// ---------------------------------------------------------------------------
+// P1-4: Transmission Line Delay Model
+// ---------------------------------------------------------------------------
+
+/// Result of transmission line delay computation (P1-4).
+#[derive(Debug, Clone, Copy)]
+pub struct TLineDelayResult {
+    /// Propagation delay (ps) including reflection correction.
+    pub delay_ps: f64,
+    /// Reflection coefficient at the PTL boundary.
+    pub reflection_coefficient: f64,
+    /// Additional delay due to reflections (ps).
+    pub reflection_extra_delay_ps: f64,
+    /// Whether the PTL length is in a reflection danger zone.
+    pub is_danger_zone: bool,
+    /// Margin: how far the reflection coefficient is from the risk
+    /// threshold.  Positive = safe, negative = risky.
+    pub reflection_margin: f64,
+}
+
+/// Transmission line delay model for PTL paths (P1-4).
+///
+/// Computes PTL propagation delay using a distributed-parameter model
+/// that accounts for reflections at impedance discontinuities.
+/// The base delay is `length * delay_per_um`, with a nonlinear
+/// correction term for reflection-induced delay.
+pub struct TLineDelayModel {
+    /// PTL characteristic impedance (Ohm).
+    pub z0_ptl: f64,
+    /// JTL characteristic impedance (Ohm).
+    pub z0_jtl: f64,
+    /// PTL propagation delay per um (ps/um).
+    pub delay_per_um: f64,
+    /// Reflection risk threshold (0.0 - 1.0).
+    pub risk_threshold: f64,
+}
+
+impl TLineDelayModel {
+    /// Create a model from PDK parameters.
+    pub fn from_pdk(pdk: &rflux_tech::Pdk) -> Self {
+        Self {
+            z0_ptl: pdk.ptl_impedance_ohm,
+            z0_jtl: pdk.jtl_impedance_ohm,
+            delay_per_um: pdk.ptl_propagation_delay_ps_per_um,
+            risk_threshold: 0.3,
+        }
+    }
+
+    /// Compute the transmission line delay for a PTL segment.
+    ///
+    /// Uses a simplified distributed-parameter model:
+    /// - Base delay: `length_um * delay_per_um`
+    /// - Reflection correction: `2 * Γ² * base_delay` for the
+    ///   round-trip reflection energy
+    /// - Danger zone detection: Γ > risk_threshold
+    pub fn compute(&self, length_um: f64) -> TLineDelayResult {
+        let base_delay = length_um * self.delay_per_um;
+
+        // Reflection coefficient at JTL-PTL boundary
+        let gamma = if self.z0_ptl + self.z0_jtl > 0.0 {
+            ((self.z0_ptl - self.z0_jtl) / (self.z0_ptl + self.z0_jtl)).abs()
+        } else {
+            0.0
+        };
+
+        // Reflection-induced extra delay: proportional to Γ² and
+        // the round-trip propagation time.
+        let reflection_extra = 2.0 * gamma * gamma * base_delay;
+
+        // PTL resonance: reflection peaks at multiples of half-wavelength.
+        // Use the same sinusoidal model as the tech crate.
+        let half_wavelength_um = 1000.0;
+        let resonance_phase = std::f64::consts::PI * length_um / half_wavelength_um;
+        let resonance_gamma = resonance_phase.sin().powi(2);
+
+        // Combined reflection: boundary + resonance
+        let total_reflection = (gamma * gamma + resonance_gamma * resonance_gamma).sqrt();
+        let total_extra = 2.0 * total_reflection * base_delay;
+
+        let delay_ps = base_delay + total_extra;
+        let is_danger = total_reflection > self.risk_threshold;
+        let margin = self.risk_threshold - total_reflection;
+
+        TLineDelayResult {
+            delay_ps,
+            reflection_coefficient: total_reflection,
+            reflection_extra_delay_ps: total_extra,
+            is_danger_zone: is_danger,
+            reflection_margin: margin,
+        }
+    }
 }
 
 fn endpoint_required_ps(config: &TimingConfig, pin: Option<PinRef>, node: NodeId) -> f64 {
@@ -4315,6 +4450,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         };
         let ptl_arc = TimingArcReport {
             route_mode: RouteMode::Ptl,
@@ -4376,6 +4513,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         };
         let dff_arc = TimingArcReport {
             driver_kind: SfCellKind::Dff,
@@ -4435,6 +4574,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         };
         let characterized_macro = SfCell {
             name: "macro_buf".to_string(),
@@ -4501,6 +4642,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         };
         let config = StatisticalTimingConfig {
             cell_delay_sigma_ratio: 0.10,
@@ -4684,6 +4827,8 @@ mod tests {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+            reflection_margin: 0.0,
+            has_reflection_risk: false,
             }],
             worst_setup_slack_ps: 2.0,
             worst_hold_slack_ps: -3.0,
@@ -4742,6 +4887,8 @@ mod tests {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+            reflection_margin: 0.0,
+            has_reflection_risk: false,
             }],
             worst_setup_slack_ps: 2.0,
             worst_hold_slack_ps: -5.0,
@@ -4798,6 +4945,8 @@ mod tests {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+            reflection_margin: 0.0,
+            has_reflection_risk: false,
             }],
             worst_setup_slack_ps: 2.0,
             worst_hold_slack_ps: -3.0,
@@ -4979,6 +5128,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         };
         let report = analyzer.analyze(&[arc], None, &OcvConfig::default());
         assert_eq!(report.nets.len(), 1);
@@ -5036,6 +5187,8 @@ mod tests {
             ocv_late_arrival_ps: None,
             ocv_early_slack_ps: None,
             ocv_late_slack_ps: None,
+        reflection_margin: 0.0,
+        has_reflection_risk: false,
         };
         let cold_report = NoiseMarginAnalyzer::new(cold).analyze(&[arc], None, &OcvConfig::default());
         let hot_report = NoiseMarginAnalyzer::new(hot).analyze(&[arc], None, &OcvConfig::default());
@@ -5087,6 +5240,8 @@ mod tests {
                     ocv_late_arrival_ps: None,
                     ocv_early_slack_ps: None,
                     ocv_late_slack_ps: None,
+                reflection_margin: 0.0,
+                has_reflection_risk: false,
                 },
                 TimingArcReport {
                     from: PinRef { node: rflux_ir::NodeId(1), port: 0 },
@@ -5116,6 +5271,8 @@ mod tests {
                     ocv_late_arrival_ps: None,
                     ocv_early_slack_ps: None,
                     ocv_late_slack_ps: None,
+                reflection_margin: 0.0,
+                has_reflection_risk: false,
                 },
             ],
             worst_setup_slack_ps: 102.0,
@@ -5171,6 +5328,8 @@ mod tests {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+            reflection_margin: 0.0,
+            has_reflection_risk: false,
             }],
             worst_setup_slack_ps: 112.0,
             worst_hold_slack_ps: 3.0,
@@ -5223,6 +5382,8 @@ mod tests {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+            reflection_margin: 0.0,
+            has_reflection_risk: false,
             })
             .collect();
         let report = TimingReport {
@@ -5277,6 +5438,8 @@ mod tests {
                 ocv_late_arrival_ps: None,
                 ocv_early_slack_ps: None,
                 ocv_late_slack_ps: None,
+            reflection_margin: 0.0,
+            has_reflection_risk: false,
             }],
             worst_setup_slack_ps: 112.0,
             worst_hold_slack_ps: 3.0,
@@ -5329,6 +5492,8 @@ mod tests {
                     ocv_late_arrival_ps: None,
                     ocv_early_slack_ps: None,
                     ocv_late_slack_ps: None,
+                reflection_margin: 0.0,
+                has_reflection_risk: false,
                 },
                 TimingArcReport {
                     from: PinRef { node: rflux_ir::NodeId(1), port: 0 },
@@ -5358,6 +5523,8 @@ mod tests {
                     ocv_late_arrival_ps: None,
                     ocv_early_slack_ps: None,
                     ocv_late_slack_ps: None,
+                reflection_margin: 0.0,
+                has_reflection_risk: false,
                 },
             ],
             worst_setup_slack_ps: -20.0,
