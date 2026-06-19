@@ -3612,6 +3612,223 @@ fn ac_bias_report_better_than(candidate: &AcBiasReport, current: &AcBiasReport) 
     candidate.jtl_carrier_candidates > current.jtl_carrier_candidates
 }
 
+// ---------------------------------------------------------------------------
+// P1-2: Bias Design Space Explorer
+// ---------------------------------------------------------------------------
+
+/// A single point in the AC/DC bias design space.
+#[derive(Debug, Clone)]
+pub struct BiasDesignPoint {
+    /// AC bias ratio: 0.0 = pure DC, 1.0 = pure AC.
+    pub ac_ratio: f64,
+    /// PTL length threshold (um).
+    pub ptl_threshold_um: f64,
+    /// Detour margin (um).
+    pub detour_margin_um: f64,
+    /// Congestion weight used for this point.
+    pub congestion_weight: f64,
+    /// Resulting AC bias report.
+    pub report: AcBiasReport,
+}
+
+impl BiasDesignPoint {
+    /// Objectives for Pareto comparison (all minimized).
+    fn objectives(&self) -> [f64; 4] {
+        [
+            -self.report.estimated_static_power_savings_uw, // minimize negative = maximize savings
+            self.report.estimated_area_overhead_ratio,       // minimize area overhead
+            -self.report.estimated_frequency_derate_ratio,   // minimize negative = maximize freq
+            -self.report.optimization_score,                 // minimize negative = maximize score
+        ]
+    }
+}
+
+/// Pareto front of AC/DC bias design points.
+#[derive(Debug, Clone)]
+pub struct BiasParetoFront {
+    /// Points on the Pareto front (non-dominated).
+    pub points: Vec<BiasDesignPoint>,
+    /// Total points evaluated.
+    pub total_evaluated: usize,
+    /// Total points on the front.
+    pub front_size: usize,
+}
+
+impl BiasParetoFront {
+    /// Check if point A dominates point B (A is better in all objectives).
+    fn dominates(a: &[f64; 4], b: &[f64; 4]) -> bool {
+        let mut strictly_better = false;
+        for (va, vb) in a.iter().zip(b.iter()) {
+            if *va > *vb + 1e-9 {
+                return false;
+            }
+            if *va < *vb - 1e-9 {
+                strictly_better = true;
+            }
+        }
+        strictly_better
+    }
+
+    /// Compute Pareto front from a set of design points.
+    pub fn compute(points: Vec<BiasDesignPoint>) -> Self {
+        let total = points.len();
+        let objectives: Vec<[f64; 4]> = points.iter().map(|p| p.objectives()).collect();
+        let mut dominated = vec![false; total];
+
+        for i in 0..total {
+            if dominated[i] {
+                continue;
+            }
+            for j in 0..total {
+                if i == j || dominated[j] {
+                    continue;
+                }
+                if Self::dominates(&objectives[j], &objectives[i]) {
+                    dominated[i] = true;
+                    break;
+                }
+            }
+        }
+
+        let front: Vec<BiasDesignPoint> = points
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !dominated[*i])
+            .map(|(_, p)| p)
+            .collect();
+
+        let front_size = front.len();
+        BiasParetoFront {
+            points: front,
+            total_evaluated: total,
+            front_size,
+        }
+    }
+}
+
+/// Configuration for bias design space exploration.
+#[derive(Debug, Clone)]
+pub struct BiasDseConfig {
+    /// Number of AC ratio samples between 0.0 and 1.0.
+    pub ac_ratio_steps: usize,
+    /// Number of PTL threshold samples.
+    pub ptl_threshold_steps: usize,
+    /// Number of detour margin samples.
+    pub detour_margin_steps: usize,
+    /// Maximum total evaluations (budget).
+    pub max_evaluations: usize,
+}
+
+impl Default for BiasDseConfig {
+    fn default() -> Self {
+        Self {
+            ac_ratio_steps: 5,
+            ptl_threshold_steps: 3,
+            detour_margin_steps: 3,
+            max_evaluations: 100,
+        }
+    }
+}
+
+/// Result of bias design space exploration.
+#[derive(Debug, Clone)]
+pub struct BiasDseReport {
+    /// Pareto front of non-dominated design points.
+    pub pareto_front: BiasParetoFront,
+    /// All evaluated design points.
+    pub all_points: Vec<BiasDesignPoint>,
+    /// Configuration used.
+    pub config: BiasDseConfig,
+}
+
+/// Multi-objective AC/DC bias design space explorer (P1-2).
+///
+/// Sweeps AC ratio, PTL threshold, and detour margin to find the
+/// Pareto front of non-dominated designs balancing power, area,
+/// frequency, and feasibility.
+#[derive(Debug, Default)]
+pub struct BiasDesignSpaceExplorer;
+
+impl BiasDesignSpaceExplorer {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Explore the AC/DC bias design space and return the Pareto front.
+    pub fn explore(
+        &self,
+        runner: &mut FlowRunner,
+        netlist: &Netlist,
+        pdk: &Pdk,
+        base_config: &FlowConfig,
+        dse_config: &BiasDseConfig,
+    ) -> Result<BiasDseReport, FlowError> {
+        let mut all_points = Vec::new();
+
+        // Generate AC ratio samples
+        let ac_ratios: Vec<f64> = (0..dse_config.ac_ratio_steps)
+            .map(|i| i as f64 / (dse_config.ac_ratio_steps.max(1) - 1).max(1) as f64)
+            .collect();
+
+        // Generate PTL threshold samples
+        let base_threshold = base_config.routing.prefer_ptl_from_length_um;
+        let ptl_thresholds: Vec<f64> = (0..dse_config.ptl_threshold_steps)
+            .map(|i| {
+                base_threshold + i as f64 * 20.0
+            })
+            .collect();
+
+        // Generate detour margin samples
+        let base_detour = base_config.routing.detour_margin_um;
+        let detour_margins: Vec<f64> = (0..dse_config.detour_margin_steps)
+            .map(|i| {
+                base_detour + (i as f64 - 1.0) * 6.0
+            })
+            .collect();
+
+        for &ac_ratio in &ac_ratios {
+            for &ptl_threshold in &ptl_thresholds {
+                for &detour_margin in &detour_margins {
+                    if all_points.len() >= dse_config.max_evaluations {
+                        break;
+                    }
+
+                    let mut config = base_config.clone();
+                    config.routing.prefer_ptl_from_length_um = ptl_threshold;
+                    config.routing.detour_margin_um = detour_margin.max(0.0);
+
+                    let mut candidate_netlist = netlist.clone();
+                    let report = runner.analyze_ac_bias(&mut candidate_netlist, pdk, &config)?;
+
+                    // Scale power savings by AC ratio
+                    let mut scaled_report = report.clone();
+                    scaled_report.estimated_static_power_savings_uw *= ac_ratio;
+                    scaled_report.estimated_area_overhead_ratio *= 1.0 + ac_ratio * 0.23;
+                    scaled_report.estimated_frequency_derate_ratio *=
+                        1.0 - ac_ratio * 0.67; // AC reduces max freq
+
+                    all_points.push(BiasDesignPoint {
+                        ac_ratio,
+                        ptl_threshold_um: ptl_threshold,
+                        detour_margin_um: detour_margin,
+                        congestion_weight: config.routing.congestion_weight,
+                        report: scaled_report,
+                    });
+                }
+            }
+        }
+
+        let pareto_front = BiasParetoFront::compute(all_points.clone());
+
+        Ok(BiasDseReport {
+            pareto_front,
+            all_points,
+            config: dse_config.clone(),
+        })
+    }
+}
+
 fn node_kind_name(kind: &rflux_ir::NodeKind) -> &'static str {
     match kind {
         rflux_ir::NodeKind::CellInstance => "CELL",
@@ -7285,5 +7502,105 @@ mod tests {
 
         assert!(fast.total_dynamic_power_uw > slow.total_dynamic_power_uw);
         assert!(fast.clock_frequency_ghz > slow.clock_frequency_ghz);
+    }
+
+    // --- P1-2: BiasDesignSpaceExplorer tests ---
+
+    #[test]
+    fn bias_pareto_front_computes_non_dominated() {
+        let points = vec![
+            BiasDesignPoint {
+                ac_ratio: 0.0,
+                ptl_threshold_um: 60.0,
+                detour_margin_um: 12.0,
+                congestion_weight: 0.0,
+                report: AcBiasReport {
+                    routed_nets: 2,
+                    jtl_carrier_candidates: 1,
+                    ptl_coupling_risk_routes: 0,
+                    clock_sink_count: 2,
+                    estimated_static_power_savings_uw: 0.0,
+                    estimated_area_overhead_ratio: 0.0,
+                    estimated_frequency_derate_ratio: 1.0,
+                    worst_setup_slack_ps: 5.0,
+                    worst_hold_slack_ps: 3.0,
+                    timing_guardband_score: 0.5,
+                    feasibility_score: 0.8,
+                    optimization_score: 0.3,
+                },
+            },
+            BiasDesignPoint {
+                ac_ratio: 0.5,
+                ptl_threshold_um: 80.0,
+                detour_margin_um: 12.0,
+                congestion_weight: 0.0,
+                report: AcBiasReport {
+                    routed_nets: 2,
+                    jtl_carrier_candidates: 2,
+                    ptl_coupling_risk_routes: 0,
+                    clock_sink_count: 2,
+                    estimated_static_power_savings_uw: 100.0,
+                    estimated_area_overhead_ratio: 0.1,
+                    estimated_frequency_derate_ratio: 0.8,
+                    worst_setup_slack_ps: 4.0,
+                    worst_hold_slack_ps: 2.0,
+                    timing_guardband_score: 0.6,
+                    feasibility_score: 0.9,
+                    optimization_score: 0.7,
+                },
+            },
+            BiasDesignPoint {
+                ac_ratio: 1.0,
+                ptl_threshold_um: 100.0,
+                detour_margin_um: 12.0,
+                congestion_weight: 0.0,
+                report: AcBiasReport {
+                    routed_nets: 2,
+                    jtl_carrier_candidates: 3,
+                    ptl_coupling_risk_routes: 1,
+                    clock_sink_count: 2,
+                    estimated_static_power_savings_uw: 200.0,
+                    estimated_area_overhead_ratio: 0.23,
+                    estimated_frequency_derate_ratio: 0.33,
+                    worst_setup_slack_ps: 2.0,
+                    worst_hold_slack_ps: 1.0,
+                    timing_guardband_score: 0.4,
+                    feasibility_score: 0.7,
+                    optimization_score: 0.8,
+                },
+            },
+        ];
+
+        let front = BiasParetoFront::compute(points);
+        assert!(front.front_size > 0);
+        assert!(front.front_size <= 3);
+        assert_eq!(front.total_evaluated, 3);
+    }
+
+    #[test]
+    fn bias_dse_config_defaults() {
+        let config = BiasDseConfig::default();
+        assert_eq!(config.ac_ratio_steps, 5);
+        assert_eq!(config.ptl_threshold_steps, 3);
+        assert_eq!(config.detour_margin_steps, 3);
+        assert_eq!(config.max_evaluations, 100);
+    }
+
+    #[test]
+    fn bias_pareto_dominance_check() {
+        // Point A dominates B if A is better (lower) in all objectives
+        // Objectives: [-power_savings, area_overhead, -freq_derate, -score]
+        // A has higher power savings, lower area, higher freq, higher score
+        let a = [0.0, 0.0, 0.0, 0.0]; // best in all
+        let b = [1.0, 0.1, 1.0, 1.0]; // worse in all
+        assert!(BiasParetoFront::dominates(&a, &b));
+        assert!(!BiasParetoFront::dominates(&b, &a));
+    }
+
+    #[test]
+    fn bias_pareto_no_dominance_when_equal() {
+        let a = [1.0, 0.0, 1.0, 1.0];
+        let b = [1.0, 0.0, 1.0, 1.0];
+        assert!(!BiasParetoFront::dominates(&a, &b));
     }
 }
