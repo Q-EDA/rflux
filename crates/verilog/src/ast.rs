@@ -32,6 +32,7 @@ pub enum ModuleItem {
     Instance(InstanceDecl),
     Assign(Assignment),
     Parameter(ParamDecl),
+    AlwaysBlock(AlwaysBlock),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,11 +74,62 @@ pub struct ParamDecl {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlwaysBlock {
+    pub sensitivity: SensitivityList,
+    pub body: Statement,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensitivityList {
+    pub items: Vec<SensitivityItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SensitivityItem {
+    Posedge(String),
+    Negedge(String),
+    All,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Statement {
+    Block(Vec<Statement>),
+    If {
+        condition: Expr,
+        then_body: Box<Statement>,
+        else_body: Option<Box<Statement>>,
+    },
+    Case {
+        expr: Expr,
+        items: Vec<CaseItem>,
+        default: Option<Box<Statement>>,
+    },
+    BlockingAssign {
+        target: String,
+        value: Expr,
+    },
+    NonBlockingAssign {
+        target: String,
+        value: Expr,
+    },
+    Null,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseItem {
+    pub patterns: Vec<Expr>,
+    pub body: Statement,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
     Ident(String),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
     Literal(i64),
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    Concat(Vec<Expr>),
+    BitSelect(Box<Expr>, i32, i32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,9 +137,29 @@ pub enum BinOp {
     And,
     Or,
     Xor,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    LogicalAnd,
+    LogicalOr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Not,
+    Negate,
+    LogicalNot,
 }

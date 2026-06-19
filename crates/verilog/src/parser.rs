@@ -138,16 +138,12 @@ impl Parser {
 
         // Update port directions from declarations
         for item in &items {
-            match item {
-                ModuleItem::Net(net) => {
-                    // Net declarations in port list are actually port declarations
-                    for port in &mut ports {
-                        if port.name == net.name {
-                            // Infer direction from naming convention or leave as default
-                        }
+            if let ModuleItem::Net(net) = item {
+                for port in &mut ports {
+                    if port.name == net.name {
+                        // Infer direction from naming convention or leave as default
                     }
                 }
-                _ => {}
             }
         }
 
@@ -262,6 +258,15 @@ impl Parser {
                 self.expect(&Token::Semicolon)?;
                 Ok(ModuleItem::Parameter(ParamDecl { name, value }))
             }
+            Token::Always => {
+                self.advance();
+                let sensitivity = self.parse_sensitivity_list()?;
+                let body = self.parse_statement()?;
+                Ok(ModuleItem::AlwaysBlock(AlwaysBlock {
+                    sensitivity,
+                    body,
+                }))
+            }
             Token::And
             | Token::Or
             | Token::Not
@@ -279,6 +284,156 @@ impl Parser {
                 self.parse_module_instance()
             }
             _ => Err(self.error("module item")),
+        }
+    }
+
+    fn parse_sensitivity_list(&mut self) -> Result<SensitivityList, ParseError> {
+        self.expect(&Token::At)?;
+        self.expect(&Token::LParen)?;
+
+        let mut items = Vec::new();
+
+        if self.peek() == &Token::Star {
+            self.advance();
+            items.push(SensitivityItem::All);
+        } else {
+            loop {
+                let item = match self.peek() {
+                    Token::Posedge => {
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        SensitivityItem::Posedge(name)
+                    }
+                    Token::Negedge => {
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        SensitivityItem::Negedge(name)
+                    }
+                    _ => {
+                        let name = self.expect_ident()?;
+                        SensitivityItem::Posedge(name) // default assumption
+                    }
+                };
+                items.push(item);
+
+                if self.peek() == &Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&Token::RParen)?;
+        Ok(SensitivityList { items })
+    }
+
+    fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        match self.peek() {
+            Token::Begin => self.parse_block_statement(),
+            Token::If => self.parse_if_statement(),
+            Token::Case | Token::Casex | Token::Casez => self.parse_case_statement(),
+            Token::Ident(_) => self.parse_assign_statement(),
+            Token::Semicolon => {
+                self.advance();
+                Ok(Statement::Null)
+            }
+            _ => Err(self.error("statement")),
+        }
+    }
+
+    fn parse_block_statement(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Begin)?;
+        let mut stmts = Vec::new();
+        while self.peek() != &Token::End && self.peek() != &Token::Eof {
+            stmts.push(self.parse_statement()?);
+        }
+        self.expect(&Token::End)?;
+        Ok(Statement::Block(stmts))
+    }
+
+    fn parse_if_statement(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::If)?;
+        self.expect(&Token::LParen)?;
+        let condition = self.parse_expr()?;
+        self.expect(&Token::RParen)?;
+
+        let then_body = Box::new(self.parse_statement()?);
+
+        let else_body = if self.peek() == &Token::Else {
+            self.advance();
+            Some(Box::new(self.parse_statement()?))
+        } else {
+            None
+        };
+
+        Ok(Statement::If {
+            condition,
+            then_body,
+            else_body,
+        })
+    }
+
+    fn parse_case_statement(&mut self) -> Result<Statement, ParseError> {
+        // Consume case/casex/casez
+        self.advance();
+
+        self.expect(&Token::LParen)?;
+        let expr = self.parse_expr()?;
+        self.expect(&Token::RParen)?;
+
+        let mut items = Vec::new();
+        let mut default = None;
+
+        while self.peek() != &Token::Endcase && self.peek() != &Token::Eof {
+            if self.peek() == &Token::Default {
+                self.advance();
+                self.expect(&Token::Colon)?;
+                default = Some(Box::new(self.parse_statement()?));
+            } else {
+                let mut patterns = Vec::new();
+                loop {
+                    patterns.push(self.parse_expr()?);
+                    if self.peek() == &Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&Token::Colon)?;
+                let body = self.parse_statement()?;
+                items.push(CaseItem { patterns, body });
+            }
+        }
+
+        self.expect(&Token::Endcase)?;
+
+        Ok(Statement::Case {
+            expr,
+            items,
+            default,
+        })
+    }
+
+    fn parse_assign_statement(&mut self) -> Result<Statement, ParseError> {
+        let target = self.expect_ident()?;
+
+        match self.peek() {
+            Token::LtEq => {
+                // Non-blocking assign: target <= expr;
+                self.advance();
+                let value = self.parse_expr()?;
+                self.expect(&Token::Semicolon)?;
+                Ok(Statement::NonBlockingAssign { target, value })
+            }
+            Token::Equals => {
+                // Blocking assign: target = expr;
+                self.advance();
+                let value = self.parse_expr()?;
+                self.expect(&Token::Semicolon)?;
+                Ok(Statement::BlockingAssign { target, value })
+            }
+            _ => Err(self.error("'=' or '<=' in assignment")),
         }
     }
 
@@ -386,46 +541,186 @@ impl Parser {
         }))
     }
 
+    // Expression parser with proper precedence (lowest to highest):
+    // 1. Ternary (?:)
+    // 2. LogicalOr (||)
+    // 3. LogicalAnd (&&)
+    // 4. BitOr (|)
+    // 5. BitXor (^)
+    // 6. BitAnd (&)
+    // 7. Equality (==, !=)
+    // 8. Relational (<, >, <=, >=)
+    // 9. Shift (<<, >>)
+    // 10. Additive (+, -)
+    // 11. Multiplicative (*, /, %)
+    // 12. Unary (!, ~, -)
+    // 13. Primary (ident, literal, paren, concat, bitselect)
+
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or_expr()
+        self.parse_ternary_expr()
     }
 
-    fn parse_or_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_xor_expr()?;
-        while self.peek() == &Token::Or {
+    fn parse_ternary_expr(&mut self) -> Result<Expr, ParseError> {
+        let cond = self.parse_logical_or_expr()?;
+        if self.peek() == &Token::Question {
             self.advance();
-            let right = self.parse_xor_expr()?;
-            left = Expr::BinOp(BinOp::Or, Box::new(left), Box::new(right));
+            let then_expr = self.parse_expr()?;
+            self.expect(&Token::Colon)?;
+            let else_expr = self.parse_expr()?;
+            Ok(Expr::Ternary(
+                Box::new(cond),
+                Box::new(then_expr),
+                Box::new(else_expr),
+            ))
+        } else {
+            Ok(cond)
+        }
+    }
+
+    fn parse_logical_or_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_logical_and_expr()?;
+        while self.peek() == &Token::LogicalOr {
+            self.advance();
+            let right = self.parse_logical_and_expr()?;
+            left = Expr::BinOp(BinOp::LogicalOr, Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
-    fn parse_xor_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_and_expr()?;
-        while self.peek() == &Token::Xor {
+    fn parse_logical_and_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bit_or_expr()?;
+        while self.peek() == &Token::LogicalAnd {
             self.advance();
-            let right = self.parse_and_expr()?;
-            left = Expr::BinOp(BinOp::Xor, Box::new(left), Box::new(right));
+            let right = self.parse_bit_or_expr()?;
+            left = Expr::BinOp(BinOp::LogicalAnd, Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
-    fn parse_and_expr(&mut self) -> Result<Expr, ParseError> {
+    fn parse_bit_or_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bit_xor_expr()?;
+        while self.peek() == &Token::BitOr {
+            self.advance();
+            let right = self.parse_bit_xor_expr()?;
+            left = Expr::BinOp(BinOp::BitOr, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_xor_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bit_and_expr()?;
+        while self.peek() == &Token::BitXor {
+            self.advance();
+            let right = self.parse_bit_and_expr()?;
+            left = Expr::BinOp(BinOp::BitXor, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_and_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_equality_expr()?;
+        while self.peek() == &Token::BitAnd {
+            self.advance();
+            let right = self.parse_equality_expr()?;
+            left = Expr::BinOp(BinOp::BitAnd, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_equality_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_relational_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::EqEq => BinOp::Eq,
+                Token::NotEq => BinOp::Neq,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_relational_expr()?;
+            left = Expr::BinOp(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_relational_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_shift_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::Lt => BinOp::Lt,
+                Token::Gt => BinOp::Gt,
+                Token::LtEq => BinOp::Le,
+                Token::GtEq => BinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_shift_expr()?;
+            left = Expr::BinOp(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_shift_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_additive_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::Shl => BinOp::Shl,
+                Token::Shr => BinOp::Shr,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_additive_expr()?;
+            left = Expr::BinOp(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_additive_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_multiplicative_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::Plus => BinOp::Add,
+                Token::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_multiplicative_expr()?;
+            left = Expr::BinOp(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative_expr(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_unary_expr()?;
-        while self.peek() == &Token::And {
+        loop {
+            let op = match self.peek() {
+                Token::Star => BinOp::Mul,
+                Token::Slash => BinOp::Div,
+                Token::Percent => BinOp::Mod,
+                _ => break,
+            };
             self.advance();
             let right = self.parse_unary_expr()?;
-            left = Expr::BinOp(BinOp::And, Box::new(left), Box::new(right));
+            left = Expr::BinOp(op, Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
     fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
-            Token::Not => {
+            Token::Tilde => {
                 self.advance();
                 let expr = self.parse_primary()?;
                 Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(expr)))
+            }
+            Token::LogicalNot => {
+                self.advance();
+                let expr = self.parse_primary()?;
+                Ok(Expr::UnaryOp(UnaryOp::LogicalNot, Box::new(expr)))
+            }
+            Token::Minus => {
+                self.advance();
+                let expr = self.parse_primary()?;
+                Ok(Expr::UnaryOp(UnaryOp::Negate, Box::new(expr)))
             }
             _ => self.parse_primary(),
         }
@@ -435,7 +730,17 @@ impl Parser {
         match self.peek().clone() {
             Token::Ident(s) => {
                 self.advance();
-                Ok(Expr::Ident(s))
+                // Check for bit select: ident[high:low]
+                if self.peek() == &Token::LBracket {
+                    self.advance();
+                    let high = self.expect_number()? as i32;
+                    self.expect(&Token::Colon)?;
+                    let low = self.expect_number()? as i32;
+                    self.expect(&Token::RBracket)?;
+                    Ok(Expr::BitSelect(Box::new(Expr::Ident(s)), high, low))
+                } else {
+                    Ok(Expr::Ident(s))
+                }
             }
             Token::Number(n) => {
                 self.advance();
@@ -446,6 +751,23 @@ impl Parser {
                 let expr = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
+            }
+            Token::LBrace => {
+                // Concatenation: {expr1, expr2, ...}
+                self.advance();
+                let mut exprs = Vec::new();
+                if self.peek() != &Token::RBrace {
+                    loop {
+                        exprs.push(self.parse_expr()?);
+                        if self.peek() == &Token::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Token::RBrace)?;
+                Ok(Expr::Concat(exprs))
             }
             _ => Err(self.error("expression")),
         }
@@ -514,11 +836,11 @@ endmodule
         assert_eq!(assign.target, "y");
         // Expression should be (a & b) | c due to precedence
         match &assign.expr {
-            Expr::BinOp(BinOp::Or, left, _right) => match left.as_ref() {
-                Expr::BinOp(BinOp::And, _, _) => {} // correct
-                _ => panic!("expected AND inside OR"),
+            Expr::BinOp(BinOp::BitOr, left, _right) => match left.as_ref() {
+                Expr::BinOp(BinOp::BitAnd, _, _) => {} // correct
+                _ => panic!("expected BitAnd inside BitOr"),
             },
-            _ => panic!("expected OR at top level"),
+            _ => panic!("expected BitOr at top level"),
         }
     }
 
@@ -567,6 +889,192 @@ endmodule
         match &assign.expr {
             Expr::UnaryOp(UnaryOp::Not, _) => {}
             _ => panic!("expected NOT expression"),
+        }
+    }
+
+    #[test]
+    fn parse_always_combinational() {
+        let input = r#"
+module my_mux(a, b, sel, y);
+  input a, b, sel;
+  output y;
+  always @(*) begin
+    if (sel)
+      y = b;
+    else
+      y = a;
+  end
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let always = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::AlwaysBlock(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(always.sensitivity.items.len(), 1);
+        assert!(matches!(always.sensitivity.items[0], SensitivityItem::All));
+        match &always.body {
+            Statement::Block(stmts) => match &stmts[0] {
+                Statement::If {
+                    condition,
+                    then_body: _,
+                    else_body: _,
+                } => match condition {
+                    Expr::Ident(s) => assert_eq!(s, "sel"),
+                    _ => panic!("expected ident condition"),
+                },
+                _ => panic!("expected if statement inside block"),
+            },
+            _ => panic!("expected block statement"),
+        }
+    }
+
+    #[test]
+    fn parse_always_sequential() {
+        let input = r#"
+module my_dff(clk, d, q);
+  input clk, d;
+  output q;
+  always @(posedge clk) begin
+    q <= d;
+  end
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let always = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::AlwaysBlock(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(always.sensitivity.items.len(), 1);
+        assert!(matches!(
+            always.sensitivity.items[0],
+            SensitivityItem::Posedge(ref s) if s == "clk"
+        ));
+        match &always.body {
+            Statement::Block(stmts) => {
+                assert_eq!(stmts.len(), 1);
+                match &stmts[0] {
+                    Statement::NonBlockingAssign { target, value: _ } => {
+                        assert_eq!(target, "q");
+                    }
+                    _ => panic!("expected non-blocking assign"),
+                }
+            }
+            _ => panic!("expected block statement"),
+        }
+    }
+
+    #[test]
+    fn parse_case_statement() {
+        let input = r#"
+module mux4(a, b, c, d, sel, y);
+  input a, b, c, d;
+  input [1:0] sel;
+  output y;
+  always @(*) begin
+    case (sel)
+      2'b00: y = a;
+      2'b01: y = b;
+      2'b10: y = c;
+      default: y = d;
+    endcase
+  end
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let always = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::AlwaysBlock(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+
+        match &always.body {
+            Statement::Block(stmts) => match &stmts[0] {
+                Statement::Case {
+                    expr: _,
+                    items,
+                    default,
+                } => {
+                    assert_eq!(items.len(), 3);
+                    assert!(default.is_some());
+                }
+                _ => panic!("expected case statement"),
+            },
+            _ => panic!("expected block"),
+        }
+    }
+
+    #[test]
+    fn parse_expression_precedence() {
+        let input = r#"
+module test(a, b, c, d, y);
+  input a, b, c, d;
+  output y;
+  assign y = a | b & c;
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let assign = source.modules[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::Assign(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+
+        // Should be a | (b & c) — BitAnd binds tighter than BitOr
+        match &assign.expr {
+            Expr::BinOp(BinOp::BitOr, left, right) => {
+                assert!(matches!(left.as_ref(), Expr::Ident(_)));
+                assert!(matches!(right.as_ref(), Expr::BinOp(BinOp::BitAnd, _, _)));
+            }
+            _ => panic!("expected BitOr at top level"),
+        }
+    }
+
+    #[test]
+    fn parse_ternary_expression() {
+        let input = r#"
+module test(a, b, sel, y);
+  input a, b, sel;
+  output y;
+  assign y = sel ? b : a;
+endmodule
+"#;
+        let source = parse_verilog(input).unwrap();
+        let assign = source.modules[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::Assign(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+
+        match &assign.expr {
+            Expr::Ternary(cond, then_expr, else_expr) => {
+                assert!(matches!(cond.as_ref(), Expr::Ident(ref s) if s == "sel"));
+                assert!(matches!(then_expr.as_ref(), Expr::Ident(ref s) if s == "b"));
+                assert!(matches!(else_expr.as_ref(), Expr::Ident(ref s) if s == "a"));
+            }
+            _ => panic!("expected ternary expression"),
         }
     }
 }

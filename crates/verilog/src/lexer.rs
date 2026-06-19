@@ -13,7 +13,19 @@ pub enum Token {
     Assign,
     Parameter,
     Defparam,
-    // Gate types
+    Always,
+    If,
+    Else,
+    Case,
+    Casex,
+    Casez,
+    Endcase,
+    Begin,
+    End,
+    Posedge,
+    Negedge,
+    Default,
+    // Gate types (also used as keywords)
     And,
     Or,
     Not,
@@ -38,6 +50,32 @@ pub enum Token {
     Equals,
     At,
     Hash,
+    Question,
+    // Arithmetic operators
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    // Comparison operators
+    EqEq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+    // Shift operators
+    Shl,
+    Shr,
+    // Bitwise operators
+    BitAnd,
+    BitOr,
+    BitXor,
+    Tilde,
+    // Logical operators
+    LogicalAnd,
+    LogicalOr,
+    LogicalNot,
     // Literals and identifiers
     Ident(String),
     Number(i64),
@@ -74,6 +112,10 @@ impl Lexer {
 
     fn peek(&self) -> Option<char> {
         self.input.get(self.pos).copied()
+    }
+
+    fn peek2(&self) -> Option<char> {
+        self.input.get(self.pos + 1).copied()
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -205,18 +247,20 @@ impl Lexer {
 
             match ch {
                 '/' => {
-                    self.advance();
-                    match self.peek() {
+                    match self.peek2() {
                         Some('/') => {
+                            self.advance();
                             self.advance();
                             self.skip_line_comment();
                         }
                         Some('*') => {
                             self.advance();
+                            self.advance();
                             self.skip_block_comment()?;
                         }
                         _ => {
-                            return Err(LexError::UnexpectedChar('/', self.line, self.col - 1));
+                            self.advance();
+                            tokens.push(Token::Slash);
                         }
                     }
                 }
@@ -262,7 +306,12 @@ impl Lexer {
                 }
                 '=' => {
                     self.advance();
-                    tokens.push(Token::Equals);
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        tokens.push(Token::EqEq);
+                    } else {
+                        tokens.push(Token::Equals);
+                    }
                 }
                 '@' => {
                     self.advance();
@@ -272,21 +321,92 @@ impl Lexer {
                     self.advance();
                     tokens.push(Token::Hash);
                 }
+                '?' => {
+                    self.advance();
+                    tokens.push(Token::Question);
+                }
+                '+' => {
+                    self.advance();
+                    tokens.push(Token::Plus);
+                }
+                '-' => {
+                    self.advance();
+                    tokens.push(Token::Minus);
+                }
+                '*' => {
+                    self.advance();
+                    tokens.push(Token::Star);
+                }
+                '%' => {
+                    self.advance();
+                    tokens.push(Token::Percent);
+                }
+                '<' => {
+                    self.advance();
+                    match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            tokens.push(Token::LtEq);
+                        }
+                        Some('<') => {
+                            self.advance();
+                            tokens.push(Token::Shl);
+                        }
+                        _ => {
+                            tokens.push(Token::Lt);
+                        }
+                    }
+                }
+                '>' => {
+                    self.advance();
+                    match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            tokens.push(Token::GtEq);
+                        }
+                        Some('>') => {
+                            self.advance();
+                            tokens.push(Token::Shr);
+                        }
+                        _ => {
+                            tokens.push(Token::Gt);
+                        }
+                    }
+                }
                 '&' => {
                     self.advance();
-                    tokens.push(Token::And); // bitwise and, also used as AND gate keyword in some contexts
+                    if self.peek() == Some('&') {
+                        self.advance();
+                        tokens.push(Token::LogicalAnd);
+                    } else {
+                        tokens.push(Token::BitAnd);
+                    }
                 }
                 '|' => {
                     self.advance();
-                    tokens.push(Token::Or); // bitwise or
-                }
-                '~' => {
-                    self.advance();
-                    tokens.push(Token::Not); // bitwise not
+                    if self.peek() == Some('|') {
+                        self.advance();
+                        tokens.push(Token::LogicalOr);
+                    } else {
+                        tokens.push(Token::BitOr);
+                    }
                 }
                 '^' => {
                     self.advance();
-                    tokens.push(Token::Xor); // bitwise xor
+                    tokens.push(Token::BitXor);
+                }
+                '~' => {
+                    self.advance();
+                    tokens.push(Token::Tilde);
+                }
+                '!' => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        tokens.push(Token::NotEq);
+                    } else {
+                        tokens.push(Token::LogicalNot);
+                    }
                 }
                 '0'..='9' => {
                     self.advance();
@@ -307,6 +427,18 @@ impl Lexer {
                         "assign" => Token::Assign,
                         "parameter" => Token::Parameter,
                         "defparam" => Token::Defparam,
+                        "always" => Token::Always,
+                        "if" => Token::If,
+                        "else" => Token::Else,
+                        "case" => Token::Case,
+                        "casex" => Token::Casex,
+                        "casez" => Token::Casez,
+                        "endcase" => Token::Endcase,
+                        "begin" => Token::Begin,
+                        "end" => Token::End,
+                        "posedge" => Token::Posedge,
+                        "negedge" => Token::Negedge,
+                        "default" => Token::Default,
                         "and" => Token::And,
                         "or" => Token::Or,
                         "not" => Token::Not,
@@ -408,5 +540,86 @@ endmodule
         assert_eq!(tokens[1], Token::Ident("top".to_string()));
         assert_eq!(tokens[2], Token::Semicolon);
         assert_eq!(tokens[3], Token::Endmodule);
+    }
+
+    #[test]
+    fn tokenize_always_block() {
+        let input = "always @(*) if (sel) y = a; else y = b;";
+        let tokens = tokenize(input).unwrap();
+        assert_eq!(tokens[0], Token::Always);
+        assert_eq!(tokens[1], Token::At);
+        assert_eq!(tokens[2], Token::LParen);
+        assert_eq!(tokens[3], Token::Star);
+        assert_eq!(tokens[4], Token::RParen);
+        assert_eq!(tokens[5], Token::If);
+        assert_eq!(tokens[6], Token::LParen);
+        assert_eq!(tokens[7], Token::Ident("sel".to_string()));
+        assert_eq!(tokens[8], Token::RParen);
+        assert_eq!(tokens[9], Token::Ident("y".to_string()));
+        assert_eq!(tokens[10], Token::Equals);
+        assert_eq!(tokens[11], Token::Ident("a".to_string()));
+        assert_eq!(tokens[12], Token::Semicolon);
+        assert_eq!(tokens[13], Token::Else);
+        assert_eq!(tokens[14], Token::Ident("y".to_string()));
+        assert_eq!(tokens[15], Token::Equals);
+        assert_eq!(tokens[16], Token::Ident("b".to_string()));
+        assert_eq!(tokens[17], Token::Semicolon);
+    }
+
+    #[test]
+    fn tokenize_multi_char_operators() {
+        let input = "a == b != c <= d >= e << f >> g && h || i !j";
+        let tokens = tokenize(input).unwrap();
+        assert_eq!(tokens[0], Token::Ident("a".to_string()));
+        assert_eq!(tokens[1], Token::EqEq);
+        assert_eq!(tokens[2], Token::Ident("b".to_string()));
+        assert_eq!(tokens[3], Token::NotEq);
+        assert_eq!(tokens[4], Token::Ident("c".to_string()));
+        assert_eq!(tokens[5], Token::LtEq);
+        assert_eq!(tokens[6], Token::Ident("d".to_string()));
+        assert_eq!(tokens[7], Token::GtEq);
+        assert_eq!(tokens[8], Token::Ident("e".to_string()));
+        assert_eq!(tokens[9], Token::Shl);
+        assert_eq!(tokens[10], Token::Ident("f".to_string()));
+        assert_eq!(tokens[11], Token::Shr);
+        assert_eq!(tokens[12], Token::Ident("g".to_string()));
+        assert_eq!(tokens[13], Token::LogicalAnd);
+        assert_eq!(tokens[14], Token::Ident("h".to_string()));
+        assert_eq!(tokens[15], Token::LogicalOr);
+        assert_eq!(tokens[16], Token::Ident("i".to_string()));
+        assert_eq!(tokens[17], Token::LogicalNot);
+        assert_eq!(tokens[18], Token::Ident("j".to_string()));
+    }
+
+    #[test]
+    fn tokenize_bitwise_operators() {
+        let input = "a & b | c ^ d ~e";
+        let tokens = tokenize(input).unwrap();
+        assert_eq!(tokens[0], Token::Ident("a".to_string()));
+        assert_eq!(tokens[1], Token::BitAnd);
+        assert_eq!(tokens[2], Token::Ident("b".to_string()));
+        assert_eq!(tokens[3], Token::BitOr);
+        assert_eq!(tokens[4], Token::Ident("c".to_string()));
+        assert_eq!(tokens[5], Token::BitXor);
+        assert_eq!(tokens[6], Token::Ident("d".to_string()));
+        assert_eq!(tokens[7], Token::Tilde);
+        assert_eq!(tokens[8], Token::Ident("e".to_string()));
+    }
+
+    #[test]
+    fn tokenize_arithmetic_operators() {
+        let input = "a + b - c * d / e % f";
+        let tokens = tokenize(input).unwrap();
+        assert_eq!(tokens[0], Token::Ident("a".to_string()));
+        assert_eq!(tokens[1], Token::Plus);
+        assert_eq!(tokens[2], Token::Ident("b".to_string()));
+        assert_eq!(tokens[3], Token::Minus);
+        assert_eq!(tokens[4], Token::Ident("c".to_string()));
+        assert_eq!(tokens[5], Token::Star);
+        assert_eq!(tokens[6], Token::Ident("d".to_string()));
+        assert_eq!(tokens[7], Token::Slash);
+        assert_eq!(tokens[8], Token::Ident("e".to_string()));
+        assert_eq!(tokens[9], Token::Percent);
+        assert_eq!(tokens[10], Token::Ident("f".to_string()));
     }
 }
