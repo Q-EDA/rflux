@@ -379,6 +379,39 @@ impl Default for StatisticalTimingConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MonteCarloConfig {
+    pub samples: usize,
+    pub seed: u64,
+    pub cell_sigma_ratio: f64,
+    pub wire_sigma_ratio: f64,
+}
+
+impl Default for MonteCarloConfig {
+    fn default() -> Self {
+        Self {
+            samples: 1000,
+            seed: 42,
+            cell_sigma_ratio: 0.05,
+            wire_sigma_ratio: 0.05,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MonteCarloReport {
+    pub samples: usize,
+    pub yield_estimate: f64,
+    pub mean_setup_slack_ps: f64,
+    pub std_setup_slack_ps: f64,
+    pub mean_hold_slack_ps: f64,
+    pub std_hold_slack_ps: f64,
+    pub worst_setup_slack_ps: f64,
+    pub worst_hold_slack_ps: f64,
+    pub ssta_vs_mc_setup_sigma_error: f64,
+    pub ssta_vs_mc_hold_sigma_error: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PulseEnvelope {
     pub arrival_ps: f64,
@@ -1134,6 +1167,115 @@ impl StaticTimingAnalyzer {
             analyzed_arcs: report.analyzed_arcs,
             false_path_arcs: report.false_path_arcs,
         })
+    }
+
+    pub fn verify_ssta(
+        &self,
+        netlist: &Netlist,
+        routing: &RoutingReport,
+        pdk: &Pdk,
+        config: &TimingConfig,
+        mc_config: &MonteCarloConfig,
+    ) -> MonteCarloReport {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(mc_config.seed);
+        let mut setup_slacks = Vec::new();
+        let mut hold_slacks = Vec::new();
+
+        for _ in 0..mc_config.samples {
+            let mut sample_pdk = pdk.clone();
+            for timing in &mut sample_pdk.cell_timing {
+                let cell_noise: f64 = rng.gen_range(-1.0..1.0);
+                timing.intrinsic_delay_ps *= 1.0 + cell_noise * mc_config.cell_sigma_ratio;
+            }
+            for timing in &mut sample_pdk.interconnect_timing {
+                for point in &mut timing.points {
+                    let wire_noise: f64 = rng.gen_range(-1.0..1.0);
+                    point.delay_ps *= 1.0 + wire_noise * mc_config.wire_sigma_ratio;
+                }
+            }
+
+            if let Ok(report) = self.analyze(netlist, routing, &sample_pdk, config, None) {
+                setup_slacks.push(report.worst_setup_slack_ps);
+                hold_slacks.push(report.worst_hold_slack_ps);
+            }
+        }
+
+        let n = setup_slacks.len() as f64;
+        let (mean_setup, std_setup) = if n > 0.0 {
+            let mean = setup_slacks.iter().sum::<f64>() / n;
+            let std =
+                (setup_slacks.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n).sqrt();
+            (mean, std)
+        } else {
+            (0.0, 0.0)
+        };
+        let (mean_hold, std_hold) = if n > 0.0 {
+            let mean = hold_slacks.iter().sum::<f64>() / n;
+            let std =
+                (hold_slacks.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n).sqrt();
+            (mean, std)
+        } else {
+            (0.0, 0.0)
+        };
+
+        let passed = setup_slacks.iter().filter(|&&s| s >= 0.0).count()
+            + hold_slacks.iter().filter(|&&s| s >= 0.0).count();
+        let total = (setup_slacks.len() + hold_slacks.len()) as f64;
+
+        let ssta_config = StatisticalTimingConfig {
+            cell_delay_sigma_ratio: mc_config.cell_sigma_ratio,
+            wire_delay_sigma_ratio: mc_config.wire_sigma_ratio,
+            ..Default::default()
+        };
+        let ssta_report =
+            self.analyze_statistical(netlist, routing, pdk, config, &ssta_config, None);
+        let (ssta_setup_sigma, ssta_hold_sigma) = match ssta_report {
+            Ok(report) => {
+                let setup = report
+                    .arcs
+                    .iter()
+                    .map(|a| a.setup_sigma_ps)
+                    .fold(0.0f64, f64::max);
+                let hold = report
+                    .arcs
+                    .iter()
+                    .map(|a| a.hold_sigma_ps)
+                    .fold(0.0f64, f64::max);
+                (setup, hold)
+            }
+            Err(_) => (0.0, 0.0),
+        };
+
+        MonteCarloReport {
+            samples: setup_slacks.len(),
+            yield_estimate: if total > 0.0 {
+                passed as f64 / total
+            } else {
+                0.0
+            },
+            mean_setup_slack_ps: mean_setup,
+            std_setup_slack_ps: std_setup,
+            mean_hold_slack_ps: mean_hold,
+            std_hold_slack_ps: std_hold,
+            worst_setup_slack_ps: setup_slacks
+                .iter()
+                .cloned()
+                .fold(f64::INFINITY, f64::min),
+            worst_hold_slack_ps: hold_slacks.iter().cloned().fold(f64::INFINITY, f64::min),
+            ssta_vs_mc_setup_sigma_error: if ssta_setup_sigma > 0.0 {
+                ((std_setup - ssta_setup_sigma) / ssta_setup_sigma).abs()
+            } else {
+                0.0
+            },
+            ssta_vs_mc_hold_sigma_error: if ssta_hold_sigma > 0.0 {
+                ((std_hold - ssta_hold_sigma) / ssta_hold_sigma).abs()
+            } else {
+                0.0
+            },
+        }
     }
 }
 
@@ -4837,5 +4979,65 @@ mod tests {
             assert_eq!(corner.setup_violations, 0);
             assert_eq!(corner.hold_violations, 0);
         }
+    }
+
+    #[test]
+    fn ssta_mc_verification_basic() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink");
+
+        let routing = RoutingReport {
+            routes: vec![NetRoute {
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
+                mode: RouteMode::Jtl,
+                segments: Vec::new(),
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            }],
+            total_length_um: 40.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 1,
+            ptl_routes: 0,
+        };
+
+        let mc_config = MonteCarloConfig {
+            samples: 100,
+            ..Default::default()
+        };
+        let report = StaticTimingAnalyzer::new().verify_ssta(
+            &netlist,
+            &routing,
+            &Pdk::minimal("test"),
+            &TimingConfig::default(),
+            &mc_config,
+        );
+
+        assert_eq!(report.samples, 100);
+        assert!(report.yield_estimate >= 0.0 && report.yield_estimate <= 1.0);
+        assert!(report.std_setup_slack_ps >= 0.0);
+        assert!(report.std_hold_slack_ps >= 0.0);
+        assert!(report.worst_setup_slack_ps <= report.mean_setup_slack_ps);
+        assert!(report.worst_hold_slack_ps <= report.mean_hold_slack_ps);
     }
 }

@@ -1104,6 +1104,7 @@ dependencies = [
  "libreda-db",
  "libreda-lefdef",
  "rflux-ir",
+ "rflux-sim",
  "rflux-tech",
  "rflux-verilog",
  "serde_json",
@@ -1212,6 +1213,7 @@ dependencies = [
 name = "rflux-timing"
 version = "0.1.0"
 dependencies = [
+ "rand 0.8.6",
  "rflux-extract",
  "rflux-ir",
  "rflux-route",

@@ -11,3 +11,4 @@ rflux-tech = { path = "../tech" }
 rflux-extract = { path = "../extract" }
 serde = { workspace = true }
 thiserror.workspace = true
+rand.workspace = true

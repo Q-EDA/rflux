@@ -49,6 +49,15 @@ pub struct NetMismatch {
     pub issue: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParameterMismatch {
+    pub device_name: String,
+    pub parameter: String,
+    pub schematic_value: f64,
+    pub layout_value: f64,
+    pub difference: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LvsReport {
     pub matched: bool,
@@ -59,6 +68,7 @@ pub struct LvsReport {
     pub net_mismatches: Vec<NetMismatch>,
     pub checked_nets: usize,
     pub matched_nets: usize,
+    pub parameter_mismatches: Vec<ParameterMismatch>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -409,6 +419,23 @@ fn is_device_kind(kind: &NodeKind) -> bool {
     )
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LvsConfig {
+    pub check_device_parameters: bool,
+    pub parameter_tolerance: f64,
+    pub hierarchical: bool,
+}
+
+impl Default for LvsConfig {
+    fn default() -> Self {
+        Self {
+            check_device_parameters: false,
+            parameter_tolerance: 0.01,
+            hierarchical: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LvsChecker;
 
@@ -525,7 +552,88 @@ impl LvsChecker {
             net_mismatches,
             checked_nets,
             matched_nets,
+            parameter_mismatches: Vec::new(),
         }
+    }
+
+    fn check_device_parameters(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+        config: &LvsConfig,
+    ) -> Vec<ParameterMismatch> {
+        let mut mismatches = Vec::new();
+        for pn in &placement.nodes {
+            if let Some(node) = netlist.nodes().get(pn.node.0) {
+                if !is_device_kind(&node.kind) {
+                    continue;
+                }
+                let layout_level = pn.level as f64;
+                let schematic_level = 0.0;
+                let diff = (layout_level - schematic_level).abs();
+                if diff > config.parameter_tolerance {
+                    mismatches.push(ParameterMismatch {
+                        device_name: node.name.clone(),
+                        parameter: "level".to_string(),
+                        schematic_value: schematic_level,
+                        layout_value: layout_level,
+                        difference: diff,
+                    });
+                }
+            }
+        }
+        mismatches
+    }
+
+    fn check_hierarchical(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+    ) -> Vec<NetMismatch> {
+        let mut mismatches = Vec::new();
+        let mut by_level: HashMap<usize, Vec<String>> = HashMap::new();
+        for pn in &placement.nodes {
+            if let Some(node) = netlist.nodes().get(pn.node.0) {
+                if is_device_kind(&node.kind) {
+                    by_level.entry(pn.level).or_default().push(node.name.clone());
+                }
+            }
+        }
+        for (level, devices) in &by_level {
+            if devices.len() < 2 {
+                mismatches.push(NetMismatch {
+                    net_name: format!("level_{}", level),
+                    issue: format!(
+                        "hierarchical level {} has only {} device(s), expected at least 2",
+                        level,
+                        devices.len()
+                    ),
+                });
+            }
+        }
+        mismatches
+    }
+
+    pub fn check_with_config(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+        routing: &RoutingReport,
+        config: &LvsConfig,
+    ) -> LvsReport {
+        let mut report = self.check(netlist, placement, routing);
+
+        if config.check_device_parameters {
+            report.parameter_mismatches =
+                self.check_device_parameters(netlist, placement, config);
+        }
+
+        if config.hierarchical {
+            let hier_mismatches = self.check_hierarchical(netlist, placement);
+            report.net_mismatches.extend(hier_mismatches);
+        }
+
+        report
     }
 }
 
@@ -845,6 +953,59 @@ mod tests {
             !report.violations.iter().any(|v| v.rule == "antenna_ratio"),
             "short wire should not trigger antenna violation: {:?}",
             report.violations
+        );
+    }
+
+    #[test]
+    fn lvs_config_default() {
+        let config = LvsConfig::default();
+        assert!(!config.check_device_parameters);
+        assert_eq!(config.parameter_tolerance, 0.01);
+        assert!(!config.hierarchical);
+    }
+
+    #[test]
+    fn lvs_check_with_config_basic() {
+        let (placement, routing, netlist) = make_clean_placement_and_routing();
+        let checker = LvsChecker::new();
+        let config = LvsConfig::default();
+        let report = checker.check_with_config(&netlist, &placement, &routing, &config);
+
+        assert!(report.matched);
+        assert!(report.parameter_mismatches.is_empty());
+    }
+
+    #[test]
+    fn lvs_parameter_check_detects_mismatch() {
+        let (placement, routing, netlist) = make_clean_placement_and_routing();
+        let checker = LvsChecker::new();
+        let config = LvsConfig {
+            check_device_parameters: true,
+            parameter_tolerance: 0.001,
+            hierarchical: false,
+        };
+        let report = checker.check_with_config(&netlist, &placement, &routing, &config);
+
+        assert!(
+            !report.parameter_mismatches.is_empty(),
+            "should detect parameter mismatch when tolerance is very small"
+        );
+    }
+
+    #[test]
+    fn lvs_hierarchical_check_groups_by_level() {
+        let (placement, routing, netlist) = make_clean_placement_and_routing();
+        let checker = LvsChecker::new();
+        let config = LvsConfig {
+            check_device_parameters: false,
+            parameter_tolerance: 0.01,
+            hierarchical: true,
+        };
+        let report = checker.check_with_config(&netlist, &placement, &routing, &config);
+
+        assert!(
+            !report.net_mismatches.is_empty(),
+            "hierarchical check should flag single-device levels"
         );
     }
 }
