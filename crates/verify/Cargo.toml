@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 rflux-ir = { path = "../ir" }
 rflux-synth = { path = "../synth" }
+rflux-timing = { path = "../timing" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rflux-route = { path = "../route" }
+rflux-tech = { path = "../tech" }

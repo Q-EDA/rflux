@@ -2,6 +2,9 @@ use rflux_ir::Netlist;
 use rflux_synth::{
     Compiler, EquivalenceSatProblem, SatEquivalenceReport, SequentialEquivalenceReport,
 };
+use rflux_timing::{TimingArcReport, TimingConfig, TimingReport};
+use serde::Serialize;
+use thiserror::Error;
 
 pub use rflux_synth::{
     BoundedSequentialEquivalenceReport, BoundedSequentialEquivalenceStepReport,
@@ -68,6 +71,272 @@ impl Verifier {
 }
 
 pub use rflux_synth::{SatOutputMismatch, SatStateTransitionMismatch, SynthError};
+
+// ---------------------------------------------------------------------------
+// P0-3: Timing-Functional Joint Verification
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum TimingFunctionalError {
+    #[error("timing report has no arcs to verify")]
+    NoArcs,
+}
+
+impl TimingFunctionalError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            TimingFunctionalError::NoArcs => "RFLOW-VERIFY-001",
+        }
+    }
+
+    #[must_use]
+    pub fn suggestion(&self) -> &'static str {
+        match self {
+            TimingFunctionalError::NoArcs => {
+                "Run STA before timing-functional verification. Ensure the netlist has edges."
+            }
+        }
+    }
+}
+
+/// Configuration for timing-functional joint verification.
+#[derive(Debug, Clone, Serialize)]
+pub struct TimingFunctionalConfig {
+    /// Maximum allowed delay difference (ps) between two combinational
+    /// paths converging at the same DFF.  Defaults to
+    /// `clock_period_ps - sfq_pulse_window_ps`.
+    pub path_balance_tolerance_ps: Option<f64>,
+    /// If true, treat capture-window violations as functional errors.
+    pub capture_window_as_functional: bool,
+    /// If true, treat hold violations as functional errors.
+    pub hold_as_functional: bool,
+}
+
+impl Default for TimingFunctionalConfig {
+    fn default() -> Self {
+        Self {
+            path_balance_tolerance_ps: None,
+            capture_window_as_functional: true,
+            hold_as_functional: true,
+        }
+    }
+}
+
+/// A single functional violation detected by the joint verifier.
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionalViolation {
+    /// Human-readable description of the violation.
+    pub description: String,
+    /// The timing arc that caused this violation (from, to pins).
+    pub arc_from: rflux_ir::PinRef,
+    pub arc_to: rflux_ir::PinRef,
+    /// Severity: "error" or "warning".
+    pub severity: String,
+    /// Category: "pulse_alignment", "path_balance", "hold", "capture_window".
+    pub category: String,
+    /// The offending value (e.g., negative slack, excessive delay diff).
+    pub value_ps: f64,
+}
+
+/// Result of timing-functional joint verification.
+#[derive(Debug, Clone, Serialize)]
+pub struct TimingFunctionalReport {
+    pub total_arcs_checked: usize,
+    pub functional_violations: Vec<FunctionalViolation>,
+    pub pulse_alignment_violations: usize,
+    pub path_balance_violations: usize,
+    pub hold_functional_violations: usize,
+    pub capture_window_functional_violations: usize,
+    pub passed: bool,
+}
+
+/// Verifier that checks whether timing results guarantee functional
+/// correctness in SFQ circuits (P0-3).
+///
+/// In SFQ, a timing violation is not just a performance issue — it
+/// is a **functional** error because pulses are consumed on read
+/// (destructive readout).  If a pulse arrives outside the capture
+/// window, the receiving gate sees the wrong value.
+#[derive(Debug, Default)]
+pub struct TimingFunctionalVerifier;
+
+impl TimingFunctionalVerifier {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Run timing-functional joint verification.
+    ///
+    /// Checks:
+    /// 1. **Pulse alignment**: launch window overlaps capture window
+    ///    for every non-false-path arc.
+    /// 2. **Path balance**: combinational path delay differences
+    ///    converging at DFFs are within tolerance.
+    /// 3. **Hold violations** as functional errors (pulse arrives too
+    ///    early, consumed in wrong clock phase).
+    /// 4. **Capture window violations** as functional errors.
+    pub fn verify(
+        &self,
+        netlist: &Netlist,
+        timing: &TimingReport,
+        timing_config: &TimingConfig,
+        config: &TimingFunctionalConfig,
+    ) -> Result<TimingFunctionalReport, TimingFunctionalError> {
+        if timing.arcs.is_empty() {
+            return Err(TimingFunctionalError::NoArcs);
+        }
+
+        let tolerance_ps = config
+            .path_balance_tolerance_ps
+            .unwrap_or(timing_config.clock_period_ps - timing_config.sfq_pulse_window_ps);
+
+        let mut violations = Vec::new();
+
+        // Check 1 & 3 & 4: per-arc checks
+        for arc in &timing.arcs {
+            if arc.is_false_path {
+                continue;
+            }
+
+            // Pulse alignment: launch window must overlap capture window
+            let launch_start = arc.launch_window_start_ps;
+            let launch_end = arc.launch_window_end_ps;
+            let capture_start = arc.capture_window_start_ps;
+            let capture_end = arc.capture_window_end_ps;
+            let overlaps =
+                launch_start <= capture_end && capture_start <= launch_end;
+            if !overlaps {
+                let gap = if launch_end < capture_start {
+                    capture_start - launch_end
+                } else {
+                    launch_start - capture_end
+                };
+                violations.push(FunctionalViolation {
+                    description: format!(
+                        "Pulse alignment failure: launch window [{:.1}, {:.1}] ps \
+                         does not overlap capture window [{:.1}, {:.1}] ps (gap: {:.1} ps)",
+                        launch_start, launch_end, capture_start, capture_end, gap
+                    ),
+                    arc_from: arc.from,
+                    arc_to: arc.to,
+                    severity: "error".to_string(),
+                    category: "pulse_alignment".to_string(),
+                    value_ps: -gap,
+                });
+            }
+
+            // Capture window violation
+            if config.capture_window_as_functional && arc.capture_window_violation {
+                violations.push(FunctionalViolation {
+                    description: format!(
+                        "Capture window violation: arrival outside capture window"
+                    ),
+                    arc_from: arc.from,
+                    arc_to: arc.to,
+                    severity: "error".to_string(),
+                    category: "capture_window".to_string(),
+                    value_ps: arc.capture_window_slack_ps,
+                });
+            }
+
+            // Hold violation as functional error
+            if config.hold_as_functional && arc.hold_slack_ps < 0.0 {
+                violations.push(FunctionalViolation {
+                    description: format!(
+                        "Hold violation (functional): hold slack {:.1} ps < 0",
+                        arc.hold_slack_ps
+                    ),
+                    arc_from: arc.from,
+                    arc_to: arc.to,
+                    severity: "error".to_string(),
+                    category: "hold".to_string(),
+                    value_ps: arc.hold_slack_ps,
+                });
+            }
+        }
+
+        // Check 2: path balance — find DFF input arcs and compare
+        // arrival times for paths converging at the same DFF.
+        let dff_input_arcs: Vec<&TimingArcReport> = timing
+            .arcs
+            .iter()
+            .filter(|a| {
+                !a.is_false_path
+                    && netlist.nodes().get(a.to.node.0).map_or(false, |n| {
+                        matches!(n.kind, rflux_ir::NodeKind::Dff)
+                    })
+            })
+            .collect();
+
+        // Group by destination DFF node
+        let mut by_dff: std::collections::HashMap<
+            rflux_ir::NodeId,
+            Vec<&TimingArcReport>,
+        > = std::collections::HashMap::new();
+        for arc in &dff_input_arcs {
+            by_dff.entry(arc.to.node).or_default().push(arc);
+        }
+
+        for (_dff_id, arcs) in &by_dff {
+            if arcs.len() < 2 {
+                continue;
+            }
+            // Compare all pairs of arrival times at this DFF
+            for i in 0..arcs.len() {
+                for j in (i + 1)..arcs.len() {
+                    let diff = (arcs[i].arrival_ps - arcs[j].arrival_ps).abs();
+                    if diff > tolerance_ps {
+                        violations.push(FunctionalViolation {
+                            description: format!(
+                                "Path balance violation at DFF: arrival difference {:.1} ps \
+                                 exceeds tolerance {:.1} ps (path A: {}->{}, path B: {}->{})",
+                                diff,
+                                tolerance_ps,
+                                netlist.nodes()[arcs[i].from.node.0].name,
+                                netlist.nodes()[arcs[i].to.node.0].name,
+                                netlist.nodes()[arcs[j].from.node.0].name,
+                                netlist.nodes()[arcs[j].to.node.0].name,
+                            ),
+                            arc_from: arcs[i].from,
+                            arc_to: arcs[i].to,
+                            severity: "error".to_string(),
+                            category: "path_balance".to_string(),
+                            value_ps: diff - tolerance_ps,
+                        });
+                    }
+                }
+            }
+        }
+
+        let pulse_alignment_violations = violations
+            .iter()
+            .filter(|v| v.category == "pulse_alignment")
+            .count();
+        let path_balance_violations = violations
+            .iter()
+            .filter(|v| v.category == "path_balance")
+            .count();
+        let hold_functional_violations =
+            violations.iter().filter(|v| v.category == "hold").count();
+        let capture_window_functional_violations = violations
+            .iter()
+            .filter(|v| v.category == "capture_window")
+            .count();
+        let passed = violations.is_empty();
+
+        Ok(TimingFunctionalReport {
+            total_arcs_checked: timing.arcs.len(),
+            functional_violations: violations,
+            pulse_alignment_violations,
+            path_balance_violations,
+            hold_functional_violations,
+            capture_window_functional_violations,
+            passed,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1260,5 +1529,235 @@ mod tests {
             .check_bounded_sequential_equivalence(&lhs, &rhs, 3)
             .expect("bounded check should run");
         assert!(!report.equivalent);
+    }
+
+    // --- P0-3: TimingFunctionalVerifier tests ---
+
+    use rflux_timing::{TimingArcReport, TimingConfig};
+    use rflux_route::RouteMode;
+    use rflux_tech::SfCellKind;
+
+    fn make_timing_arc(
+        from: rflux_ir::PinRef,
+        to: rflux_ir::PinRef,
+        launch_start: f64,
+        launch_end: f64,
+        capture_start: f64,
+        capture_end: f64,
+        arrival: f64,
+        required: f64,
+        setup_slack: f64,
+        hold_slack: f64,
+    ) -> TimingArcReport {
+        TimingArcReport {
+            from,
+            to,
+            is_false_path: false,
+            driver_kind: SfCellKind::GenericGate,
+            route_mode: RouteMode::Jtl,
+            route_length_um: 10.0,
+            cell_delay_ps: 2.0,
+            wire_delay_ps: 1.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: launch_start,
+            launch_window_end_ps: launch_end,
+            capture_window_start_ps: capture_start,
+            capture_window_end_ps: capture_end,
+            arrival_phase_offset_ps: 0.0,
+            capture_window_slack_ps: capture_end - arrival,
+            capture_window_violation: arrival > capture_end || arrival < capture_start,
+            arrival_ps: arrival,
+            required_ps: required,
+            setup_slack_ps: setup_slack,
+            hold_slack_ps: hold_slack,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
+        }
+    }
+
+    #[test]
+    fn timing_functional_verifier_passes_when_windows_overlap() {
+        let verifier = TimingFunctionalVerifier::new();
+        let netlist = Netlist::new();
+        let from = rflux_ir::PinRef { node: rflux_ir::NodeId(0), port: 0 };
+        let to = rflux_ir::PinRef { node: rflux_ir::NodeId(1), port: 0 };
+        let timing = TimingReport {
+            arcs: vec![make_timing_arc(from, to, 0.0, 4.0, 2.0, 6.0, 3.0, 8.0, 5.0, 3.0)],
+            worst_setup_slack_ps: 5.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 3.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let report = verifier
+            .verify(&netlist, &timing, &TimingConfig::default(), &TimingFunctionalConfig::default())
+            .expect("verify");
+        assert!(report.passed);
+        assert_eq!(report.functional_violations.len(), 0);
+    }
+
+    #[test]
+    fn timing_functional_verifier_detects_pulse_misalignment() {
+        let verifier = TimingFunctionalVerifier::new();
+        let netlist = Netlist::new();
+        let from = rflux_ir::PinRef { node: rflux_ir::NodeId(0), port: 0 };
+        let to = rflux_ir::PinRef { node: rflux_ir::NodeId(1), port: 0 };
+        // Launch window [0, 4], capture window [10, 14] — no overlap
+        let timing = TimingReport {
+            arcs: vec![make_timing_arc(from, to, 0.0, 4.0, 10.0, 14.0, 3.0, 12.0, 9.0, 3.0)],
+            worst_setup_slack_ps: 9.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 3.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let report = verifier
+            .verify(&netlist, &timing, &TimingConfig::default(), &TimingFunctionalConfig::default())
+            .expect("verify");
+        assert!(!report.passed);
+        assert_eq!(report.pulse_alignment_violations, 1);
+        assert_eq!(report.functional_violations[0].category, "pulse_alignment");
+    }
+
+    #[test]
+    fn timing_functional_verifier_detects_hold_as_functional() {
+        let verifier = TimingFunctionalVerifier::new();
+        let netlist = Netlist::new();
+        let from = rflux_ir::PinRef { node: rflux_ir::NodeId(0), port: 0 };
+        let to = rflux_ir::PinRef { node: rflux_ir::NodeId(1), port: 0 };
+        // Windows overlap, arrival inside capture window, but hold slack is negative
+        let timing = TimingReport {
+            arcs: vec![make_timing_arc(from, to, 0.0, 4.0, 2.0, 6.0, 3.0, 8.0, 5.0, -2.0)],
+            worst_setup_slack_ps: 5.0,
+            worst_hold_slack_ps: -2.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 2.0,
+            critical_path_delay_ps: 1.0,
+            setup_violations: 0,
+            hold_violations: 1,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let report = verifier
+            .verify(&netlist, &timing, &TimingConfig::default(), &TimingFunctionalConfig::default())
+            .expect("verify");
+        assert!(!report.passed);
+        assert_eq!(report.hold_functional_violations, 1);
+        assert_eq!(report.functional_violations[0].category, "hold");
+    }
+
+    #[test]
+    fn timing_functional_verifier_skips_false_paths() {
+        let verifier = TimingFunctionalVerifier::new();
+        let netlist = Netlist::new();
+        let from = rflux_ir::PinRef { node: rflux_ir::NodeId(0), port: 0 };
+        let to = rflux_ir::PinRef { node: rflux_ir::NodeId(1), port: 0 };
+        let mut arc = make_timing_arc(from, to, 0.0, 4.0, 10.0, 14.0, 3.0, 12.0, 9.0, -2.0);
+        arc.is_false_path = true;
+        let timing = TimingReport {
+            arcs: vec![arc],
+            worst_setup_slack_ps: 9.0,
+            worst_hold_slack_ps: -2.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 2.0,
+            critical_path_delay_ps: 3.0,
+            setup_violations: 0,
+            hold_violations: 1,
+            capture_window_violations: 0,
+            analyzed_arcs: 0,
+            false_path_arcs: 1,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let report = verifier
+            .verify(&netlist, &timing, &TimingConfig::default(), &TimingFunctionalConfig::default())
+            .expect("verify");
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn timing_functional_verifier_returns_error_for_empty_arcs() {
+        let verifier = TimingFunctionalVerifier::new();
+        let netlist = Netlist::new();
+        let timing = TimingReport {
+            arcs: vec![],
+            worst_setup_slack_ps: 0.0,
+            worst_hold_slack_ps: 0.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 0.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 0,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let err = verifier
+            .verify(&netlist, &timing, &TimingConfig::default(), &TimingFunctionalConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, TimingFunctionalError::NoArcs));
+    }
+
+    #[test]
+    fn timing_functional_verifier_configurable_hold_check() {
+        let verifier = TimingFunctionalVerifier::new();
+        let netlist = Netlist::new();
+        let from = rflux_ir::PinRef { node: rflux_ir::NodeId(0), port: 0 };
+        let to = rflux_ir::PinRef { node: rflux_ir::NodeId(1), port: 0 };
+        let timing = TimingReport {
+            arcs: vec![make_timing_arc(from, to, 0.0, 4.0, 2.0, 6.0, 3.0, 8.0, 5.0, -2.0)],
+            worst_setup_slack_ps: 5.0,
+            worst_hold_slack_ps: -2.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 2.0,
+            critical_path_delay_ps: 3.0,
+            setup_violations: 0,
+            hold_violations: 1,
+            capture_window_violations: 0,
+            analyzed_arcs: 1,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        // Disable hold check
+        let config = TimingFunctionalConfig {
+            hold_as_functional: false,
+            ..TimingFunctionalConfig::default()
+        };
+        let report = verifier
+            .verify(&netlist, &timing, &TimingConfig::default(), &config)
+            .expect("verify");
+        assert!(report.passed);
+        assert_eq!(report.hold_functional_violations, 0);
     }
 }
