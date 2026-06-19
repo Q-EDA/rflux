@@ -1329,7 +1329,7 @@ fn arc_components_ps(
         .interconnect_delay_ps(interconnect_kind(route.mode), route.length_um)
         .ok_or(TimingError::MissingInterconnectTiming(route.mode))?;
     let coupling_extra = coupling_map
-        .map(|cm| cm.coupling_delay_ps(route_index, wire_delay_ps))
+        .map(|cm| cm.coupling_delay_ps(route_index, wire_delay_ps, pdk.coupling_delay_coefficient))
         .unwrap_or(0.0);
     Ok((cell_delay_ps, wire_delay_ps + coupling_extra))
 }

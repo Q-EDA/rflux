@@ -829,18 +829,20 @@ impl CouplingMap {
             .count()
     }
 
-    pub fn coupling_delay_ps(&self, route_index: usize, base_delay_ps: f64) -> f64 {
+    pub fn coupling_delay_ps(&self, route_index: usize, base_delay_ps: f64, coefficient: f64) -> f64 {
+        let coeff = if coefficient > 0.0 { coefficient } else { 0.05 };
         let Some(info) = self.per_net.get(route_index) else {
             return 0.0;
         };
-        base_delay_ps * info.total_coupling_score * 0.05
+        base_delay_ps * info.total_coupling_score * coeff
     }
 
-    pub fn coupling_sigma_ps(&self, route_index: usize, base_delay_ps: f64) -> f64 {
+    pub fn coupling_sigma_ps(&self, route_index: usize, base_delay_ps: f64, coefficient: f64) -> f64 {
+        let coeff = if coefficient > 0.0 { coefficient } else { 0.02 };
         let Some(info) = self.per_net.get(route_index) else {
             return 0.0;
         };
-        base_delay_ps * info.max_coefficient * 0.02
+        base_delay_ps * info.max_coefficient * coeff
     }
 }
 

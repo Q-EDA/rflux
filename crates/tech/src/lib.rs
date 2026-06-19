@@ -381,6 +381,10 @@ pub struct Pdk {
     pub material: Option<SfqMaterialParams>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drc_rules: Option<SfqDrcRules>,
+    #[serde(default)]
+    pub coupling_delay_coefficient: f64,
+    #[serde(default)]
+    pub coupling_sigma_coefficient: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,6 +502,8 @@ impl Pdk {
             ],
             material: Some(SfqMaterialParams::default_sfq5ee()),
             drc_rules: Some(SfqDrcRules::default()),
+            coupling_delay_coefficient: 0.05,
+            coupling_sigma_coefficient: 0.02,
         }
     }
 
