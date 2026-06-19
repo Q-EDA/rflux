@@ -1185,6 +1185,7 @@ name = "rflux-sim"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rflux-ir",
  "thiserror",
 ]
 

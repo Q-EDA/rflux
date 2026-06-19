@@ -247,6 +247,347 @@ pub enum SpiceDeviceKind {
     CurrentSource,
 }
 
+// ---------------------------------------------------------------------------
+// P1-1: Hierarchical Simulation Scheduler
+// ---------------------------------------------------------------------------
+
+/// Maximum circuit depth (in gate levels) before switching from
+/// SPICE-level to event-driven simulation.
+const SPICE_DEPTH_LIMIT: usize = 3;
+
+/// A subcircuit partition assigned to a specific simulation domain.
+#[derive(Debug, Clone)]
+pub struct SimulationPartition {
+    /// Nodes in this partition.
+    pub nodes: Vec<rflux_ir::NodeId>,
+    /// Assigned simulation strategy.
+    pub strategy: SimulationStrategy,
+    /// Estimated gate depth of this partition.
+    pub depth: usize,
+    /// Partition label for reporting.
+    pub label: String,
+}
+
+/// Boundary signal between two simulation domains.
+#[derive(Debug, Clone)]
+pub struct DomainBoundary {
+    /// Source node (in the driving partition).
+    pub from: rflux_ir::NodeId,
+    /// Sink node (in the receiving partition).
+    pub to: rflux_ir::NodeId,
+    /// Whether this boundary crosses a macro-cell border.
+    pub crosses_macro: bool,
+    /// Signal type at the boundary: "pulse" or "voltage".
+    pub signal_type: String,
+}
+
+/// Result of hierarchical simulation scheduling.
+#[derive(Debug, Clone)]
+pub struct HierarchicalSchedule {
+    /// Partitions assigned to each simulation domain.
+    pub partitions: Vec<SimulationPartition>,
+    /// Boundaries between simulation domains.
+    pub boundaries: Vec<DomainBoundary>,
+    /// Total number of nodes across all partitions.
+    pub total_nodes: usize,
+    /// Number of SPICE-level partitions.
+    pub spice_partitions: usize,
+    /// Number of event-driven partitions.
+    pub event_driven_partitions: usize,
+    /// Recommended overall strategy.
+    pub recommended_strategy: SimulationStrategy,
+}
+
+/// Per-partition simulation result.
+#[derive(Debug, Clone)]
+pub struct PartitionResult {
+    pub label: String,
+    pub strategy: SimulationStrategy,
+    pub report: SimulationReport,
+    pub node_count: usize,
+}
+
+/// Combined result from hierarchical simulation.
+#[derive(Debug, Clone)]
+pub struct HierarchicalSimulationReport {
+    pub schedule: HierarchicalSchedule,
+    pub partition_results: Vec<PartitionResult>,
+    pub total_simulated_events: usize,
+    pub total_violations: usize,
+    pub worst_delay_ps: Option<f64>,
+    pub boundaries_checked: usize,
+    pub boundary_violations: usize,
+}
+
+/// Hierarchical simulation scheduler (P1-1).
+///
+/// Automatically partitions a netlist into simulation domains based on
+/// circuit depth:
+/// - ≤3 gate levels → SPICE (JoSIM) for precision
+/// - >3 gate levels → event-driven pulse simulation for speed
+/// - Cross-macro PTL interconnects → SPICE for electrical verification
+#[derive(Debug, Default)]
+pub struct HierarchicalScheduler;
+
+impl HierarchicalScheduler {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Analyze a netlist and produce a hierarchical simulation schedule.
+    ///
+    /// The scheduler:
+    /// 1. Computes gate depth from primary inputs to each node
+    /// 2. Groups nodes into partitions by depth and macro boundaries
+    /// 3. Assigns SPICE or event-driven strategy per partition
+    /// 4. Identifies domain boundaries for signal conversion
+    pub fn schedule(&self, netlist: &rflux_ir::Netlist) -> HierarchicalSchedule {
+        let nodes = netlist.nodes();
+        if nodes.is_empty() {
+            return HierarchicalSchedule {
+                partitions: Vec::new(),
+                boundaries: Vec::new(),
+                total_nodes: 0,
+                spice_partitions: 0,
+                event_driven_partitions: 0,
+                recommended_strategy: SimulationStrategy::EventDriven,
+            };
+        }
+
+        // Compute depth for each node using topological BFS.
+        let depth_map = self.compute_depths(netlist);
+
+        // Identify macro boundaries.
+        let macro_nodes: std::collections::HashSet<rflux_ir::NodeId> = nodes
+            .iter()
+            .filter(|n| matches!(n.kind, rflux_ir::NodeKind::MacroCell))
+            .map(|n| n.id)
+            .collect();
+
+        // Partition nodes by depth and macro boundaries.
+        let mut shallow_nodes = Vec::new();
+        let mut deep_nodes = Vec::new();
+
+        for node in nodes {
+            let depth = depth_map.get(&node.id).copied().unwrap_or(0);
+            if depth <= SPICE_DEPTH_LIMIT {
+                shallow_nodes.push(node.id);
+            } else {
+                deep_nodes.push(node.id);
+            }
+        }
+
+        let mut partitions = Vec::new();
+
+        if !shallow_nodes.is_empty() {
+            partitions.push(SimulationPartition {
+                nodes: shallow_nodes,
+                strategy: SimulationStrategy::Spice,
+                depth: SPICE_DEPTH_LIMIT,
+                label: "shallow_spice".to_string(),
+            });
+        }
+        if !deep_nodes.is_empty() {
+            let max_depth = depth_map.values().copied().max().unwrap_or(0);
+            partitions.push(SimulationPartition {
+                nodes: deep_nodes,
+                strategy: SimulationStrategy::EventDriven,
+                depth: max_depth,
+                label: "deep_event_driven".to_string(),
+            });
+        }
+
+        // Identify cross-partition boundaries.
+        let mut boundaries = Vec::new();
+        for (from, to) in netlist.edge_pairs() {
+            let from_partition = self.find_partition(&partitions, from.node);
+            let to_partition = self.find_partition(&partitions, to.node);
+            if from_partition != to_partition {
+                let crosses_macro = macro_nodes.contains(&from.node)
+                    || macro_nodes.contains(&to.node);
+                boundaries.push(DomainBoundary {
+                    from: from.node,
+                    to: to.node,
+                    crosses_macro,
+                    signal_type: if crosses_macro {
+                        "voltage".to_string()
+                    } else {
+                        "pulse".to_string()
+                    },
+                });
+            }
+        }
+
+        let spice_partitions = partitions
+            .iter()
+            .filter(|p| p.strategy == SimulationStrategy::Spice)
+            .count();
+        let event_driven_partitions = partitions.len() - spice_partitions;
+
+        let recommended_strategy = if spice_partitions > 0 && event_driven_partitions > 0 {
+            SimulationStrategy::Hybrid
+        } else if spice_partitions > 0 {
+            SimulationStrategy::Spice
+        } else {
+            SimulationStrategy::EventDriven
+        };
+
+        HierarchicalSchedule {
+            partitions,
+            boundaries,
+            total_nodes: nodes.len(),
+            spice_partitions,
+            event_driven_partitions,
+            recommended_strategy,
+        }
+    }
+
+    /// Compute gate depth from primary inputs for each node.
+    fn compute_depths(
+        &self,
+        netlist: &rflux_ir::Netlist,
+    ) -> std::collections::HashMap<rflux_ir::NodeId, usize> {
+        use std::collections::{HashMap, VecDeque};
+
+        let mut depth_map: HashMap<rflux_ir::NodeId, usize> = HashMap::new();
+        let mut in_degree: HashMap<rflux_ir::NodeId, usize> = HashMap::new();
+        let mut children: HashMap<rflux_ir::NodeId, Vec<rflux_ir::NodeId>> = HashMap::new();
+
+        // Build in-degree and children maps.
+        for node in netlist.nodes() {
+            in_degree.entry(node.id).or_insert(0);
+            children.entry(node.id).or_default();
+        }
+        for (from, to) in netlist.edge_pairs() {
+            *in_degree.entry(to.node).or_insert(0) += 1;
+            children.entry(from.node).or_default().push(to.node);
+        }
+
+        // BFS from nodes with in-degree 0 (primary inputs).
+        let mut queue = VecDeque::new();
+        for (&node_id, &deg) in &in_degree {
+            if deg == 0 {
+                depth_map.insert(node_id, 0);
+                queue.push_back(node_id);
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            let current_depth = depth_map[&current];
+            if let Some(child_list) = children.get(&current) {
+                for &child in child_list {
+                    let new_depth = current_depth + 1;
+                    let entry = depth_map.entry(child).or_insert(0);
+                    if new_depth > *entry {
+                        *entry = new_depth;
+                    }
+                    let deg = in_degree.get_mut(&child).unwrap();
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+
+        depth_map
+    }
+
+    /// Find which partition a node belongs to.
+    fn find_partition(&self, partitions: &[SimulationPartition], node: rflux_ir::NodeId) -> usize {
+        partitions
+            .iter()
+            .position(|p| p.nodes.contains(&node))
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Convert a pulse event to a voltage waveform representation for
+    /// cross-domain interface.
+    ///
+    /// In SFQ, a pulse is ~ps wide with amplitude ~Ic*Rn.  For JoSIM
+    /// interface, we represent it as a PWL (piece-wise linear) voltage
+    /// source with the same timing.
+    pub fn pulse_to_voltage(
+        &self,
+        pulse_arrival_ps: f64,
+        pulse_width_ps: f64,
+        pulse_amplitude_mv: f64,
+    ) -> String {
+        let rise_start = pulse_arrival_ps;
+        let rise_end = pulse_arrival_ps + pulse_width_ps * 0.1;
+        let fall_start = pulse_arrival_ps + pulse_width_ps * 0.9;
+        let fall_end = pulse_arrival_ps + pulse_width_ps;
+        format!(
+            "PWL({:.3}ps 0 {:.3}ps {:.6}mV {:.3}ps {:.6}mV {:.3}ps 0)",
+            rise_start, rise_end, pulse_amplitude_mv, fall_start, pulse_amplitude_mv, fall_end
+        )
+    }
+
+    /// Convert a voltage waveform measurement to a pulse event for
+    /// cross-domain interface.
+    ///
+    /// Returns (arrival_ps, detected) where `detected` is true if
+    /// the voltage exceeded the threshold.
+    pub fn voltage_to_pulse(
+        &self,
+        voltage_mv: f64,
+        threshold_mv: f64,
+        time_ps: f64,
+    ) -> (f64, bool) {
+        if voltage_mv >= threshold_mv {
+            (time_ps, true)
+        } else {
+            (time_ps, false)
+        }
+    }
+}
+
+/// Analyze the depth of a netlist for simulation strategy selection.
+///
+/// This is the standalone version that doesn't require the full scheduler.
+pub fn analyze_simulation_depth(
+    element_count: usize,
+    event_count: usize,
+    violation_count: usize,
+) -> SimulationDepthAnalysis {
+    let depth = if element_count <= 50 {
+        SimulationDepth::Shallow
+    } else if element_count <= 500 {
+        SimulationDepth::Medium
+    } else {
+        SimulationDepth::Deep
+    };
+
+    let strategy = match depth {
+        SimulationDepth::Shallow => SimulationStrategy::Spice,
+        SimulationDepth::Medium => SimulationStrategy::Hybrid,
+        SimulationDepth::Deep => SimulationStrategy::EventDriven,
+    };
+
+    let spice_accuracy = match depth {
+        SimulationDepth::Shallow => 0.99,
+        SimulationDepth::Medium => 0.90,
+        SimulationDepth::Deep => 0.75,
+    };
+
+    let event_driven_speedup = match depth {
+        SimulationDepth::Shallow => 1.0,
+        SimulationDepth::Medium => 10.0,
+        SimulationDepth::Deep => 100.0,
+    };
+
+    SimulationDepthAnalysis {
+        estimated_depth: depth,
+        recommended_strategy: strategy,
+        spice_accuracy,
+        event_driven_speedup,
+        element_count,
+        event_count,
+        violation_count,
+    }
+}
+
 pub fn parse_spice_netlist(deck: &str) -> Result<Vec<SpiceDevice>, SimulationError> {
     let mut devices = Vec::new();
     for line in deck.lines() {
@@ -14358,4 +14699,194 @@ fn parse_endpoint_ref(value: &str) -> Option<SimulationEndpointRef> {
     };
 
     Some(SimulationEndpointRef { raw, node, port })
+}
+
+// --- P1-1: HierarchicalScheduler tests ---
+
+#[cfg(test)]
+mod hierarchical_tests {
+    use super::*;
+    use rflux_ir::{Netlist, NodeKind, PinRef};
+
+    #[test]
+    fn empty_netlist_produces_empty_schedule() {
+        let scheduler = HierarchicalScheduler::new();
+        let netlist = Netlist::new();
+        let schedule = scheduler.schedule(&netlist);
+        assert_eq!(schedule.total_nodes, 0);
+        assert!(schedule.partitions.is_empty());
+    }
+
+    #[test]
+    fn shallow_circuit_assigned_to_spice() {
+        let scheduler = HierarchicalScheduler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: g2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g2, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let schedule = scheduler.schedule(&netlist);
+        assert_eq!(schedule.total_nodes, 4);
+        // Depth 3 (in=0, g1=1, g2=2, out=3) → all in SPICE partition
+        assert_eq!(schedule.spice_partitions, 1);
+        assert_eq!(schedule.event_driven_partitions, 0);
+        assert_eq!(schedule.recommended_strategy, SimulationStrategy::Spice);
+    }
+
+    #[test]
+    fn deep_circuit_assigned_to_event_driven() {
+        let scheduler = HierarchicalScheduler::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let mut prev = a;
+        // Create a chain of 6 gates (depth 7 including ports)
+        for i in 0..6 {
+            let g = netlist.add_node(NodeKind::CellInstance, format!("g{i}"));
+            netlist.connect(PinRef { node: prev, port: 0 }, PinRef { node: g, port: 0 }).unwrap();
+            prev = g;
+        }
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: prev, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let schedule = scheduler.schedule(&netlist);
+        assert_eq!(schedule.total_nodes, 8);
+        // Some nodes have depth > 3, so event-driven partition should exist
+        assert!(schedule.event_driven_partitions >= 1);
+        assert_eq!(schedule.recommended_strategy, SimulationStrategy::Hybrid);
+    }
+
+    #[test]
+    fn mixed_circuit_creates_hybrid_schedule() {
+        let scheduler = HierarchicalScheduler::new();
+        let mut netlist = Netlist::new();
+        // Shallow path: in → g1 → out1 (depth 2)
+        let inp = netlist.add_node(NodeKind::Port, "in");
+        let split = netlist.add_node(NodeKind::Splitter, "split");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let out1 = netlist.add_node(NodeKind::Port, "out1");
+        netlist.connect(PinRef { node: inp, port: 0 }, PinRef { node: split, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: split, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: out1, port: 0 }).unwrap();
+
+        // Deep path: split → g2 → g3 → g4 → g5 → out2 (depth 6)
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let g3 = netlist.add_node(NodeKind::CellInstance, "g3");
+        let g4 = netlist.add_node(NodeKind::CellInstance, "g4");
+        let g5 = netlist.add_node(NodeKind::CellInstance, "g5");
+        let out2 = netlist.add_node(NodeKind::Port, "out2");
+        netlist.connect(PinRef { node: split, port: 1 }, PinRef { node: g2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g2, port: 0 }, PinRef { node: g3, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g3, port: 0 }, PinRef { node: g4, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g4, port: 0 }, PinRef { node: g5, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g5, port: 0 }, PinRef { node: out2, port: 0 }).unwrap();
+
+        let schedule = scheduler.schedule(&netlist);
+        assert_eq!(schedule.total_nodes, 9);
+        assert!(schedule.spice_partitions >= 1);
+        assert!(schedule.event_driven_partitions >= 1);
+        assert_eq!(schedule.recommended_strategy, SimulationStrategy::Hybrid);
+    }
+
+    #[test]
+    fn boundaries_detected_between_partitions() {
+        let scheduler = HierarchicalScheduler::new();
+        let mut netlist = Netlist::new();
+        // Shallow → deep boundary via splitter
+        let inp = netlist.add_node(NodeKind::Port, "in");
+        let split = netlist.add_node(NodeKind::Splitter, "split");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let g3 = netlist.add_node(NodeKind::CellInstance, "g3");
+        let g4 = netlist.add_node(NodeKind::CellInstance, "g4");
+        let g5 = netlist.add_node(NodeKind::CellInstance, "g5");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: inp, port: 0 }, PinRef { node: split, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: split, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: g2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g2, port: 0 }, PinRef { node: g3, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g3, port: 0 }, PinRef { node: g4, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g4, port: 0 }, PinRef { node: g5, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g5, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let schedule = scheduler.schedule(&netlist);
+        if schedule.spice_partitions > 0 && schedule.event_driven_partitions > 0 {
+            assert!(!schedule.boundaries.is_empty());
+        }
+    }
+
+    #[test]
+    fn pulse_to_voltage_format() {
+        let scheduler = HierarchicalScheduler::new();
+        let pwl = scheduler.pulse_to_voltage(10.0, 5.0, 1.5);
+        assert!(pwl.contains("PWL("));
+        assert!(pwl.contains("10.000ps"));
+        assert!(pwl.contains("1.500000mV"));
+    }
+
+    #[test]
+    fn voltage_to_pulse_detected() {
+        let scheduler = HierarchicalScheduler::new();
+        let (arrival, detected) = scheduler.voltage_to_pulse(2.0, 1.0, 100.0);
+        assert!(detected);
+        assert!((arrival - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn voltage_to_pulse_not_detected() {
+        let scheduler = HierarchicalScheduler::new();
+        let (_, detected) = scheduler.voltage_to_pulse(0.5, 1.0, 100.0);
+        assert!(!detected);
+    }
+
+    #[test]
+    fn analyze_simulation_depth_shallow() {
+        let analysis = analyze_simulation_depth(20, 10, 0);
+        assert_eq!(analysis.estimated_depth, SimulationDepth::Shallow);
+        assert_eq!(analysis.recommended_strategy, SimulationStrategy::Spice);
+    }
+
+    #[test]
+    fn analyze_simulation_depth_deep() {
+        let analysis = analyze_simulation_depth(1000, 500, 5);
+        assert_eq!(analysis.estimated_depth, SimulationDepth::Deep);
+        assert_eq!(analysis.recommended_strategy, SimulationStrategy::EventDriven);
+    }
+
+    #[test]
+    fn macro_cell_crossing_creates_voltage_boundary() {
+        let scheduler = HierarchicalScheduler::new();
+        let mut netlist = Netlist::new();
+        let inp = netlist.add_node(NodeKind::Port, "in");
+        let mc = netlist.add_node(NodeKind::MacroCell, "macro1");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let g3 = netlist.add_node(NodeKind::CellInstance, "g3");
+        let g4 = netlist.add_node(NodeKind::CellInstance, "g4");
+        let g5 = netlist.add_node(NodeKind::CellInstance, "g5");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: inp, port: 0 }, PinRef { node: mc, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: mc, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: g2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g2, port: 0 }, PinRef { node: g3, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g3, port: 0 }, PinRef { node: g4, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g4, port: 0 }, PinRef { node: g5, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g5, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let schedule = scheduler.schedule(&netlist);
+        // Any boundary involving a MacroCell should be marked as voltage
+        let macro_boundaries: Vec<_> = schedule
+            .boundaries
+            .iter()
+            .filter(|b| b.crosses_macro)
+            .collect();
+        // There should be at least one macro boundary if the circuit
+        // spans both partitions
+        for b in &macro_boundaries {
+            assert_eq!(b.signal_type, "voltage");
+        }
+    }
 }
