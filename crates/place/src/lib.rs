@@ -90,6 +90,29 @@ impl Default for PartitionConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SaConfig {
+    pub initial_temperature: f64,
+    pub cooling_rate: f64,
+    pub min_temperature: f64,
+    pub moves_per_temp: usize,
+    pub cost_weight_hpwl: f64,
+    pub cost_weight_congestion: f64,
+}
+
+impl Default for SaConfig {
+    fn default() -> Self {
+        Self {
+            initial_temperature: 1000.0,
+            cooling_rate: 0.95,
+            min_temperature: 1.0,
+            moves_per_temp: 1000,
+            cost_weight_hpwl: 1.0,
+            cost_weight_congestion: 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlaceError {
     #[error("placement requires an acyclic netlist")]
@@ -288,6 +311,180 @@ impl PartitionPlacer {
             width_um: width,
             height_um: y_offset,
         })
+    }
+}
+
+struct SimpleRng {
+    state: u64,
+}
+
+impl SimpleRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn gen_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    fn gen_range(&mut self, low: usize, high: usize) -> usize {
+        (self.gen_u64() as usize) % (high - low) + low
+    }
+
+    fn gen_f64(&mut self) -> f64 {
+        (self.gen_u64() as f64) / (u64::MAX as f64)
+    }
+
+    fn gen_bool(&mut self) -> bool {
+        self.gen_u64().is_multiple_of(2)
+    }
+}
+
+pub struct SaPlacer {
+    config: PlacementConfig,
+    sa_config: SaConfig,
+}
+
+impl SaPlacer {
+    pub fn new(config: PlacementConfig, sa_config: SaConfig) -> Self {
+        Self { config, sa_config }
+    }
+
+    pub fn place(&self, netlist: &Netlist) -> Result<Placement, PlaceError> {
+        let initial = LevelizedPlacer::new().place(netlist, &self.config)?;
+
+        if netlist.node_count() < 3 {
+            return Ok(initial);
+        }
+
+        let optimized = self.simulated_annealing(netlist, initial);
+        Ok(optimized)
+    }
+
+    fn simulated_annealing(&self, netlist: &Netlist, initial: Placement) -> Placement {
+        let mut current = initial.clone();
+        let mut current_cost = self.total_cost(netlist, &current);
+        let mut best = current.clone();
+        let mut best_cost = current_cost;
+        let mut temp = self.sa_config.initial_temperature;
+        let mut rng = SimpleRng::new(42);
+
+        while temp > self.sa_config.min_temperature {
+            for _ in 0..self.sa_config.moves_per_temp {
+                let mut candidate = current.clone();
+                self.random_move(&mut candidate, &mut rng);
+                let candidate_cost = self.total_cost(netlist, &candidate);
+                let delta = candidate_cost - current_cost;
+
+                if delta < 0.0 || rng.gen_f64() < (-delta / temp).exp() {
+                    current = candidate;
+                    current_cost = candidate_cost;
+                    if current_cost < best_cost {
+                        best = current.clone();
+                        best_cost = current_cost;
+                    }
+                }
+            }
+            temp *= self.sa_config.cooling_rate;
+        }
+
+        best
+    }
+
+    fn total_cost(&self, netlist: &Netlist, placement: &Placement) -> f64 {
+        let hpwl = self.compute_hpwl(netlist, placement);
+        let congestion = self.compute_congestion(placement);
+        self.sa_config.cost_weight_hpwl * hpwl
+            + self.sa_config.cost_weight_congestion * congestion
+    }
+
+    fn compute_hpwl(&self, netlist: &Netlist, placement: &Placement) -> f64 {
+        let mut total_hpwl = 0.0;
+        for (from, to) in netlist.edge_pairs() {
+            if let (Some(p_from), Some(p_to)) =
+                (placement.point_of(from.node), placement.point_of(to.node))
+            {
+                let dx = (p_from.x_um - p_to.x_um).abs();
+                let dy = (p_from.y_um - p_to.y_um).abs();
+                total_hpwl += dx + dy;
+            }
+        }
+        total_hpwl
+    }
+
+    fn compute_congestion(&self, placement: &Placement) -> f64 {
+        let mut level_counts = BTreeMap::<usize, usize>::new();
+        for placed in &placement.nodes {
+            *level_counts.entry(placed.level).or_default() += 1;
+        }
+        let max_per_level = if self.config.max_nodes_per_level > 0 {
+            self.config.max_nodes_per_level as f64
+        } else {
+            10.0
+        };
+        level_counts
+            .values()
+            .map(|&count| {
+                let excess = count as f64 - max_per_level;
+                if excess > 0.0 {
+                    excess * excess
+                } else {
+                    0.0
+                }
+            })
+            .sum()
+    }
+
+    fn random_move(&self, placement: &mut Placement, rng: &mut SimpleRng) {
+        let n = placement.nodes.len();
+        if n < 2 {
+            return;
+        }
+
+        let move_type = rng.gen_range(0, 3);
+        match move_type {
+            0 => {
+                let i = rng.gen_range(0, n);
+                let j = rng.gen_range(0, n);
+                if i != j && !self.is_fixed(placement.nodes[i].node) && !self.is_fixed(placement.nodes[j].node) {
+                    let temp_point = placement.nodes[i].point;
+                    placement.nodes[i].point = placement.nodes[j].point;
+                    placement.nodes[j].point = temp_point;
+                    let temp_level = placement.nodes[i].level;
+                    let temp_slot = placement.nodes[i].slot;
+                    placement.nodes[i].level = placement.nodes[j].level;
+                    placement.nodes[i].slot = placement.nodes[j].slot;
+                    placement.nodes[j].level = temp_level;
+                    placement.nodes[j].slot = temp_slot;
+                }
+            }
+            1 => {
+                let i = rng.gen_range(0, n);
+                if !self.is_fixed(placement.nodes[i].node) {
+                    let delta = if rng.gen_bool() { 1 } else { -1 };
+                    let new_slot = (placement.nodes[i].slot as i32 + delta).max(0) as usize;
+                    placement.nodes[i].slot = new_slot;
+                    placement.nodes[i].point.y_um = new_slot as f64 * self.config.y_pitch_um;
+                }
+            }
+            _ => {
+                let i = rng.gen_range(0, n);
+                if !self.is_fixed(placement.nodes[i].node) {
+                    let delta = if rng.gen_bool() { 1 } else { -1 };
+                    let new_level = (placement.nodes[i].level as i32 + delta).max(0) as usize;
+                    placement.nodes[i].level = new_level;
+                    placement.nodes[i].point.x_um = new_level as f64 * self.config.x_pitch_um;
+                }
+            }
+        }
+    }
+
+    fn is_fixed(&self, node: NodeId) -> bool {
+        self.config.fixed_nodes.iter().any(|f| f.node == node)
     }
 }
 
@@ -1177,5 +1374,75 @@ mod tests {
         let sub = extract_subgraph(&netlist, &[a, b]);
         assert_eq!(sub.node_count(), 2);
         assert_eq!(sub.edge_count(), 1);
+    }
+
+    #[test]
+    fn sa_placer_improves_hpwl() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        let d = netlist.add_node(NodeKind::Port, "d");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).ok();
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 }).ok();
+        netlist.connect(PinRef { node: c, port: 0 }, PinRef { node: d, port: 0 }).ok();
+
+        let config = PlacementConfig::default();
+        let sa_config = SaConfig {
+            moves_per_temp: 100,
+            initial_temperature: 100.0,
+            ..Default::default()
+        };
+
+        let placer = SaPlacer::new(config, sa_config);
+        let placement = placer.place(&netlist).unwrap();
+        assert_eq!(placement.nodes.len(), 4);
+    }
+
+    #[test]
+    fn sa_placer_respects_fixed_nodes() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).ok();
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 }).ok();
+
+        let fixed_point = Point { x_um: 200.0, y_um: 216.0 };
+        let config = PlacementConfig {
+            fixed_nodes: vec![FixedNodePlacement { node: b, point: fixed_point }],
+            ..PlacementConfig::default()
+        };
+        let sa_config = SaConfig {
+            moves_per_temp: 100,
+            initial_temperature: 100.0,
+            ..Default::default()
+        };
+
+        let placer = SaPlacer::new(config, sa_config);
+        let placement = placer.place(&netlist).unwrap();
+        let placed_b = placement.nodes.iter().find(|p| p.node == b).unwrap();
+        assert_eq!(placed_b.point, fixed_point);
+    }
+
+    #[test]
+    fn sa_placer_empty_netlist() {
+        let netlist = Netlist::new();
+        let config = PlacementConfig::default();
+        let sa_config = SaConfig::default();
+        let placer = SaPlacer::new(config, sa_config);
+        let placement = placer.place(&netlist).unwrap();
+        assert_eq!(placement.nodes.len(), 0);
+    }
+
+    #[test]
+    fn sa_config_default_values() {
+        let config = SaConfig::default();
+        assert_eq!(config.initial_temperature, 1000.0);
+        assert_eq!(config.cooling_rate, 0.95);
+        assert_eq!(config.min_temperature, 1.0);
+        assert_eq!(config.moves_per_temp, 1000);
+        assert_eq!(config.cost_weight_hpwl, 1.0);
+        assert_eq!(config.cost_weight_congestion, 0.5);
     }
 }
