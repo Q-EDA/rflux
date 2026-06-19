@@ -16,3 +16,6 @@ rayon = { workspace = true, optional = true }
 
 [features]
 parallel = ["rayon"]
+
+[dev-dependencies]
+rflux-place = { path = "../place" }

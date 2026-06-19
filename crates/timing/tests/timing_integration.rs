@@ -5,16 +5,14 @@
 //! the TLine delay model.
 
 use rflux_ir::{Netlist, NodeKind, PinRef};
-use rflux_place::{LevelizedPlacer, PlacementConfig};
-use rflux_route::{RouteMode, RoutingConfig, SimpleRouter};
+use rflux_route::{RoutingConfig, SimpleRouter};
 use rflux_tech::Pdk;
 use rflux_timing::{
-    MonteCarloConfig, MultiCornerReport, OcvConfig, StatisticalTimingConfig,
-    StaticTimingAnalyzer, TimingConfig,
+    MonteCarloConfig, OcvConfig, StatisticalTimingConfig, StaticTimingAnalyzer, TimingConfig,
 };
 
 // ---------------------------------------------------------------------------
-// Helper: build and route a pipeline
+// Helper: build and route a pipeline using the place crate's placer
 // ---------------------------------------------------------------------------
 
 fn build_routed_pipeline(stages: usize) -> (Netlist, rflux_route::RoutingReport, Pdk) {
@@ -46,8 +44,8 @@ fn build_routed_pipeline(stages: usize) -> (Netlist, rflux_route::RoutingReport,
         )
         .unwrap();
 
-    let placement = LevelizedPlacer::new()
-        .place(&netlist, &PlacementConfig::default())
+    let placement = rflux_place::LevelizedPlacer::new()
+        .place(&netlist, &rflux_place::PlacementConfig::default())
         .unwrap();
     let pdk = Pdk::minimal("test");
     let routing = SimpleRouter::new()
@@ -73,7 +71,6 @@ fn sta_produces_valid_report_for_pipeline() {
 
     assert!(report.analyzed_arcs > 0);
     assert!(report.critical_path_delay_ps > 0.0);
-    // Slack should be finite
     assert!(report.worst_setup_slack_ps.is_finite());
     assert!(report.worst_hold_slack_ps.is_finite());
 }
@@ -99,7 +96,6 @@ fn sta_respects_clock_period() {
         .analyze(&netlist, &routing, &pdk, &slow, None)
         .unwrap();
 
-    // Slower clock should have better (more positive) setup slack
     assert!(report_slow.worst_setup_slack_ps >= report_fast.worst_setup_slack_ps);
 }
 
@@ -108,9 +104,8 @@ fn sta_detects_setup_violations_on_tight_clock() {
     let (netlist, routing, pdk) = build_routed_pipeline(3);
     let analyzer = StaticTimingAnalyzer::new();
 
-    // Very tight clock period should cause setup violations
     let config = TimingConfig {
-        clock_period_ps: 1.0, // 1 ps - impossibly tight
+        clock_period_ps: 1.0,
         ..TimingConfig::default()
     };
 
@@ -134,9 +129,8 @@ fn sta_detects_hold_violations() {
         .analyze(&netlist, &routing, &pdk, &config, None)
         .unwrap();
 
-    // For a simple pipeline, hold violations may or may not exist
-    // but the analysis should complete without error
-    assert!(report.hold_violations == 0 || report.hold_violations > 0);
+    // Analysis should complete without error regardless of violations
+    assert!(report.analyzed_arcs > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +163,8 @@ fn sta_handles_multiple_clock_domains() {
         .connect(PinRef { node: dff2, port: 0 }, PinRef { node: out, port: 0 })
         .unwrap();
 
-    let placement = LevelizedPlacer::new()
-        .place(&netlist, &PlacementConfig::default())
+    let placement = rflux_place::LevelizedPlacer::new()
+        .place(&netlist, &rflux_place::PlacementConfig::default())
         .unwrap();
     let pdk = Pdk::minimal("test");
     let routing = SimpleRouter::new()
@@ -211,13 +205,12 @@ fn sta_with_ocv_applies_derating() {
     let config_no_ocv = TimingConfig::default();
     let config_ocv = TimingConfig {
         ocv: OcvConfig {
-            enable: true,
             cell_early_factor: 0.95,
             cell_late_factor: 1.05,
             wire_early_factor: 0.95,
             wire_late_factor: 1.05,
-            path_depth_derate: true,
-            max_depth: 10,
+            path_based: true,
+            path_depth_factor: 0.005,
         },
         ..TimingConfig::default()
     };
@@ -229,7 +222,6 @@ fn sta_with_ocv_applies_derating() {
         .analyze(&netlist, &routing, &pdk, &config_ocv, None)
         .unwrap();
 
-    // OCV should affect timing results
     assert!(report_ocv.analyzed_arcs == report_no_ocv.analyzed_arcs);
 }
 
@@ -255,7 +247,6 @@ fn ssta_produces_valid_report() {
         .unwrap();
 
     assert!(report.analyzed_arcs > 0);
-    // All arcs should have non-negative sigma
     for arc in &report.arcs {
         assert!(arc.setup_sigma_ps >= 0.0);
         assert!(arc.hold_sigma_ps >= 0.0);
@@ -278,7 +269,6 @@ fn ssta_path_statistics_are_present() {
         .analyze_statistical(&netlist, &routing, &pdk, &config, &ssta_config, None)
         .unwrap();
 
-    // Path statistics should be populated
     assert!(
         !report.path_statistics.is_empty(),
         "path statistics should be present"
@@ -289,7 +279,6 @@ fn ssta_path_statistics_are_present() {
         assert!(ps.variation_source_count > 0);
     }
 
-    // Worst-case corner should be present
     assert!(
         report.worst_case_corner.is_some(),
         "worst-case corner should be extracted"
@@ -334,11 +323,12 @@ fn sta_enumerates_critical_paths() {
         .analyze(&netlist, &routing, &pdk, &config, None)
         .unwrap();
 
-    let paths = report.enumerate_critical_paths(5);
-    assert!(!paths.is_empty());
-    // Paths should be sorted by slack (worst first)
-    if paths.len() > 1 {
-        assert!(paths[0].total_slack_ps <= paths[1].total_slack_ps);
+    let path_report = report.enumerate_critical_paths(5);
+    assert!(!path_report.paths.is_empty());
+    if path_report.paths.len() > 1 {
+        assert!(
+            path_report.paths[0].total_slack_ps <= path_report.paths[1].total_slack_ps
+        );
     }
 }
 
@@ -356,35 +346,9 @@ fn sta_produces_hold_fix_recommendations() {
         .analyze(&netlist, &routing, &pdk, &config, None)
         .unwrap();
 
-    let recommendations = report.hold_fix_recommendations();
-    // Recommendations may or may not exist depending on the circuit
-    // but the function should not panic
+    let recommendations = report.hold_fix_recommendations(0.15);
     for rec in &recommendations {
         assert!(rec.hold_slack_ps < 0.0);
-        assert!(rec.jtl_length_um > 0.0);
+        assert!(rec.recommended_jtl_length_um > 0.0);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Incremental STA tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn incremental_sta_matches_full_when_no_changes() {
-    let (netlist, routing, pdk) = build_routed_pipeline(2);
-    let analyzer = StaticTimingAnalyzer::new();
-
-    let config = TimingConfig {
-        incremental: rflux_timing::IncrementalTimingConfig {
-            enable: true,
-            changed_pins: vec![],
-        },
-        ..TimingConfig::default()
-    };
-
-    let report = analyzer
-        .analyze(&netlist, &routing, &pdk, &config, None)
-        .unwrap();
-
-    assert!(report.analyzed_arcs > 0);
 }

@@ -599,7 +599,7 @@ mod tests {
         let report = build_h_tree(&mut netlist, &sinks, &placement, &config);
         assert_eq!(report.phase_count, 2);
         assert_eq!(report.phases.len(), 2);
-        assert!(report.phases.iter().all(|p| p.sinks > 0 || p.buffers >= 0));
+        assert!(report.phases.iter().all(|p| p.sinks > 0 || p.buffers > 0));
     }
 
     #[test]

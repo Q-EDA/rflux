@@ -5,7 +5,8 @@
 
 use rflux_ir::{Netlist, NodeKind, PinRef};
 use rflux_place::{
-    estimate_layout, LevelizedPlacer, PartitionPlacer, PlacementConfig, PlacedNode, SaPlacer,
+    estimate_layout, LevelizedPlacer, PartitionConfig, PartitionPlacer, PlacementConfig,
+    SaConfig, SaPlacer,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,10 +94,8 @@ fn levelized_placer_chain_produces_monotonic_levels() {
         .place(&netlist, &PlacementConfig::default())
         .unwrap();
 
-    // All nodes should be placed
     assert_eq!(placement.nodes.len(), netlist.node_count());
 
-    // Levels should be monotonically increasing for a chain
     let mut prev_level = 0;
     for pn in &placement.nodes {
         assert!(pn.level >= prev_level, "levels must be non-decreasing");
@@ -106,13 +105,12 @@ fn levelized_placer_chain_produces_monotonic_levels() {
 
 #[test]
 fn levelized_placer_tree_spreads_across_levels() {
-    let netlist = build_tree(3); // 8 inputs + 7 gates + 1 output = 16 nodes
+    let netlist = build_tree(3);
     let placement = LevelizedPlacer::new()
         .place(&netlist, &PlacementConfig::default())
         .unwrap();
 
     assert_eq!(placement.nodes.len(), 16);
-    // Tree should use multiple levels
     let max_level = placement.nodes.iter().map(|n| n.level).max().unwrap();
     assert!(max_level >= 3, "tree depth 3 should span at least 3 levels");
 }
@@ -127,7 +125,6 @@ fn levelized_placer_respects_custom_pitch() {
     };
     let placement = LevelizedPlacer::new().place(&netlist, &config).unwrap();
 
-    // Width should scale with pitch
     assert!(placement.width_um >= 100.0);
 }
 
@@ -145,7 +142,6 @@ fn levelized_placer_avoids_blocked_regions() {
     };
     let placement = LevelizedPlacer::new().place(&netlist, &config).unwrap();
 
-    // No node should be inside the blocked region
     for pn in &placement.nodes {
         let in_blocked = pn.point.x_um >= 30.0
             && pn.point.x_um <= 70.0
@@ -190,33 +186,33 @@ fn levelized_placer_handles_macro_halo() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sa_placer_improves_hpwl_over_levelized() {
+fn sa_placer_produces_valid_placement() {
     let netlist = build_tree(3);
-    let config = PlacementConfig::default();
+    let sa = SaPlacer::new(PlacementConfig::default(), SaConfig::default());
+    let placement = sa.place(&netlist).unwrap();
 
-    let levelized = LevelizedPlacer::new().place(&netlist, &config).unwrap();
-    let sa = SaPlacer::new().place(&netlist, &config).unwrap();
-
-    // SA should produce same node count
-    assert_eq!(sa.nodes.len(), levelized.nodes.len());
-    // Both should have valid dimensions
-    assert!(sa.width_um > 0.0);
-    assert!(sa.height_um > 0.0);
+    assert_eq!(placement.nodes.len(), netlist.node_count());
+    assert!(placement.width_um > 0.0);
+    assert!(placement.height_um > 0.0);
 }
 
 #[test]
 fn sa_placer_with_critical_nets_affects_placement() {
     let netlist = build_chain(5);
-    let config = PlacementConfig::default();
-    let critical_nets = vec![PinRef {
-        node: rflux_ir::NodeId(1),
-        port: 0,
-    }];
+    let sa = SaPlacer::new(PlacementConfig::default(), SaConfig::default());
+    let critical_nets = vec![(
+        PinRef {
+            node: rflux_ir::NodeId(1),
+            port: 0,
+        },
+        PinRef {
+            node: rflux_ir::NodeId(2),
+            port: 0,
+        },
+    )];
 
-    let sa_normal = SaPlacer::new().place(&netlist, &config).unwrap();
-    let sa_critical = SaPlacer::new()
-        .place_with_critical_nets(&netlist, &config, &critical_nets)
-        .unwrap();
+    let sa_normal = sa.place(&netlist).unwrap();
+    let sa_critical = sa.place_with_critical_nets(&netlist, &critical_nets).unwrap();
 
     assert_eq!(sa_normal.nodes.len(), sa_critical.nodes.len());
 }
@@ -228,9 +224,11 @@ fn sa_placer_with_critical_nets_affects_placement() {
 #[test]
 fn partition_placer_handles_large_design() {
     let netlist = build_chain(20);
-    let placement = PartitionPlacer::new()
-        .place(&netlist, &PlacementConfig::default())
-        .unwrap();
+    let placer = PartitionPlacer::new(
+        PlacementConfig::default(),
+        PartitionConfig::default(),
+    );
+    let placement = placer.place(&netlist).unwrap();
 
     assert_eq!(placement.nodes.len(), netlist.node_count());
     assert!(placement.width_um > 0.0);
@@ -249,7 +247,6 @@ fn estimate_layout_matches_levelized_for_small_design() {
     assert!(est.height_um > 0.0);
     assert!(est.area_um2 > 0.0);
     assert_eq!(est.placed_nodes, netlist.node_count());
-    // Average wire length should be positive for a chain
     assert!(est.estimated_avg_wire_length_um > 0.0);
 }
 
@@ -300,7 +297,6 @@ fn placement_handles_mixed_node_types() {
         .unwrap();
 
     assert_eq!(placement.nodes.len(), 6);
-    // All nodes should have valid coordinates
     for pn in &placement.nodes {
         assert!(pn.point.x_um.is_finite());
         assert!(pn.point.y_um.is_finite());

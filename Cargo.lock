@@ -1222,6 +1222,7 @@ dependencies = [
  "rayon",
  "rflux-extract",
  "rflux-ir",
+ "rflux-place",
  "rflux-route",
  "rflux-tech",
  "serde",
