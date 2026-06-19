@@ -68,6 +68,20 @@ pub struct RoutingConfig {
     pub clock_layer: u8,
     pub co_route_clock: bool,
     pub clock_congestion_weight: f64,
+    /// Weight for propagation delay in the cost function.
+    /// Default 1.0 means delay dominates; lower values de-prioritize
+    /// delay in favor of reflection/area.
+    pub delay_weight: f64,
+    /// Weight for area cost (JTL is larger than PTL).
+    pub area_weight: f64,
+    /// JTL propagation delay in ps/um (from PDK).
+    pub jtl_delay_ps_per_um: f64,
+    /// PTL propagation delay in ps/um (from PDK).
+    pub ptl_delay_ps_per_um: f64,
+    /// JTL relative area cost per um of wire.
+    pub jtl_area_cost_per_um: f64,
+    /// PTL relative area cost per um of wire.
+    pub ptl_area_cost_per_um: f64,
 }
 
 impl Default for RoutingConfig {
@@ -84,6 +98,12 @@ impl Default for RoutingConfig {
             clock_layer: 0,
             co_route_clock: true,
             clock_congestion_weight: 0.0,
+            delay_weight: 1.0,
+            area_weight: 0.0,
+            jtl_delay_ps_per_um: 0.15,
+            ptl_delay_ps_per_um: 0.10,
+            jtl_area_cost_per_um: 0.5,
+            ptl_area_cost_per_um: 0.2,
         }
     }
 }
@@ -637,6 +657,255 @@ fn manhattan_length(a: Point, b: Point) -> f64 {
     (a.x_um - b.x_um).abs() + (a.y_um - b.y_um).abs()
 }
 
+/// Multi-factor routing cost for a single segment (P0-4).
+///
+/// Combines delay, reflection risk, area, congestion, and coupling
+/// into a single scalar cost.  Weights come from [`RoutingConfig`].
+fn segment_route_cost(
+    start: Point,
+    end: Point,
+    mode: RouteMode,
+    config: &RoutingConfig,
+    congestion: &CongestionMap,
+    coupling_map: Option<&CouplingMap>,
+    pdk: Option<&Pdk>,
+) -> f64 {
+    let length_um = manhattan_length(start, end);
+    if length_um < 0.001 {
+        return 0.0;
+    }
+
+    // Delay cost
+    let delay_per_um = match mode {
+        RouteMode::Jtl => config.jtl_delay_ps_per_um,
+        RouteMode::Ptl => config.ptl_delay_ps_per_um,
+    };
+    let delay_cost = length_um * delay_per_um * config.delay_weight;
+
+    // Reflection risk cost (PTL only)
+    let reflection_cost = if matches!(mode, RouteMode::Ptl) {
+        if let Some(pdk) = pdk {
+            let risk = pdk.ptl_reflection_coefficient(length_um);
+            risk * config.ptl_reflection_risk_weight * length_um
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Area cost
+    let area_per_um = match mode {
+        RouteMode::Jtl => config.jtl_area_cost_per_um,
+        RouteMode::Ptl => config.ptl_area_cost_per_um,
+    };
+    let area_cost = length_um * area_per_um * config.area_weight;
+
+    // Congestion cost
+    let congestion_cost = congestion.usage(start, end) as f64 * config.congestion_weight;
+
+    // Coupling cost
+    let coupling_cost = if let Some(cm) = coupling_map {
+        let layer = match mode {
+            RouteMode::Jtl => config.jtl_layer,
+            RouteMode::Ptl => config.ptl_layer,
+        };
+        cm.estimate_segment_coupling(start, end, layer) * config.coupling_weight
+    } else {
+        0.0
+    };
+
+    delay_cost + reflection_cost + area_cost + congestion_cost + coupling_cost
+}
+
+/// Result of hybrid JTL/PTL route evaluation for a single net.
+#[derive(Debug, Clone)]
+pub struct HybridRouteCandidate {
+    pub route: NetRoute,
+    pub total_cost: f64,
+    pub delay_cost: f64,
+    pub reflection_cost: f64,
+    pub area_cost: f64,
+}
+
+/// Global JTL/PTL route optimizer (P0-4).
+///
+/// For each net, evaluates both JTL-only and PTL-where-allowed routing
+/// options using the multi-factor cost function, then selects the one
+/// with the lower total cost.  This replaces the simple length-threshold
+/// heuristic with an electrical-model-driven decision.
+#[derive(Debug, Default)]
+pub struct HybridRouteOptimizer;
+
+impl HybridRouteOptimizer {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Route a single net with hybrid JTL/PTL optimization.
+    ///
+    /// Returns the best route candidate after evaluating JTL and PTL
+    /// options against the multi-factor cost function.
+    pub fn route_net(
+        &self,
+        netlist: &Netlist,
+        from: PinRef,
+        to: PinRef,
+        placement: &Placement,
+        pdk: &Pdk,
+        config: &RoutingConfig,
+        congestion: &CongestionMap,
+        coupling_map: Option<&CouplingMap>,
+    ) -> Option<HybridRouteCandidate> {
+        let source = placement.point_of(from.node)?;
+        let sink = placement.point_of(to.node)?;
+        let path = choose_route_path(source, sink, config, congestion, coupling_map);
+        if path.is_empty() {
+            return None;
+        }
+
+        let direct_length_um = manhattan_length(source, sink);
+        let length_um = path_length(&path);
+
+        // Boundary ports must stay on JTL.
+        let touches_boundary = {
+            let from_kind = netlist.nodes().get(from.node.0).map(|n| &n.kind);
+            let to_kind = netlist.nodes().get(to.node.0).map(|n| &n.kind);
+            matches!(from_kind, Some(NodeKind::Port)) || matches!(to_kind, Some(NodeKind::Port))
+        };
+
+        // Evaluate JTL option
+        let jtl_cost: f64 = path
+            .iter()
+            .map(|(s, e)| {
+                segment_route_cost(*s, *e, RouteMode::Jtl, config, congestion, coupling_map, Some(pdk))
+            })
+            .sum();
+        let jtl_reflection_cost: f64 = 0.0; // JTL has no reflection
+        let jtl_area_cost: f64 = length_um * config.jtl_area_cost_per_um * config.area_weight;
+
+        // Evaluate PTL option
+        let ptl_allowed = !touches_boundary
+            && length_um >= config.prefer_ptl_from_length_um
+            && pdk.is_ptl_length_allowed(length_um);
+
+        let (best_mode, best_cost, best_reflection_cost, best_area_cost) = if ptl_allowed {
+            let ptl_cost: f64 = path
+                .iter()
+                .map(|(s, e)| {
+                    segment_route_cost(*s, *e, RouteMode::Ptl, config, congestion, coupling_map, Some(pdk))
+                })
+                .sum();
+            let ptl_reflection = pdk.ptl_reflection_coefficient(length_um)
+                * config.ptl_reflection_risk_weight
+                * length_um;
+            let ptl_area = length_um * config.ptl_area_cost_per_um * config.area_weight;
+            let ptl_total = ptl_cost + ptl_reflection;
+
+            if ptl_total < jtl_cost {
+                (RouteMode::Ptl, ptl_total, ptl_reflection, ptl_area)
+            } else {
+                (RouteMode::Jtl, jtl_cost, jtl_reflection_cost, jtl_area_cost)
+            }
+        } else {
+            (RouteMode::Jtl, jtl_cost, jtl_reflection_cost, jtl_area_cost)
+        };
+
+        let layer = match best_mode {
+            RouteMode::Jtl => config.jtl_layer,
+            RouteMode::Ptl => config.ptl_layer,
+        };
+        let segments: Vec<RouteSegment> = path
+            .iter()
+            .map(|(start, end)| RouteSegment {
+                start: *start,
+                end: *end,
+                layer,
+            })
+            .collect();
+
+        Some(HybridRouteCandidate {
+            route: NetRoute {
+                from,
+                to,
+                mode: best_mode,
+                segments,
+                direct_length_um,
+                length_um,
+                is_clock_net: false,
+                clock_phase: None,
+            },
+            total_cost: best_cost,
+            delay_cost: best_cost - best_reflection_cost - best_area_cost,
+            reflection_cost: best_reflection_cost,
+            area_cost: best_area_cost,
+        })
+    }
+
+    /// Route all nets in a netlist with hybrid optimization.
+    pub fn route_all(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+        pdk: &Pdk,
+        config: &RoutingConfig,
+    ) -> Result<(RoutingReport, Vec<HybridRouteCandidate>), RouteError> {
+        let mut routes = Vec::with_capacity(netlist.edge_count());
+        let mut candidates = Vec::with_capacity(netlist.edge_count());
+        let mut total_length_um = 0.0;
+        let mut total_detour_overhead_um = 0.0;
+        let mut detoured_routes = 0usize;
+        let mut jtl_routes = 0usize;
+        let mut ptl_routes = 0usize;
+        let mut congestion = CongestionMap::default();
+        let coupling_radius_um = 10.0;
+
+        for (from, to) in netlist.edge_pairs() {
+            let coupling_map = if config.coupling_weight > 0.0 && !routes.is_empty() {
+                Some(CouplingMap::build(&routes, coupling_radius_um))
+            } else {
+                None
+            };
+            let candidate = self
+                .route_net(netlist, from, to, placement, pdk, config, &congestion, coupling_map.as_ref())
+                .ok_or(RouteError::MissingPlacement)?;
+
+            // Update congestion map
+            for seg in &candidate.route.segments {
+                congestion.increment(seg.start, seg.end);
+            }
+
+            total_length_um += candidate.route.length_um;
+            let detour = (candidate.route.length_um - candidate.route.direct_length_um).max(0.0);
+            total_detour_overhead_um += detour;
+            if detour > 0.0 {
+                detoured_routes += 1;
+            }
+            match candidate.route.mode {
+                RouteMode::Jtl => jtl_routes += 1,
+                RouteMode::Ptl => ptl_routes += 1,
+            }
+            routes.push(candidate.route.clone());
+            candidates.push(candidate);
+        }
+
+        let report = RoutingReport {
+            routes,
+            total_length_um,
+            total_detour_overhead_um,
+            detoured_routes,
+            jtl_routes,
+            ptl_routes,
+            clock_routes: 0,
+            data_routes: netlist.edge_count(),
+            peak_channel_usage: congestion.edge_usage.values().copied().max().unwrap_or(0),
+            co_routed: false,
+        };
+        Ok((report, candidates))
+    }
+}
+
 fn choose_route_path(
     source: Point,
     sink: Point,
@@ -660,23 +929,22 @@ fn choose_route_path(
             let mut best_cost = f64::INFINITY;
             for candidate in candidates {
                 if path_is_clear(&candidate, &config.blocked_regions) {
-                    let length = path_length(&candidate);
-                    let congestion_cost: f64 = candidate
+                    // Use multi-factor cost with JTL as default mode
+                    // for candidate evaluation (P0-4).
+                    let cost: f64 = candidate
                         .iter()
-                        .map(|(start, end)| congestion.usage(*start, *end) as f64 * config.congestion_weight)
+                        .map(|(start, end)| {
+                            segment_route_cost(
+                                *start,
+                                *end,
+                                RouteMode::Jtl,
+                                config,
+                                congestion,
+                                coupling_map,
+                                None,
+                            )
+                        })
                         .sum();
-                    let coupling_cost: f64 = if let Some(cm) = coupling_map {
-                        candidate
-                            .iter()
-                            .map(|(start, end)| {
-                                cm.estimate_segment_coupling(*start, *end, config.jtl_layer)
-                                    * config.coupling_weight
-                            })
-                            .sum()
-                    } else {
-                        0.0
-                    };
-                    let cost = length + congestion_cost + coupling_cost;
                     if cost < best_cost {
                         best_cost = cost;
                         best_clear = Some(candidate);
@@ -755,16 +1023,19 @@ fn shortest_grid_path(
 
         #[allow(clippy::map_unwrap_or)]
         let adjacent_nodes = adjacency.get(&node).map(Vec::as_slice).unwrap_or(&[]);
-        for &(next, weight) in adjacent_nodes {
-            let congestion_penalty =
-                congestion.usage(points[node], points[next]) as f64 * config.congestion_weight;
-            let coupling_penalty = if let Some(cm) = coupling_map {
-                cm.estimate_segment_coupling(points[node], points[next], config.jtl_layer)
-                    * config.coupling_weight
-            } else {
-                0.0
-            };
-            let next_cost = cost + weight + congestion_penalty + coupling_penalty;
+        for &(next, _weight) in adjacent_nodes {
+            // Use multi-factor cost (P0-4).  Default to JTL mode for
+            // grid search; the hybrid optimizer selects mode later.
+            let edge_cost = segment_route_cost(
+                points[node],
+                points[next],
+                RouteMode::Jtl,
+                config,
+                congestion,
+                coupling_map,
+                None,
+            );
+            let next_cost = cost + edge_cost;
             if next_cost < dist[next] {
                 dist[next] = next_cost;
                 prev[next] = Some(node);
@@ -2823,5 +3094,126 @@ mod tests {
         // Clock and data share congestion map, so peak_channel_usage
         // should reflect both.
         assert!(report.peak_channel_usage > 0 || report.routes.len() == 2);
+    }
+
+    #[test]
+    fn hybrid_optimizer_selects_jtl_for_short_net() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        let placement = LevelizedPlacer::new()
+            .place(&netlist, &PlacementConfig::default())
+            .unwrap();
+
+        let optimizer = HybridRouteOptimizer::new();
+        let (report, candidates) = optimizer
+            .route_all(&netlist, &placement, &Pdk::minimal("test"), &RoutingConfig::default())
+            .unwrap();
+
+        assert_eq!(report.routes.len(), 1);
+        assert_eq!(report.jtl_routes, 1);
+        assert_eq!(report.ptl_routes, 0);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].total_cost >= 0.0);
+    }
+
+    #[test]
+    fn hybrid_optimizer_selects_ptl_for_long_net() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 100.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .unwrap();
+
+        let optimizer = HybridRouteOptimizer::new();
+        let (report, _) = optimizer
+            .route_all(&netlist, &placement, &Pdk::minimal("test"), &RoutingConfig::default())
+            .unwrap();
+
+        // Long net should prefer PTL
+        assert_eq!(report.ptl_routes, 1);
+        assert_eq!(report.jtl_routes, 0);
+    }
+
+    #[test]
+    fn hybrid_optimizer_avoids_ptl_forbidden_range() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 100.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .unwrap();
+
+        let mut pdk = Pdk::minimal("test");
+        pdk.ptl_forbidden_ranges.push(rflux_tech::LengthRange {
+            min_um: 80.0,
+            max_um: 120.0,
+        });
+
+        let optimizer = HybridRouteOptimizer::new();
+        let (report, _) = optimizer
+            .route_all(&netlist, &placement, &pdk, &RoutingConfig::default())
+            .unwrap();
+
+        // Should fall back to JTL when PTL length is forbidden
+        assert_eq!(report.jtl_routes, 1);
+        assert_eq!(report.ptl_routes, 0);
+    }
+
+    #[test]
+    fn hybrid_optimizer_cost_breakdown_is_nonzero() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .unwrap();
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 100.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .unwrap();
+
+        let optimizer = HybridRouteOptimizer::new();
+        let (_, candidates) = optimizer
+            .route_all(&netlist, &placement, &Pdk::minimal("test"), &RoutingConfig::default())
+            .unwrap();
+
+        let c = &candidates[0];
+        assert!(c.total_cost > 0.0);
+        assert!(c.delay_cost > 0.0);
     }
 }
