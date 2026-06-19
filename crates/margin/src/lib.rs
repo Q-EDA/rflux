@@ -439,6 +439,147 @@ pub fn analyze_margin(
     }
 }
 
+// ---------------------------------------------------------------------------
+// P1-3: SSTA vs Monte Carlo cross-validation
+// ---------------------------------------------------------------------------
+
+use rflux_timing::StatisticalTimingConfig;
+
+/// Result of SSTA vs Monte Carlo cross-validation (P1-3).
+#[derive(Debug, Clone, Serialize)]
+pub struct SstaValidationReport {
+    /// Number of Monte Carlo samples used.
+    pub mc_samples: usize,
+    /// Monte Carlo mean setup slack (ps).
+    pub mc_mean_setup_slack_ps: f64,
+    /// Monte Carlo std dev of setup slack (ps).
+    pub mc_std_setup_slack_ps: f64,
+    /// Monte Carlo mean hold slack (ps).
+    pub mc_mean_hold_slack_ps: f64,
+    /// Monte Carlo std dev of hold slack (ps).
+    pub mc_std_hold_slack_ps: f64,
+    /// SSTA predicted setup sigma (ps).
+    pub ssta_setup_sigma_ps: f64,
+    /// SSTA predicted hold sigma (ps).
+    pub ssta_hold_sigma_ps: f64,
+    /// Relative error: |MC_std - SSTA_sigma| / SSTA_sigma for setup.
+    pub setup_sigma_error: f64,
+    /// Relative error: |MC_std - SSTA_sigma| / SSTA_sigma for hold.
+    pub hold_sigma_error: f64,
+    /// Whether both errors are within the tolerance (default 10%).
+    pub validated: bool,
+    /// Tolerance used for validation.
+    pub tolerance: f64,
+}
+
+/// Validate SSTA predictions against Monte Carlo simulation (P1-3).
+///
+/// Runs both SSTA and Monte Carlo on the same netlist/routing/PDK,
+/// then compares the predicted sigma values.  Returns a report with
+/// the error metrics and a pass/fail verdict.
+pub fn validate_ssta(
+    netlist: &Netlist,
+    routing: &RoutingReport,
+    pdk: &Pdk,
+    timing_config: &TimingConfig,
+    mc_samples: usize,
+    seed: u64,
+    tolerance: f64,
+) -> SstaValidationReport {
+    let analyzer = StaticTimingAnalyzer::new();
+
+    // Run SSTA
+    let ssta_config = StatisticalTimingConfig {
+        cell_delay_sigma_ratio: 0.05,
+        wire_delay_sigma_ratio: 0.05,
+        ..Default::default()
+    };
+    let ssta_report =
+        analyzer.analyze_statistical(netlist, routing, pdk, timing_config, &ssta_config, None);
+
+    let (ssta_setup_sigma, ssta_hold_sigma) = match &ssta_report {
+        Ok(report) => {
+            let setup = report
+                .arcs
+                .iter()
+                .map(|a| a.setup_sigma_ps)
+                .fold(0.0f64, f64::max);
+            let hold = report
+                .arcs
+                .iter()
+                .map(|a| a.hold_sigma_ps)
+                .fold(0.0f64, f64::max);
+            (setup, hold)
+        }
+        Err(_) => (0.0, 0.0),
+    };
+
+    // Run Monte Carlo
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut setup_slacks = Vec::new();
+    let mut hold_slacks = Vec::new();
+
+    for _ in 0..mc_samples {
+        let mut sample_pdk = pdk.clone();
+        for timing in &mut sample_pdk.cell_timing {
+            let noise: f64 = rng.gen_range(-1.0..1.0);
+            timing.intrinsic_delay_ps *= 1.0 + noise * 0.05;
+        }
+        for timing in &mut sample_pdk.interconnect_timing {
+            for point in &mut timing.points {
+                let noise: f64 = rng.gen_range(-1.0..1.0);
+                point.delay_ps *= 1.0 + noise * 0.05;
+            }
+        }
+
+        if let Ok(report) = analyzer.analyze(netlist, routing, &sample_pdk, timing_config, None) {
+            setup_slacks.push(report.worst_setup_slack_ps);
+            hold_slacks.push(report.worst_hold_slack_ps);
+        }
+    }
+
+    let n = setup_slacks.len() as f64;
+    let (mc_mean_setup, mc_std_setup) = if n > 0.0 {
+        let mean = setup_slacks.iter().sum::<f64>() / n;
+        let std = (setup_slacks.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n).sqrt();
+        (mean, std)
+    } else {
+        (0.0, 0.0)
+    };
+    let (mc_mean_hold, mc_std_hold) = if n > 0.0 {
+        let mean = hold_slacks.iter().sum::<f64>() / n;
+        let std = (hold_slacks.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n).sqrt();
+        (mean, std)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let setup_sigma_error = if ssta_setup_sigma > 0.0 {
+        ((mc_std_setup - ssta_setup_sigma) / ssta_setup_sigma).abs()
+    } else {
+        0.0
+    };
+    let hold_sigma_error = if ssta_hold_sigma > 0.0 {
+        ((mc_std_hold - ssta_hold_sigma) / ssta_hold_sigma).abs()
+    } else {
+        0.0
+    };
+
+    SstaValidationReport {
+        mc_samples: setup_slacks.len(),
+        mc_mean_setup_slack_ps: mc_mean_setup,
+        mc_std_setup_slack_ps: mc_std_setup,
+        mc_mean_hold_slack_ps: mc_mean_hold,
+        mc_std_hold_slack_ps: mc_std_hold,
+        ssta_setup_sigma_ps: ssta_setup_sigma,
+        ssta_hold_sigma_ps: ssta_hold_sigma,
+        setup_sigma_error,
+        hold_sigma_error,
+        validated: setup_sigma_error <= tolerance && hold_sigma_error <= tolerance,
+        tolerance,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

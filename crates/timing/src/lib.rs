@@ -595,7 +595,7 @@ pub struct NoiseMarginReport {
     pub temperature_k: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Per-arc statistical timing result with mean and sigma.
 pub struct StatisticalTimingArcReport {
     pub from: PinRef,
@@ -622,7 +622,7 @@ pub struct StatisticalTimingArcReport {
     pub pessimistic_hold_slack_ps: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Complete SSTA result for a netlist.
 pub struct StatisticalTimingReport {
     pub arcs: Vec<StatisticalTimingArcReport>,
@@ -632,6 +632,59 @@ pub struct StatisticalTimingReport {
     pub hold_risk_violations: usize,
     pub analyzed_arcs: usize,
     pub false_path_arcs: usize,
+    /// Per-path statistics (P1-3): mean, sigma, skewness for each
+    /// timing arc.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_statistics: Vec<PathStatistic>,
+    /// Worst-case corner extracted from SSTA (P1-3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worst_case_corner: Option<WorstCaseCorner>,
+}
+
+/// Per-path timing statistics (P1-3).
+///
+/// Reports the mean, standard deviation, and skewness of the arrival
+/// time along each timing arc, enabling path-based statistical analysis.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PathStatistic {
+    pub from: PinRef,
+    pub to: PinRef,
+    /// Mean arrival time (ps).
+    pub mean_arrival_ps: f64,
+    /// Standard deviation of arrival time (ps).
+    pub sigma_arrival_ps: f64,
+    /// Skewness of arrival time distribution.
+    pub skewness: f64,
+    /// 3σ pessimistic arrival time (mean + 3*sigma).
+    pub pessimistic_3sigma_ps: f64,
+    /// Mean setup slack (ps).
+    pub mean_setup_slack_ps: f64,
+    /// 3σ pessimistic setup slack.
+    pub pessimistic_setup_slack_3sigma_ps: f64,
+    /// Number of variation sources contributing to this path's sigma.
+    pub variation_source_count: usize,
+}
+
+/// Worst-case corner parameters extracted from SSTA (P1-3).
+///
+/// Represents the process corner that produces the worst timing,
+/// suitable for feeding into deterministic STA as a fixed corner.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorstCaseCorner {
+    /// Cell delay scaling factor at the worst-case corner.
+    pub cell_delay_scale: f64,
+    /// Wire delay scaling factor at the worst-case corner.
+    pub wire_delay_scale: f64,
+    /// Clock uncertainty at the worst-case corner (ps).
+    pub clock_uncertainty_ps: f64,
+    /// Worst-case setup slack (ps).
+    pub worst_setup_slack_ps: f64,
+    /// Worst-case hold slack (ps).
+    pub worst_hold_slack_ps: f64,
+    /// Sigma multiplier used for this corner.
+    pub sigma_multiplier: f64,
+    /// Description of the corner.
+    pub description: String,
 }
 
 #[derive(Debug, Error)]
@@ -1479,6 +1532,80 @@ impl StaticTimingAnalyzer {
             });
         }
 
+        // Build path statistics (P1-3)
+        let path_statistics: Vec<PathStatistic> = arcs
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| !a.is_false_path)
+            .map(|(i, a)| {
+                let sigma = arc_setup_sigma[i];
+                // Skewness approximation: positive means right-tailed
+                // (more likely to have late arrivals)
+                let skewness = if sigma > 0.0 {
+                    (a.setup_slack_ps - a.pessimistic_setup_slack_ps) / (sigma * 3.0)
+                } else {
+                    0.0
+                };
+                let variation_sources = [
+                    statistical_config.cell_delay_sigma_ratio > 0.0,
+                    statistical_config.wire_delay_sigma_ratio > 0.0,
+                    statistical_config.global_cell_delay_sigma_ratio > 0.0,
+                    statistical_config.global_wire_delay_sigma_ratio > 0.0,
+                    statistical_config.clock_uncertainty_sigma_ps > 0.0,
+                ]
+                .iter()
+                .filter(|&&v| v)
+                .count();
+                PathStatistic {
+                    from: a.from,
+                    to: a.to,
+                    mean_arrival_ps: a.mean_arrival_ps,
+                    sigma_arrival_ps: sigma,
+                    skewness,
+                    pessimistic_3sigma_ps: a.mean_arrival_ps + 3.0 * sigma,
+                    mean_setup_slack_ps: a.setup_slack_ps,
+                    pessimistic_setup_slack_3sigma_ps: a.pessimistic_setup_slack_ps,
+                    variation_source_count: variation_sources,
+                }
+            })
+            .collect();
+
+        // Extract worst-case corner (P1-3)
+        let worst_case_corner = if worst_pessimistic_setup_slack_ps.is_finite()
+            || worst_pessimistic_hold_slack_ps.is_finite()
+        {
+            Some(WorstCaseCorner {
+                cell_delay_scale: 1.0
+                    + statistical_config.sigma_multiplier
+                        * statistical_config.cell_delay_sigma_ratio,
+                wire_delay_scale: 1.0
+                    + statistical_config.sigma_multiplier
+                        * statistical_config.wire_delay_sigma_ratio,
+                clock_uncertainty_ps: statistical_config.clock_uncertainty_sigma_ps
+                    * statistical_config.sigma_multiplier,
+                worst_setup_slack_ps: if worst_pessimistic_setup_slack_ps.is_finite() {
+                    worst_pessimistic_setup_slack_ps
+                } else {
+                    config.clock_period_ps
+                },
+                worst_hold_slack_ps: if worst_pessimistic_hold_slack_ps.is_finite() {
+                    worst_pessimistic_hold_slack_ps
+                } else {
+                    0.0
+                },
+                sigma_multiplier: statistical_config.sigma_multiplier,
+                description: format!(
+                    "{}σ worst-case: cell={:.1}%, wire={:.1}%, clock_unc={:.1}ps",
+                    statistical_config.sigma_multiplier,
+                    statistical_config.cell_delay_sigma_ratio * 100.0,
+                    statistical_config.wire_delay_sigma_ratio * 100.0,
+                    statistical_config.clock_uncertainty_sigma_ps,
+                ),
+            })
+        } else {
+            None
+        };
+
         Ok(StatisticalTimingReport {
             arcs,
             worst_pessimistic_setup_slack_ps: if worst_pessimistic_setup_slack_ps.is_finite() {
@@ -1495,6 +1622,8 @@ impl StaticTimingAnalyzer {
             hold_risk_violations,
             analyzed_arcs: report.analyzed_arcs,
             false_path_arcs: report.false_path_arcs,
+            path_statistics,
+            worst_case_corner,
         })
     }
 
