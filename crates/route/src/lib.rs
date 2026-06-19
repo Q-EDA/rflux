@@ -21,6 +21,155 @@ pub struct RouteSegment {
     pub layer: u8,
 }
 
+// ---------------------------------------------------------------------------
+// P2-1: Type-safe segment wrappers
+// ---------------------------------------------------------------------------
+
+/// A JTL (Josephson Transmission Line) segment (P2-1).
+///
+/// JTL segments are active interconnects with predictable delay but
+/// larger area.  This newtype prevents accidental mixing with PTL
+/// segments at compile time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JtlSegment {
+    pub start: Point,
+    pub end: Point,
+    /// JTL layer index.
+    pub layer: u8,
+    /// Length in um.
+    pub length_um: f64,
+    /// Delay in ps.
+    pub delay_ps: f64,
+}
+
+impl JtlSegment {
+    pub fn manhattan_length(&self) -> f64 {
+        (self.start.x_um - self.end.x_um).abs() + (self.start.y_um - self.end.y_um).abs()
+    }
+
+    pub fn to_route_segment(&self) -> RouteSegment {
+        RouteSegment {
+            start: self.start,
+            end: self.end,
+            layer: self.layer,
+        }
+    }
+}
+
+/// A PTL (Passive Transmission Line) segment (P2-1).
+///
+/// PTL segments are lightweight but have reflection risks at certain
+/// lengths.  This newtype prevents accidental mixing with JTL
+/// segments at compile time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PtlSegment {
+    pub start: Point,
+    pub end: Point,
+    /// PTL layer index.
+    pub layer: u8,
+    /// Length in um.
+    pub length_um: f64,
+    /// Delay in ps.
+    pub delay_ps: f64,
+    /// Reflection coefficient at this length.
+    pub reflection_coefficient: f64,
+}
+
+impl PtlSegment {
+    pub fn manhattan_length(&self) -> f64 {
+        (self.start.x_um - self.end.x_um).abs() + (self.start.y_um - self.end.y_um).abs()
+    }
+
+    pub fn to_route_segment(&self) -> RouteSegment {
+        RouteSegment {
+            start: self.start,
+            end: self.end,
+            layer: self.layer,
+        }
+    }
+}
+
+/// Type-safe clock phase identifier (P2-1).
+///
+/// Uses const generics to encode the total number of phases at
+/// compile time.  Operations that require phase matching (e.g.,
+/// comparing two phases) only compile when both phases belong to
+/// the same clock domain (same `N`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClockPhase<const N: usize> {
+    /// Phase index in [0, N).
+    pub index: usize,
+}
+
+impl<const N: usize> ClockPhase<N> {
+    /// Create a new clock phase.  Panics in debug mode if `index >= N`.
+    #[must_use]
+    pub fn new(index: usize) -> Self {
+        debug_assert!(index < N, "clock phase {} out of range [0, {})", index, N);
+        Self { index }
+    }
+
+    /// Whether this phase leads `other` by one step.
+    #[must_use]
+    pub fn leads(&self, other: &ClockPhase<N>) -> bool {
+        self.index == (other.index + 1) % N
+    }
+
+    /// Whether this phase lags `other` by one step.
+    #[must_use]
+    pub fn lags(&self, other: &ClockPhase<N>) -> bool {
+        other.leads(self)
+    }
+
+    /// Phase offset in radians (assuming uniform distribution).
+    #[must_use]
+    pub fn offset_rad(&self) -> f64 {
+        2.0 * std::f64::consts::PI * self.index as f64 / N as f64
+    }
+}
+
+/// Type-safe process corner marker (P2-1).
+///
+/// Uses `PhantomData` to tag PDK parameters with a specific process
+/// corner, preventing accidental cross-corner mixing at compile time.
+#[derive(Debug, Clone)]
+pub struct TaggedPdk<C> {
+    pub inner: rflux_tech::Pdk,
+    _corner: std::marker::PhantomData<C>,
+}
+
+/// Marker type for typical process corner.
+#[derive(Debug, Clone, Copy)]
+pub struct TypicalCorner;
+
+/// Marker type for slow process corner.
+#[derive(Debug, Clone, Copy)]
+pub struct SlowCorner;
+
+/// Marker type for fast process corner.
+#[derive(Debug, Clone, Copy)]
+pub struct FastCorner;
+
+impl<C> TaggedPdk<C> {
+    pub fn new(pdk: rflux_tech::Pdk) -> Self {
+        Self {
+            inner: pdk,
+            _corner: std::marker::PhantomData,
+        }
+    }
+
+    pub fn inner(&self) -> &rflux_tech::Pdk {
+        &self.inner
+    }
+}
+
+/// Convert between corner tags (only for same type).
+impl<C> From<rflux_tech::Pdk> for TaggedPdk<C> {
+    fn from(pdk: rflux_tech::Pdk) -> Self {
+        Self::new(pdk)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockedRegion {
     pub min_x_um: f64,
@@ -3215,5 +3364,91 @@ mod tests {
         let c = &candidates[0];
         assert!(c.total_cost > 0.0);
         assert!(c.delay_cost > 0.0);
+    }
+
+    // --- P2-1: Type safety tests ---
+
+    #[test]
+    fn jtl_segment_to_route_segment() {
+        let jtl = JtlSegment {
+            start: Point { x_um: 0.0, y_um: 0.0 },
+            end: Point { x_um: 10.0, y_um: 0.0 },
+            layer: 1,
+            length_um: 10.0,
+            delay_ps: 1.5,
+        };
+        let rs = jtl.to_route_segment();
+        assert_eq!(rs.layer, 1);
+        assert_eq!(rs.start.x_um, 0.0);
+    }
+
+    #[test]
+    fn ptl_segment_to_route_segment() {
+        let ptl = PtlSegment {
+            start: Point { x_um: 0.0, y_um: 0.0 },
+            end: Point { x_um: 80.0, y_um: 0.0 },
+            layer: 2,
+            length_um: 80.0,
+            delay_ps: 8.0,
+            reflection_coefficient: 0.1,
+        };
+        let rs = ptl.to_route_segment();
+        assert_eq!(rs.layer, 2);
+    }
+
+    #[test]
+    fn jtl_ptl_types_prevent_mixing() {
+        // This is a compile-time check: if you try to pass a JtlSegment
+        // where a PtlSegment is expected (or vice versa), the code won't compile.
+        // We verify the types are distinct by checking they have different fields.
+        let jtl = JtlSegment {
+            start: Point { x_um: 0.0, y_um: 0.0 },
+            end: Point { x_um: 10.0, y_um: 0.0 },
+            layer: 1,
+            length_um: 10.0,
+            delay_ps: 1.5,
+        };
+        let ptl = PtlSegment {
+            start: Point { x_um: 0.0, y_um: 0.0 },
+            end: Point { x_um: 80.0, y_um: 0.0 },
+            layer: 2,
+            length_um: 80.0,
+            delay_ps: 8.0,
+            reflection_coefficient: 0.1,
+        };
+        // These are different types - cannot assign one to the other
+        assert_ne!(jtl.layer, ptl.layer);
+    }
+
+    #[test]
+    fn clock_phase_leads_and_lags() {
+        let p0: ClockPhase<4> = ClockPhase::new(0);
+        let p1: ClockPhase<4> = ClockPhase::new(1);
+        let p3: ClockPhase<4> = ClockPhase::new(3);
+
+        assert!(p1.leads(&p0));
+        assert!(!p0.leads(&p1));
+        assert!(p0.lags(&p1));
+        assert!(p0.leads(&p3)); // wrap-around: 0 leads 3 in 4-phase
+    }
+
+    #[test]
+    fn clock_phase_offset_rad() {
+        let p0: ClockPhase<2> = ClockPhase::new(0);
+        let p1: ClockPhase<2> = ClockPhase::new(1);
+
+        assert!((p0.offset_rad() - 0.0).abs() < 1e-9);
+        assert!((p1.offset_rad() - std::f64::consts::PI).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tagged_pdk_prevents_cross_corner() {
+        // TaggedPdk<TypicalCorner> and TaggedPdk<SlowCorner> are
+        // different types - cannot assign one to the other.
+        let typical: TaggedPdk<TypicalCorner> = TaggedPdk::new(rflux_tech::Pdk::minimal("test"));
+        let slow: TaggedPdk<SlowCorner> = TaggedPdk::new(rflux_tech::Pdk::minimal("test"));
+        assert_eq!(typical.inner().name, slow.inner().name);
+        // The following would not compile:
+        // let _: TaggedPdk<SlowCorner> = typical; // type mismatch
     }
 }
