@@ -4739,6 +4739,10 @@ mod tests {
                 detoured_routes: 0,
                 jtl_routes: 0,
                 ptl_routes: 0,
+                clock_routes: 0,
+                data_routes: 0,
+                peak_channel_usage: 0,
+                co_routed: false,
             },
             effective_routing_config: RoutingConfig::default(),
             reflection: rflux_route::ReflectionReport {
@@ -4903,6 +4907,10 @@ mod tests {
                 detoured_routes: 0,
                 jtl_routes: 1,
                 ptl_routes: 0,
+                clock_routes: 0,
+                data_routes: 0,
+                peak_channel_usage: 0,
+                co_routed: false,
             },
             effective_routing_config: RoutingConfig::default(),
             reflection: rflux_route::ReflectionReport {
@@ -5059,6 +5067,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                    is_clock_net: false,
+                    clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -5073,6 +5083,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                    is_clock_net: false,
+                    clock_phase: None,
                 },
             ],
             total_length_um: 80.0,
@@ -5080,6 +5092,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 2,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 2,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let timing = StaticTimingAnalyzer::new()

@@ -1117,6 +1117,7 @@ name = "rflux-ir"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1214,6 +1215,7 @@ name = "rflux-timing"
 version = "0.1.0"
 dependencies = [
  "rand 0.8.6",
+ "rayon",
  "rflux-extract",
  "rflux-ir",
  "rflux-route",

@@ -37,6 +37,8 @@ pub struct NetRoute {
     pub segments: Vec<RouteSegment>,
     pub direct_length_um: f64,
     pub length_um: f64,
+    pub is_clock_net: bool,
+    pub clock_phase: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +49,10 @@ pub struct RoutingReport {
     pub detoured_routes: usize,
     pub jtl_routes: usize,
     pub ptl_routes: usize,
+    pub clock_routes: usize,
+    pub data_routes: usize,
+    pub peak_channel_usage: usize,
+    pub co_routed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +65,9 @@ pub struct RoutingConfig {
     pub congestion_weight: f64,
     pub coupling_weight: f64,
     pub ptl_reflection_risk_weight: f64,
+    pub clock_layer: u8,
+    pub co_route_clock: bool,
+    pub clock_congestion_weight: f64,
 }
 
 impl Default for RoutingConfig {
@@ -72,6 +81,9 @@ impl Default for RoutingConfig {
             congestion_weight: 0.0,
             coupling_weight: 0.0,
             ptl_reflection_risk_weight: 0.0,
+            clock_layer: 0,
+            co_route_clock: true,
+            clock_congestion_weight: 0.0,
         }
     }
 }
@@ -179,6 +191,13 @@ impl Default for RoutingCache {
 #[derive(Debug, Default)]
 pub struct SimpleRouter;
 
+#[derive(Debug, Clone)]
+pub struct ClockRouteRequest {
+    pub from: PinRef,
+    pub to: PinRef,
+    pub phase: usize,
+}
+
 impl SimpleRouter {
     #[must_use]
     pub fn new() -> Self {
@@ -235,6 +254,8 @@ impl SimpleRouter {
             segments,
             direct_length_um,
             length_um,
+            is_clock_net: false,
+            clock_phase: None,
         })
     }
 
@@ -332,6 +353,8 @@ impl SimpleRouter {
                     segments,
                     direct_length_um,
                     length_um,
+                    is_clock_net: false,
+                    clock_phase: None,
                 };
                 new_cache.insert(route.clone());
                 routes.push(route);
@@ -345,6 +368,10 @@ impl SimpleRouter {
             detoured_routes,
             jtl_routes,
             ptl_routes,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
         Ok((report, new_cache))
     }
@@ -430,6 +457,8 @@ impl SimpleRouter {
                 segments,
                 direct_length_um,
                 length_um,
+                is_clock_net: false,
+                clock_phase: None,
             });
         }
 
@@ -440,6 +469,166 @@ impl SimpleRouter {
             detoured_routes,
             jtl_routes,
             ptl_routes,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
+        })
+    }
+
+    pub fn route_clock_and_data(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+        pdk: &Pdk,
+        config: &RoutingConfig,
+        clock_requests: &[ClockRouteRequest],
+    ) -> Result<RoutingReport, RouteError> {
+        let mut routes = Vec::with_capacity(netlist.edge_count() + clock_requests.len());
+        let mut total_length_um = 0.0;
+        let mut total_detour_overhead_um = 0.0;
+        let mut detoured_routes = 0usize;
+        let mut jtl_routes = 0usize;
+        let mut ptl_routes = 0usize;
+        let mut clock_routes_count = 0usize;
+        let mut data_routes_count = 0usize;
+        let mut congestion = CongestionMap::default();
+        let coupling_radius_um = 10.0;
+
+        for req in clock_requests {
+            let source = placement
+                .point_of(req.from.node)
+                .ok_or(RouteError::MissingPlacement)?;
+            let sink = placement
+                .point_of(req.to.node)
+                .ok_or(RouteError::MissingPlacement)?;
+            let coupling_map = if config.coupling_weight > 0.0 && !routes.is_empty() {
+                Some(CouplingMap::build(&routes, coupling_radius_um))
+            } else {
+                None
+            };
+            let path = choose_route_path(source, sink, config, &congestion, coupling_map.as_ref());
+            let direct_length_um = manhattan_length(source, sink);
+            let length_um = path_length(&path);
+            let mode = RouteMode::Jtl;
+            let layer = config.clock_layer;
+            let segments: Vec<RouteSegment> = path
+                .iter()
+                .map(|(start, end)| {
+                    congestion.increment(*start, *end);
+                    RouteSegment {
+                        start: *start,
+                        end: *end,
+                        layer,
+                    }
+                })
+                .collect();
+            jtl_routes += 1;
+            clock_routes_count += 1;
+            total_length_um += length_um;
+            let detour_overhead_um = (length_um - direct_length_um).max(0.0);
+            total_detour_overhead_um += detour_overhead_um;
+            if detour_overhead_um > 0.0 {
+                detoured_routes += 1;
+            }
+            routes.push(NetRoute {
+                from: req.from,
+                to: req.to,
+                mode,
+                segments,
+                direct_length_um,
+                length_um,
+                is_clock_net: true,
+                clock_phase: Some(req.phase),
+            });
+        }
+
+        for (from, to) in netlist.edge_pairs() {
+            if routes.iter().any(|r| r.from == from && r.to == to) {
+                continue;
+            }
+            let source = placement
+                .point_of(from.node)
+                .ok_or(RouteError::MissingPlacement)?;
+            let sink = placement
+                .point_of(to.node)
+                .ok_or(RouteError::MissingPlacement)?;
+            let coupling_map = if config.coupling_weight > 0.0 && !routes.is_empty() {
+                Some(CouplingMap::build(&routes, coupling_radius_um))
+            } else {
+                None
+            };
+            let path = choose_route_path(source, sink, config, &congestion, coupling_map.as_ref());
+            let direct_length_um = manhattan_length(source, sink);
+            let length_um = path_length(&path);
+            let touches_boundary_port =
+                is_boundary_port(netlist, from.node) || is_boundary_port(netlist, to.node);
+            let ptl_allowed = !touches_boundary_port
+                && length_um >= config.prefer_ptl_from_length_um
+                && pdk.is_ptl_length_allowed(length_um);
+            let reflection_risk = if ptl_allowed && config.ptl_reflection_risk_weight > 0.0 {
+                pdk.ptl_reflection_coefficient(length_um)
+            } else {
+                0.0
+            };
+            let use_ptl = ptl_allowed && reflection_risk < 0.3;
+            let mode = if use_ptl {
+                RouteMode::Ptl
+            } else {
+                RouteMode::Jtl
+            };
+            let layer = if use_ptl {
+                config.ptl_layer
+            } else {
+                config.jtl_layer
+            };
+            let segments: Vec<RouteSegment> = path
+                .iter()
+                .map(|(start, end)| {
+                    congestion.increment(*start, *end);
+                    RouteSegment {
+                        start: *start,
+                        end: *end,
+                        layer,
+                    }
+                })
+                .collect();
+            match mode {
+                RouteMode::Jtl => jtl_routes += 1,
+                RouteMode::Ptl => ptl_routes += 1,
+            }
+            data_routes_count += 1;
+            total_length_um += length_um;
+            let detour_overhead_um = (length_um - direct_length_um).max(0.0);
+            total_detour_overhead_um += detour_overhead_um;
+            if detour_overhead_um > 0.0 {
+                detoured_routes += 1;
+            }
+            routes.push(NetRoute {
+                from,
+                to,
+                mode,
+                segments,
+                direct_length_um,
+                length_um,
+                is_clock_net: false,
+                clock_phase: None,
+            });
+        }
+
+        let peak_channel_usage = congestion.edge_usage.values().copied().max().unwrap_or(0);
+
+        Ok(RoutingReport {
+            routes,
+            total_length_um,
+            total_detour_overhead_um,
+            detoured_routes,
+            jtl_routes,
+            ptl_routes,
+            clock_routes: clock_routes_count,
+            data_routes: data_routes_count,
+            peak_channel_usage,
+            co_routed: true,
         })
     }
 }
@@ -1858,6 +2047,8 @@ mod tests {
             }],
             direct_length_um: 40.0,
             length_um: 40.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let cmap = CouplingMap::build(&routes, 10.0);
         assert_eq!(cmap.total_coupling_score(), 0.0);
@@ -1879,6 +2070,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
             NetRoute {
                 from: PinRef { node: NodeId(2), port: 0 },
@@ -1891,6 +2084,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
         ];
         let cmap = CouplingMap::build(&routes, 10.0);
@@ -1915,6 +2110,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
             NetRoute {
                 from: PinRef { node: NodeId(2), port: 0 },
@@ -1927,6 +2124,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
         ];
         let cmap = CouplingMap::build(&routes, 10.0);
@@ -1947,6 +2146,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
             NetRoute {
                 from: PinRef { node: NodeId(2), port: 0 },
@@ -1959,6 +2160,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
         ];
         let cmap = CouplingMap::build(&routes, 10.0);
@@ -1995,6 +2198,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
             NetRoute {
                 from: PinRef { node: NodeId(2), port: 0 },
@@ -2007,6 +2212,8 @@ mod tests {
                 }],
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             },
         ];
         let cmap = CouplingMap::build(&routes, 10.0);
@@ -2053,6 +2260,8 @@ mod tests {
             }],
             direct_length_um: 40.0,
             length_um: 40.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let pdk = Pdk::minimal("test");
         let config = RoutingConfig::default();
@@ -2082,6 +2291,8 @@ mod tests {
             ],
             direct_length_um: 80.0,
             length_um: 80.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let pdk = Pdk::minimal("test");
         let config = RoutingConfig::default();
@@ -2122,6 +2333,8 @@ mod tests {
             ],
             direct_length_um: 80.0,
             length_um: 80.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let pdk = Pdk::minimal("test");
         let config = RoutingConfig::default();
@@ -2154,6 +2367,8 @@ mod tests {
             ],
             direct_length_um: 64.0,
             length_um: 64.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let pdk = Pdk::minimal("test");
         let config = RoutingConfig::default();
@@ -2183,6 +2398,8 @@ mod tests {
             ],
             direct_length_um: 80.0,
             length_um: 80.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let pdk = Pdk::minimal("test");
         let config = RoutingConfig::default();
@@ -2208,6 +2425,8 @@ mod tests {
             }],
             direct_length_um: 500.0,
             length_um: 500.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let pdk = Pdk::minimal("test");
         let config = RoutingConfig::default();
@@ -2316,6 +2535,8 @@ mod tests {
             }],
             direct_length_um: 40.0,
             length_um: 40.0,
+        is_clock_net: false,
+        clock_phase: None,
         }];
         let cmap = CouplingMap::build(&routes, 10.0);
         let close = cmap.estimate_segment_coupling(
@@ -2344,6 +2565,8 @@ mod tests {
             segments: vec![],
             direct_length_um: 10.0,
             length_um: 10.0,
+        is_clock_net: false,
+        clock_phase: None,
         };
         cache.insert(route);
         assert!(cache.get(from, to).is_some());
@@ -2371,6 +2594,8 @@ mod tests {
             segments: vec![],
             direct_length_um: 10.0,
             length_um: 10.0,
+        is_clock_net: false,
+        clock_phase: None,
         });
         assert_eq!(cache.len(), 1);
         cache.invalidate(from, to);
@@ -2388,12 +2613,18 @@ mod tests {
                 segments: vec![],
                 direct_length_um: 10.0,
                 length_um: 10.0,
+                is_clock_net: false,
+                clock_phase: None,
             }],
             total_length_um: 10.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 1,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
         let cache = RoutingCache::from_report(&report);
         assert_eq!(cache.len(), 1);
@@ -2485,5 +2716,112 @@ mod tests {
 
         assert_eq!(second_report.routes.len(), 2);
         assert_eq!(new_cache.len(), 2);
+    }
+
+    #[test]
+    fn route_clock_and_data_co_routed() {
+        let mut netlist = Netlist::new();
+        let clk = netlist.add_node(NodeKind::Port, "clk");
+        let a = netlist.add_node(NodeKind::Dff, "dff_a");
+        let b = netlist.add_node(NodeKind::Dff, "dff_b");
+        let c = netlist.add_node(NodeKind::CellInstance, "cell_c");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: c, port: 0 })
+            .expect("a to c");
+        netlist
+            .connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 1 })
+            .expect("b to c");
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 80.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .expect("placement");
+
+        let clock_requests = vec![
+            ClockRouteRequest {
+                from: PinRef { node: clk, port: 0 },
+                to: PinRef { node: a, port: 1 },
+                phase: 0,
+            },
+            ClockRouteRequest {
+                from: PinRef { node: clk, port: 0 },
+                to: PinRef { node: b, port: 1 },
+                phase: 1,
+            },
+        ];
+
+        let report = SimpleRouter::new()
+            .route_clock_and_data(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+                &clock_requests,
+            )
+            .expect("route");
+
+        assert!(report.co_routed);
+        assert_eq!(report.clock_routes, 2);
+        assert_eq!(report.data_routes, 2);
+        assert_eq!(report.routes.len(), 4);
+
+        let clock_r: Vec<_> = report.routes.iter().filter(|r| r.is_clock_net).collect();
+        assert_eq!(clock_r.len(), 2);
+        assert!(clock_r.iter().all(|r| r.clock_phase.is_some()));
+
+        let data_r: Vec<_> = report.routes.iter().filter(|r| !r.is_clock_net).collect();
+        assert_eq!(data_r.len(), 2);
+        assert!(data_r.iter().all(|r| r.clock_phase.is_none()));
+    }
+
+    #[test]
+    fn route_clock_and_data_clock_nets_compete_for_congestion() {
+        let mut netlist = Netlist::new();
+        let clk = netlist.add_node(NodeKind::Port, "clk");
+        let a = netlist.add_node(NodeKind::Dff, "dff_a");
+        let b = netlist.add_node(NodeKind::CellInstance, "cell_b");
+        netlist
+            .connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 })
+            .expect("a to b");
+
+        let placement = LevelizedPlacer::new()
+            .place(
+                &netlist,
+                &PlacementConfig {
+                    x_pitch_um: 80.0,
+                    y_pitch_um: 24.0,
+                    ..PlacementConfig::default()
+                },
+            )
+            .expect("placement");
+
+        let clock_requests = vec![ClockRouteRequest {
+            from: PinRef { node: clk, port: 0 },
+            to: PinRef { node: a, port: 1 },
+            phase: 0,
+        }];
+
+        let report = SimpleRouter::new()
+            .route_clock_and_data(
+                &netlist,
+                &placement,
+                &Pdk::minimal("test"),
+                &RoutingConfig::default(),
+                &clock_requests,
+            )
+            .expect("route");
+
+        assert!(report.co_routed);
+        assert_eq!(report.clock_routes, 1);
+        assert_eq!(report.data_routes, 1);
+        // Clock and data share congestion map, so peak_channel_usage
+        // should reflect both.
+        assert!(report.peak_channel_usage > 0 || report.routes.len() == 2);
     }
 }

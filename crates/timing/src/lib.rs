@@ -2332,6 +2332,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -2346,6 +2348,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 80.0,
                     length_um: 80.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 120.0,
@@ -2353,6 +2357,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 1,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -2403,12 +2411,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 0.0,
                 length_um: 0.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 0.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -2472,6 +2486,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -2486,6 +2502,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 80.0,
@@ -2493,6 +2511,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 2,
             ptl_routes: 0,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let base_pdk = Pdk::minimal("test");
@@ -2590,6 +2612,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -2604,6 +2628,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 80.0,
@@ -2611,6 +2637,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 2,
             ptl_routes: 0,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let base_pdk = Pdk::minimal("test");
@@ -2713,6 +2743,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -2727,6 +2759,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 80.0,
@@ -2734,6 +2768,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 2,
             ptl_routes: 0,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let characterized_pdk = Pdk::minimal("test")
@@ -2815,12 +2853,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -2887,12 +2931,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -2962,12 +3012,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3058,12 +3114,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3138,12 +3200,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3235,12 +3303,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3330,12 +3404,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3396,12 +3476,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3507,6 +3593,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 30.0,
                     length_um: 30.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -3521,6 +3609,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 60.0,
                     length_um: 60.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 90.0,
@@ -3528,6 +3618,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 1,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3614,6 +3708,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 30.0,
                     length_um: 30.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -3628,6 +3724,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 60.0,
                     length_um: 60.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 90.0,
@@ -3635,6 +3733,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 1,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let baseline = StaticTimingAnalyzer::new()
@@ -3729,12 +3831,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let baseline = StaticTimingAnalyzer::new()
@@ -3823,12 +3931,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let timing_config = TimingConfig {
@@ -3954,12 +4068,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let timing_config = TimingConfig {
@@ -4310,6 +4430,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef { node: b, port: 0 },
@@ -4318,6 +4440,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 80.0,
@@ -4325,6 +4449,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 2,
             ptl_routes: 0,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let err = StaticTimingAnalyzer::new()
@@ -5154,12 +5282,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         (netlist, routing, source, sink)
@@ -5342,12 +5476,18 @@ mod tests {
                 segments: Vec::new(),
                 direct_length_um: 40.0,
                 length_um: 40.0,
+            is_clock_net: false,
+            clock_phase: None,
             }],
             total_length_um: 40.0,
             total_detour_overhead_um: 0.0,
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
         };
 
         let mc_config = MonteCarloConfig {
@@ -5480,6 +5620,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 40.0,
                     length_um: 40.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
                 NetRoute {
                     from: PinRef {
@@ -5494,6 +5636,8 @@ mod tests {
                     segments: Vec::new(),
                     direct_length_um: 80.0,
                     length_um: 80.0,
+                is_clock_net: false,
+                clock_phase: None,
                 },
             ],
             total_length_um: 120.0,
@@ -5501,6 +5645,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 1,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
 
         let pdk = Pdk::minimal("test");

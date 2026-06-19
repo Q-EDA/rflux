@@ -544,6 +544,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 0,
             ptl_routes: 0,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
         let pdk = Pdk::minimal("test");
         let config = MarginConfig {
@@ -586,6 +590,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 0,
             ptl_routes: 0,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
         let pdk = Pdk::minimal("test");
         let margin_config = MarginConfig {

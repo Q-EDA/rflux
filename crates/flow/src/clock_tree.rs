@@ -519,6 +519,8 @@ pub fn clock_tree_routes(_report: &ClockTreeReport, buffers: &[ClockBuffer]) -> 
             }],
             direct_length_um: direct_length,
             length_um: direct_length,
+            is_clock_net: true,
+            clock_phase: Some(a.phase),
         });
     }
     routes

@@ -201,6 +201,8 @@ mod tests {
             segments: vec![],
             direct_length_um: length_um,
             length_um,
+            is_clock_net: false,
+            clock_phase: None,
         }
     }
 
@@ -250,6 +252,10 @@ mod tests {
             detoured_routes: 0,
             jtl_routes: 1,
             ptl_routes: 1,
+        clock_routes: 0,
+        data_routes: 0,
+        peak_channel_usage: 0,
+        co_routed: false,
         };
         let report = extractor.extract_report(&routing);
         assert_eq!(report.nets.len(), 2);
