@@ -16,6 +16,7 @@ members = [
 	"crates/route",
 	"crates/extract",
 	"crates/py",
+	"crates/verilog",
 ]
 resolver = "2"
 

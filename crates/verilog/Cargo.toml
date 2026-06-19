@@ -1,0 +1,11 @@
+[package]
+name = "rflux-verilog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true

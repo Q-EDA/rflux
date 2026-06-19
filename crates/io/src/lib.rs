@@ -35,6 +35,7 @@ const PDK_JSON_KIND: &str = "rflux_pdk";
 pub enum NetlistInputFormat {
     IrJson,
     Bench,
+    Verilog,
 }
 
 #[derive(Debug, Error)]
@@ -175,13 +176,15 @@ pub fn read_bench_netlist(path: impl AsRef<Path>) -> Result<Netlist, IoError> {
 }
 
 pub fn detect_netlist_input_format(path: impl AsRef<Path>) -> NetlistInputFormat {
-    if path
+    let ext = path
         .as_ref()
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("bench"))
-    {
+        .unwrap_or("");
+    if ext.eq_ignore_ascii_case("bench") {
         NetlistInputFormat::Bench
+    } else if ext.eq_ignore_ascii_case("v") {
+        NetlistInputFormat::Verilog
     } else {
         NetlistInputFormat::IrJson
     }
@@ -199,6 +202,13 @@ pub fn read_netlist_as(
     match format {
         NetlistInputFormat::IrJson => read_ir_json(path),
         NetlistInputFormat::Bench => read_bench_netlist(path),
+        NetlistInputFormat::Verilog => {
+            let content = fs::read_to_string(path)?;
+            let src = rflux_verilog::parse_verilog(&content)
+                .map_err(|e| IoError::BenchParse(e.to_string()))?;
+            rflux_verilog::elaborate_to_ir(&src, "top")
+                .map_err(|e| IoError::BenchParse(e.to_string()))
+        }
     }
 }
 

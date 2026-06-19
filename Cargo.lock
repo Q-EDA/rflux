@@ -1038,6 +1038,7 @@ dependencies = [
  "rflux-tech",
  "rflux-timing",
  "rflux-verify",
+ "rflux-verilog",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1089,6 +1090,7 @@ dependencies = [
  "libreda-lefdef",
  "rflux-ir",
  "rflux-tech",
+ "rflux-verilog",
  "serde_json",
  "serde_yaml",
  "thiserror",
@@ -1209,6 +1211,16 @@ version = "0.1.0"
 dependencies = [
  "rflux-ir",
  "rflux-synth",
+]
+
+[[package]]
+name = "rflux-verilog"
+version = "0.1.0"
+dependencies = [
+ "rflux-ir",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

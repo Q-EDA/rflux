@@ -9,6 +9,7 @@ libreda-db = "0.0.12"
 libreda-lefdef = "0.0.5"
 rflux-ir = { path = "../ir" }
 rflux-tech = { path = "../tech" }
+rflux-verilog = { path = "../verilog" }
 serde_json.workspace = true
 serde_yaml = { workspace = true, optional = true }
 thiserror.workspace = true
