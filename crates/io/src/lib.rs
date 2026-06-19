@@ -8421,6 +8421,127 @@ pub fn write_lef_from_chip(_path: impl AsRef<Path>, _chip: &Chip) -> Result<(), 
     Err(IoError::LefWriteUnsupported)
 }
 
+// ---------------------------------------------------------------------------
+// P2-5: ColdFlux output parsing and benchmark comparison
+// ---------------------------------------------------------------------------
+
+/// Parsed timing result from a ColdFlux/qPALACE run (P2-5).
+///
+/// Enables comparison between rflux and ColdFlux outputs on the
+/// same benchmark circuits.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ColdFluxTimingResult {
+    /// Circuit name.
+    pub circuit: String,
+    /// Post-route frequency (GHz).
+    pub frequency_ghz: f64,
+    /// Worst setup slack (ps).
+    pub worst_setup_slack_ps: f64,
+    /// Worst hold slack (ps).
+    pub worst_hold_slack_ps: f64,
+    /// Number of routed nets.
+    pub routed_nets: usize,
+    /// Total wire length (um).
+    pub total_wire_length_um: f64,
+    /// Total area (um²).
+    pub area_um2: f64,
+    /// Simulation time (seconds).
+    pub simulation_time_s: f64,
+}
+
+/// Benchmark comparison result between rflux and ColdFlux (P2-5).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BenchmarkComparison {
+    /// Circuit name.
+    pub circuit: String,
+    /// rflux result.
+    pub rflux: ColdFluxTimingResult,
+    /// ColdFlux result (if available).
+    pub coldflux: Option<ColdFluxTimingResult>,
+    /// Frequency difference ratio: (rflux - coldflux) / coldflux.
+    pub frequency_diff_ratio: Option<f64>,
+    /// Area difference ratio.
+    pub area_diff_ratio: Option<f64>,
+}
+
+/// Parse a ColdFlux timing report JSON file (P2-5).
+///
+/// ColdFlux outputs timing results in a JSON format with fields like
+/// `circuit`, `frequency_ghz`, `worst_setup_slack`, etc.  This parser
+/// normalizes the field names to rflux conventions.
+pub fn parse_coldflux_timing_json(content: &str) -> Result<ColdFluxTimingResult, IoError> {
+    let value: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| IoError::Json(e.to_string()))?;
+
+    let circuit = value["circuit"]
+        .as_str()
+        .or_else(|| value["circuit_name"].as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let frequency_ghz = value["frequency_ghz"]
+        .as_f64()
+        .or_else(|| value["post_route_frequency_ghz"].as_f64())
+        .unwrap_or(0.0);
+
+    let worst_setup_slack_ps = value["worst_setup_slack_ps"]
+        .as_f64()
+        .or_else(|| value["worst_setup_slack"].as_f64())
+        .unwrap_or(0.0);
+
+    let worst_hold_slack_ps = value["worst_hold_slack_ps"]
+        .as_f64()
+        .or_else(|| value["worst_hold_slack"].as_f64())
+        .unwrap_or(0.0);
+
+    let routed_nets = value["routed_nets"]
+        .as_u64()
+        .or_else(|| value["num_routed_nets"].as_u64())
+        .unwrap_or(0) as usize;
+
+    let total_wire_length_um = value["total_wire_length_um"]
+        .as_f64()
+        .or_else(|| value["total_wire_length"].as_f64())
+        .unwrap_or(0.0);
+
+    let area_um2 = value["area_um2"]
+        .as_f64()
+        .or_else(|| value["total_area_um2"].as_f64())
+        .unwrap_or(0.0);
+
+    let simulation_time_s = value["simulation_time_s"]
+        .as_f64()
+        .or_else(|| value["sim_time_s"].as_f64())
+        .unwrap_or(0.0);
+
+    Ok(ColdFluxTimingResult {
+        circuit,
+        frequency_ghz,
+        worst_setup_slack_ps,
+        worst_hold_slack_ps,
+        routed_nets,
+        total_wire_length_um,
+        area_um2,
+        simulation_time_s,
+    })
+}
+
+/// Write a benchmark comparison report to JSON.
+pub fn write_benchmark_comparison(
+    path: impl AsRef<Path>,
+    comparisons: &[BenchmarkComparison],
+) -> Result<(), IoError> {
+    let json = serde_json::to_string_pretty(comparisons)
+        .map_err(|e| IoError::Json(e.to_string()))?;
+    std::fs::write(path, json).map_err(IoError::Io)
+}
+
+/// Standard ISCAS benchmark circuit names (P2-5).
+pub const ISCAS_BENCHMARKS: &[&str] = &[
+    "c17", "c432", "c499", "c880", "c1355", "c1908", "c2670", "c3540", "c5315", "c6288",
+    "c7552",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10254,5 +10375,49 @@ mod tests {
         assert_eq!(netlist.node_count(), 0);
 
         let _ = fs::remove_file(path);
+    }
+
+    // --- P2-5: ColdFlux parser tests ---
+
+    #[test]
+    fn parse_coldflux_timing_json_standard_format() {
+        let json = r#"{
+            "circuit": "c432",
+            "frequency_ghz": 15.8,
+            "worst_setup_slack_ps": 2.5,
+            "worst_hold_slack_ps": 1.0,
+            "routed_nets": 42,
+            "total_wire_length_um": 1800.0,
+            "area_um2": 230.0,
+            "simulation_time_s": 24.3
+        }"#;
+        let result = parse_coldflux_timing_json(json).unwrap();
+        assert_eq!(result.circuit, "c432");
+        assert!((result.frequency_ghz - 15.8).abs() < 1e-9);
+        assert_eq!(result.routed_nets, 42);
+    }
+
+    #[test]
+    fn parse_coldflux_timing_json_alternate_field_names() {
+        let json = r#"{
+            "circuit_name": "c880",
+            "post_route_frequency_ghz": 14.5,
+            "worst_setup_slack": 3.0,
+            "worst_hold_slack": 0.5,
+            "num_routed_nets": 50,
+            "total_wire_length": 2000.0,
+            "total_area_um2": 250.0,
+            "sim_time_s": 30.0
+        }"#;
+        let result = parse_coldflux_timing_json(json).unwrap();
+        assert_eq!(result.circuit, "c880");
+        assert!((result.frequency_ghz - 14.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn iscas_benchmarks_list() {
+        assert_eq!(ISCAS_BENCHMARKS.len(), 11);
+        assert!(ISCAS_BENCHMARKS.contains(&"c432"));
+        assert!(ISCAS_BENCHMARKS.contains(&"c7552"));
     }
 }
