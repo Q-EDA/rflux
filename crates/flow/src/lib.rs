@@ -29,6 +29,15 @@ pub use rflux_sim::{
 const TIMING_CLOSURE_MAX_ACTIONS_PER_CHECK: usize = 3;
 
 fn timing_config_with_flow_overrides(config: &FlowConfig) -> TimingConfig {
+    let mut noise_margin = rflux_timing::NoiseMarginConfig {
+        temperature_k: config.noise_temperature_k,
+        ..config.timing.noise_margin
+    };
+    if !config.enable_noise_margin {
+        noise_margin.enable_thermal = false;
+        noise_margin.enable_crosstalk = false;
+        noise_margin.enable_process_spread = false;
+    }
     TimingConfig {
         waveform: rflux_timing::WaveformTimingConfig {
             enable_waveform: config.enable_waveform_timing,
@@ -39,6 +48,7 @@ fn timing_config_with_flow_overrides(config: &FlowConfig) -> TimingConfig {
             wire_late_factor: config.ocv_wire_late_factor,
             ..config.timing.ocv
         },
+        noise_margin,
         ..config.timing.clone()
     }
 }
@@ -57,6 +67,8 @@ pub struct FlowConfig {
     pub enable_waveform_timing: bool,
     pub ocv_cell_late_factor: f64,
     pub ocv_wire_late_factor: f64,
+    pub enable_noise_margin: bool,
+    pub noise_temperature_k: f64,
 }
 
 impl Default for FlowConfig {
@@ -73,6 +85,8 @@ impl Default for FlowConfig {
             enable_waveform_timing: false,
             ocv_cell_late_factor: 1.05,
             ocv_wire_late_factor: 1.05,
+            enable_noise_margin: false,
+            noise_temperature_k: 4.2,
         }
     }
 }
@@ -4623,6 +4637,7 @@ mod tests {
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
                 extraction_report: None,
+                noise_margin: None,
             },
             initial_total_detour_overhead_um: 0.0,
             initial_hold_violations: 0,
@@ -4783,6 +4798,7 @@ mod tests {
                 analyzed_arcs: 1,
                 false_path_arcs: 0,
                 extraction_report: None,
+                noise_margin: None,
             },
             initial_total_detour_overhead_um: 0.0,
             initial_hold_violations: 0,

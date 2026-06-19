@@ -260,6 +260,10 @@ struct LayoutCommandArgs {
     ocv_cell_late: f64,
     #[arg(long, default_value = "1.05")]
     ocv_wire_late: f64,
+    #[arg(long)]
+    noise_margin: bool,
+    #[arg(long, default_value = "4.2")]
+    temperature_k: f64,
 }
 
 #[derive(Debug, Args)]
@@ -579,6 +583,8 @@ fn flow_config_with_cli_closure_options(
     enable_waveform_timing: bool,
     ocv_cell_late_factor: f64,
     ocv_wire_late_factor: f64,
+    enable_noise_margin: bool,
+    noise_temperature_k: f64,
 ) -> Result<FlowConfig> {
     let mut config = FlowConfig::default();
     if let Some(path) = flow_config {
@@ -608,6 +614,8 @@ fn flow_config_with_cli_closure_options(
     config.enable_waveform_timing = enable_waveform_timing;
     config.ocv_cell_late_factor = ocv_cell_late_factor;
     config.ocv_wire_late_factor = ocv_wire_late_factor;
+    config.enable_noise_margin = enable_noise_margin;
+    config.noise_temperature_k = noise_temperature_k;
     Ok(config)
 }
 
@@ -2126,6 +2134,8 @@ fn run_analyze_timing_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         false,
         1.05,
         1.05,
+        false,
+        4.2,
     )?;
     let timing_constraints = args.timing_constraints.clone();
     let mut timing_constraint_summary = None;
@@ -2262,6 +2272,8 @@ fn run_compile_layout_with_diagnostics(args: RunWithDiagnosticsArgs) -> Result<(
         false,
         1.05,
         1.05,
+        false,
+        4.2,
     )?;
     let timing_constraints = args.timing_constraints.clone();
     let mut timing_constraint_summary = None;
@@ -3460,6 +3472,8 @@ fn run_compile_layout(args: LayoutCommandArgs) -> Result<()> {
         args.waveform,
         args.ocv_cell_late,
         args.ocv_wire_late,
+        args.noise_margin,
+        args.temperature_k,
     )?;
     let gds_output = args.gds_output.clone();
     let gds_library_name = args
@@ -3520,6 +3534,8 @@ fn run_analyze_timing(args: LayoutCommandArgs) -> Result<()> {
         args.waveform,
         args.ocv_cell_late,
         args.ocv_wire_late,
+        args.noise_margin,
+        args.temperature_k,
     )?;
     let pdk_path = args.pdk.clone();
     let report = with_loaded_flow_inputs(
@@ -3566,6 +3582,8 @@ fn run_dse(args: DseArgs) -> Result<()> {
         false,
         1.05,
         1.05,
+        false,
+        4.2,
     )?;
     let dse_config = rflux_flow::DseConfig {
         clock_period_ps_values: args
@@ -6937,6 +6955,8 @@ mod tests {
             waveform: false,
             ocv_cell_late: 1.05,
             ocv_wire_late: 1.05,
+            noise_margin: false,
+            temperature_k: 4.2,
         })
         .expect("compile-layout should write report and patch");
 
@@ -6988,6 +7008,8 @@ mod tests {
             waveform: false,
             ocv_cell_late: 1.05,
             ocv_wire_late: 1.05,
+            noise_margin: false,
+            temperature_k: 4.2,
         })
         .expect("compile-layout should replay generated flow config patch");
 
@@ -7082,6 +7104,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7200,6 +7224,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7277,6 +7303,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7358,6 +7386,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7440,6 +7470,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7524,6 +7556,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect("analyze-timing should succeed");
@@ -7600,6 +7634,8 @@ mod tests {
                 waveform: false,
                 ocv_cell_late: 1.05,
                 ocv_wire_late: 1.05,
+                noise_margin: false,
+                temperature_k: 4.2,
             }),
         })
         .expect_err("bad timing constraints should fail");

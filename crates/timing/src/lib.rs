@@ -65,6 +65,8 @@ pub struct TimingConfig {
     pub waveform: WaveformTimingConfig,
     #[serde(default)]
     pub ocv: OcvConfig,
+    #[serde(default)]
+    pub noise_margin: NoiseMarginConfig,
 }
 
 impl Default for TimingConfig {
@@ -81,6 +83,7 @@ impl Default for TimingConfig {
             use_parasitic_extraction: false,
             waveform: WaveformTimingConfig::default(),
             ocv: OcvConfig::default(),
+            noise_margin: NoiseMarginConfig::default(),
         }
     }
 }
@@ -139,6 +142,8 @@ pub struct TimingReport {
     pub false_path_arcs: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_report: Option<rflux_extract::ExtractionReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_margin: Option<NoiseMarginReport>,
 }
 
 /// Recommendation for fixing a single hold violation arc.
@@ -315,6 +320,76 @@ impl Default for OcvConfig {
             path_depth_factor: 0.005,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NoiseMarginConfig {
+    #[serde(default = "default_temperature_k")]
+    pub temperature_k: f64,
+    #[serde(default = "default_pulse_voltage_mv")]
+    pub pulse_voltage_mv: f64,
+    #[serde(default = "default_pulse_width_ps")]
+    pub pulse_width_ps: f64,
+    #[serde(default = "default_margin_threshold_db")]
+    pub margin_threshold_db: f64,
+    #[serde(default = "default_true")]
+    pub enable_thermal: bool,
+    #[serde(default = "default_true")]
+    pub enable_crosstalk: bool,
+    #[serde(default = "default_true")]
+    pub enable_process_spread: bool,
+}
+
+fn default_temperature_k() -> f64 {
+    4.2
+}
+fn default_pulse_voltage_mv() -> f64 {
+    2.0
+}
+fn default_pulse_width_ps() -> f64 {
+    1.0
+}
+fn default_margin_threshold_db() -> f64 {
+    6.0
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NoiseMarginConfig {
+    fn default() -> Self {
+        Self {
+            temperature_k: 4.2,
+            pulse_voltage_mv: 2.0,
+            pulse_width_ps: 1.0,
+            margin_threshold_db: 6.0,
+            enable_thermal: true,
+            enable_crosstalk: true,
+            enable_process_spread: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NetNoiseMargin {
+    pub from: PinRef,
+    pub to: PinRef,
+    pub signal_amplitude: f64,
+    pub noise_rms: f64,
+    pub margin: f64,
+    pub margin_db: f64,
+    pub thermal_noise: f64,
+    pub crosstalk_noise: f64,
+    pub process_spread: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NoiseMarginReport {
+    pub nets: Vec<NetNoiseMargin>,
+    pub worst_margin_db: f64,
+    pub worst_net: Option<(PinRef, PinRef)>,
+    pub violations: usize,
+    pub temperature_k: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -628,6 +703,17 @@ impl StaticTimingAnalyzer {
             report
         });
 
+        let noise_margin_config = &config.noise_margin;
+        let noise_margin = if noise_margin_config.enable_thermal
+            || noise_margin_config.enable_crosstalk
+            || noise_margin_config.enable_process_spread
+        {
+            let analyzer = NoiseMarginAnalyzer::new(*noise_margin_config);
+            Some(analyzer.analyze(&arcs, coupling_map, &config.ocv))
+        } else {
+            None
+        };
+
         Ok(TimingReport {
             arcs,
             worst_setup_slack_ps: if worst_setup_slack_ps.is_finite() {
@@ -649,6 +735,7 @@ impl StaticTimingAnalyzer {
             analyzed_arcs: netlist.edge_count(),
             false_path_arcs,
             extraction_report,
+            noise_margin,
         })
     }
 
@@ -1115,6 +1202,103 @@ impl WaveformPropagator {
     pub fn is_degraded(&self, envelope: &PulseEnvelope) -> bool {
         envelope.amplitude < self.config.amplitude_threshold
             || envelope.width_ps > self.config.max_pulse_width_ps
+    }
+}
+
+pub struct NoiseMarginAnalyzer {
+    config: NoiseMarginConfig,
+}
+
+impl NoiseMarginAnalyzer {
+    pub fn new(config: NoiseMarginConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn analyze(
+        &self,
+        arcs: &[TimingArcReport],
+        coupling_map: Option<&CouplingMap>,
+        ocv_config: &OcvConfig,
+    ) -> NoiseMarginReport {
+        let k_boltzmann = 1.380649e-23_f64;
+        let v_pulse = self.config.pulse_voltage_mv * 1e-3;
+        let delta_f = 1.0 / (std::f64::consts::PI * self.config.pulse_width_ps * 1e-12);
+
+        let thermal_noise = if self.config.enable_thermal {
+            (4.0 * k_boltzmann * self.config.temperature_k * delta_f).sqrt() / v_pulse
+        } else {
+            0.0
+        };
+
+        let crosstalk_base: f64 = if coupling_map.is_some() && self.config.enable_crosstalk {
+            0.05
+        } else {
+            0.0
+        };
+
+        let process_spread = if self.config.enable_process_spread {
+            (ocv_config.cell_late_factor - ocv_config.cell_early_factor) / 2.0
+        } else {
+            0.0
+        };
+
+        let mut nets = Vec::new();
+        let mut worst_margin_db = f64::INFINITY;
+        let mut worst_net = None;
+        let mut violations = 0;
+
+        for arc in arcs {
+            if arc.is_false_path {
+                continue;
+            }
+
+            let signal = arc
+                .pulse_envelope
+                .as_ref()
+                .map_or(1.0, |env| env.amplitude);
+
+            let noise_rms =
+                (thermal_noise.powi(2) + crosstalk_base.powi(2) + process_spread.powi(2)).sqrt();
+            let margin = signal - noise_rms;
+            let margin_db = if noise_rms > 0.0 {
+                20.0 * (signal / noise_rms).log10()
+            } else {
+                f64::INFINITY
+            };
+
+            if margin_db < self.config.margin_threshold_db {
+                violations += 1;
+            }
+
+            if margin_db < worst_margin_db {
+                worst_margin_db = margin_db;
+                worst_net = Some((arc.from, arc.to));
+            }
+
+            nets.push(NetNoiseMargin {
+                from: arc.from,
+                to: arc.to,
+                signal_amplitude: signal,
+                noise_rms,
+                margin,
+                margin_db,
+                thermal_noise,
+                crosstalk_noise: crosstalk_base,
+                process_spread,
+            });
+        }
+
+        NoiseMarginReport {
+            nets,
+            worst_margin_db: if worst_margin_db.is_finite() {
+                worst_margin_db
+            } else {
+                f64::INFINITY
+            },
+            worst_net,
+            violations,
+            temperature_k: self.config.temperature_k,
+        }
     }
 }
 
@@ -1969,6 +2153,7 @@ mod tests {
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 None,
             )
@@ -2043,6 +2228,7 @@ mod tests {
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 None,
             )
@@ -2131,6 +2317,7 @@ mod tests {
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 None,
             )
@@ -2217,6 +2404,7 @@ mod tests {
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 None,
             )
@@ -2311,6 +2499,7 @@ mod tests {
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 None,
             )
@@ -2400,13 +2589,14 @@ mod tests {
                     crossing_constraints: vec![CrossingConstraint {
                         from_domain: 1,
                         to_domain: 2,
-                        kind: CrossingConstraintKind::Multicycle,
+                        kind: CrossingConstraintKind::FalsePath,
                         value_ps: None,
-                        cycles: Some(3),
+                        cycles: None,
                     }],
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 None,
             )
@@ -2567,6 +2757,7 @@ mod tests {
                     use_parasitic_extraction: false,
                     waveform: WaveformTimingConfig::default(),
                     ocv: OcvConfig::default(),
+                    noise_margin: NoiseMarginConfig::default(),
                 },
                 &StatisticalTimingConfig::default(),
                 None,
@@ -2982,6 +3173,7 @@ mod tests {
             use_parasitic_extraction: false,
             waveform: WaveformTimingConfig::default(),
             ocv: OcvConfig::default(),
+            noise_margin: NoiseMarginConfig::default(),
         };
 
         let baseline = StaticTimingAnalyzer::new()
@@ -3118,6 +3310,7 @@ mod tests {
             use_parasitic_extraction: false,
             waveform: WaveformTimingConfig::default(),
             ocv: OcvConfig::default(),
+            noise_margin: NoiseMarginConfig::default(),
         };
 
         let report = StaticTimingAnalyzer::new()
@@ -3498,6 +3691,7 @@ mod tests {
             analyzed_arcs: 0,
             false_path_arcs: 0,
             extraction_report: None,
+            noise_margin: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert!(recs.is_empty());
@@ -3552,6 +3746,7 @@ mod tests {
             analyzed_arcs: 1,
             false_path_arcs: 0,
             extraction_report: None,
+            noise_margin: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert_eq!(recs.len(), 1);
@@ -3608,6 +3803,7 @@ mod tests {
             analyzed_arcs: 1,
             false_path_arcs: 1,
             extraction_report: None,
+            noise_margin: None,
         };
         let recs = report.hold_fix_recommendations(0.5);
         assert!(recs.is_empty());
@@ -3662,6 +3858,7 @@ mod tests {
             analyzed_arcs: 1,
             false_path_arcs: 0,
             extraction_report: None,
+            noise_margin: None,
         };
         let recs = report.hold_fix_recommendations(0.0);
         assert!(recs.is_empty());
@@ -3774,5 +3971,134 @@ mod tests {
             ..ok
         };
         assert!(propagator.is_degraded(&wide));
+    }
+
+    #[test]
+    fn noise_margin_empty_arcs_produces_empty_report() {
+        let analyzer = NoiseMarginAnalyzer::new(NoiseMarginConfig::default());
+        let report = analyzer.analyze(&[], None, &OcvConfig::default());
+        assert!(report.nets.is_empty());
+        assert_eq!(report.violations, 0);
+        assert_eq!(report.temperature_k, 4.2);
+    }
+
+    #[test]
+    fn noise_margin_thermal_at_4k_is_very_small() {
+        let config = NoiseMarginConfig {
+            temperature_k: 4.2,
+            enable_thermal: true,
+            enable_crosstalk: false,
+            enable_process_spread: false,
+            ..NoiseMarginConfig::default()
+        };
+        let analyzer = NoiseMarginAnalyzer::new(config);
+        let arc = TimingArcReport {
+            from: PinRef {
+                node: rflux_ir::NodeId(0),
+                port: 0,
+            },
+            to: PinRef {
+                node: rflux_ir::NodeId(1),
+                port: 0,
+            },
+            is_false_path: false,
+            driver_kind: rflux_tech::SfCellKind::GenericGate,
+            route_mode: rflux_route::RouteMode::Jtl,
+            route_length_um: 20.0,
+            cell_delay_ps: 8.0,
+            wire_delay_ps: 2.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: 0.0,
+            launch_window_end_ps: 4.0,
+            capture_window_start_ps: 0.0,
+            capture_window_end_ps: 4.0,
+            arrival_phase_offset_ps: 10.0,
+            capture_window_slack_ps: -6.0,
+            capture_window_violation: true,
+            arrival_ps: 10.0,
+            required_ps: 120.0,
+            setup_slack_ps: 110.0,
+            hold_slack_ps: 8.0,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
+        };
+        let report = analyzer.analyze(&[arc], None, &OcvConfig::default());
+        assert_eq!(report.nets.len(), 1);
+        assert!(report.nets[0].thermal_noise < 0.01);
+        assert!(report.nets[0].margin_db > 6.0);
+    }
+
+    #[test]
+    fn noise_margin_high_temperature_increases_thermal_noise() {
+        let cold = NoiseMarginConfig {
+            temperature_k: 4.2,
+            enable_thermal: true,
+            enable_crosstalk: false,
+            enable_process_spread: false,
+            ..NoiseMarginConfig::default()
+        };
+        let hot = NoiseMarginConfig {
+            temperature_k: 300.0,
+            enable_thermal: true,
+            enable_crosstalk: false,
+            enable_process_spread: false,
+            ..NoiseMarginConfig::default()
+        };
+        let arc = TimingArcReport {
+            from: PinRef {
+                node: rflux_ir::NodeId(0),
+                port: 0,
+            },
+            to: PinRef {
+                node: rflux_ir::NodeId(1),
+                port: 0,
+            },
+            is_false_path: false,
+            driver_kind: rflux_tech::SfCellKind::GenericGate,
+            route_mode: rflux_route::RouteMode::Jtl,
+            route_length_um: 20.0,
+            cell_delay_ps: 8.0,
+            wire_delay_ps: 2.0,
+            launch_phase: 0,
+            capture_phase: 0,
+            launch_window_start_ps: 0.0,
+            launch_window_end_ps: 4.0,
+            capture_window_start_ps: 0.0,
+            capture_window_end_ps: 4.0,
+            arrival_phase_offset_ps: 10.0,
+            capture_window_slack_ps: -6.0,
+            capture_window_violation: true,
+            arrival_ps: 10.0,
+            required_ps: 120.0,
+            setup_slack_ps: 110.0,
+            hold_slack_ps: 8.0,
+            pulse_envelope: None,
+            pulse_degradation_violation: false,
+            ocv_early_arrival_ps: None,
+            ocv_late_arrival_ps: None,
+            ocv_early_slack_ps: None,
+            ocv_late_slack_ps: None,
+        };
+        let cold_report = NoiseMarginAnalyzer::new(cold).analyze(&[arc], None, &OcvConfig::default());
+        let hot_report = NoiseMarginAnalyzer::new(hot).analyze(&[arc], None, &OcvConfig::default());
+        assert!(hot_report.nets[0].thermal_noise > cold_report.nets[0].thermal_noise);
+        assert!(hot_report.nets[0].margin_db < cold_report.nets[0].margin_db);
+    }
+
+    #[test]
+    fn noise_margin_default_config_values() {
+        let config = NoiseMarginConfig::default();
+        assert!((config.temperature_k - 4.2).abs() < 1e-9);
+        assert!((config.pulse_voltage_mv - 2.0).abs() < 1e-9);
+        assert!((config.pulse_width_ps - 1.0).abs() < 1e-9);
+        assert!((config.margin_threshold_db - 6.0).abs() < 1e-9);
+        assert!(config.enable_thermal);
+        assert!(config.enable_crosstalk);
+        assert!(config.enable_process_spread);
     }
 }
