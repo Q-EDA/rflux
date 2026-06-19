@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use rflux_ir::{Netlist, NodeKind};
+use rflux_ir::{Netlist, NodeKind, PinRef};
 use rflux_place::{Placement, Point};
 use rflux_route::{NetRoute, RouteMode, RouteSegment, RoutingReport};
 use rflux_tech::Pdk;
@@ -58,6 +58,21 @@ impl Default for DrcSvgConfig {
             height_um: 1000.0,
             show_errors: true,
             show_warnings: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimingDrivenDrcConfig {
+    pub enable: bool,
+    pub critical_margin_um: f64,
+}
+
+impl Default for TimingDrivenDrcConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            critical_margin_um: 50.0,
         }
     }
 }
@@ -191,6 +206,29 @@ impl DrcRuleSet {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangedRegion {
+    pub min_x_um: f64,
+    pub max_x_um: f64,
+    pub min_y_um: f64,
+    pub max_y_um: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncrementalConfig {
+    pub enable: bool,
+    pub changed_regions: Vec<ChangedRegion>,
+}
+
+impl Default for IncrementalConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            changed_regions: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DrcChecker {
     rules: DrcRuleSet,
@@ -243,6 +281,125 @@ impl DrcChecker {
             error_count,
             warning_count,
             passed: error_count == 0,
+        }
+    }
+
+    pub fn check_timing_driven(
+        &self,
+        placement: &Placement,
+        routing: &RoutingReport,
+        netlist: &Netlist,
+        critical_pins: &[(PinRef, PinRef)],
+        config: &TimingDrivenDrcConfig,
+    ) -> DrcReport {
+        if !config.enable || critical_pins.is_empty() {
+            return self.check(placement, routing, netlist);
+        }
+
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+
+        for &(from, to) in critical_pins {
+            if let Some(p) = placement.point_of(from.node) {
+                min_x = min_x.min(p.x_um);
+                max_x = max_x.max(p.x_um);
+                min_y = min_y.min(p.y_um);
+                max_y = max_y.max(p.y_um);
+            }
+            if let Some(p) = placement.point_of(to.node) {
+                min_x = min_x.min(p.x_um);
+                max_x = max_x.max(p.x_um);
+                min_y = min_y.min(p.y_um);
+                max_y = max_y.max(p.y_um);
+            }
+        }
+
+        let margin = config.critical_margin_um;
+        min_x = (min_x - margin).max(0.0);
+        min_y = (min_y - margin).max(0.0);
+        max_x += margin;
+        max_y += margin;
+
+        let full_report = self.check(placement, routing, netlist);
+        let critical_violations: Vec<_> = full_report
+            .violations
+            .into_iter()
+            .filter(|v| {
+                if let Some(loc) = v.location {
+                    loc.x_um >= min_x
+                        && loc.x_um <= max_x
+                        && loc.y_um >= min_y
+                        && loc.y_um <= max_y
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let errors = critical_violations
+            .iter()
+            .filter(|v| v.severity == DrcSeverity::Error)
+            .count();
+        let warnings = critical_violations
+            .iter()
+            .filter(|v| v.severity == DrcSeverity::Warning)
+            .count();
+
+        DrcReport {
+            violations: critical_violations,
+            checked_rules: full_report.checked_rules,
+            error_count: errors,
+            warning_count: warnings,
+            passed: errors == 0,
+        }
+    }
+
+    pub fn check_incremental(
+        &self,
+        placement: &Placement,
+        routing: &RoutingReport,
+        netlist: &Netlist,
+        config: &IncrementalConfig,
+    ) -> DrcReport {
+        if !config.enable || config.changed_regions.is_empty() {
+            return self.check(placement, routing, netlist);
+        }
+
+        let full_report = self.check(placement, routing, netlist);
+        let incremental_violations: Vec<_> = full_report
+            .violations
+            .into_iter()
+            .filter(|v| {
+                if let Some(loc) = v.location {
+                    config.changed_regions.iter().any(|r| {
+                        loc.x_um >= r.min_x_um
+                            && loc.x_um <= r.max_x_um
+                            && loc.y_um >= r.min_y_um
+                            && loc.y_um <= r.max_y_um
+                    })
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        let errors = incremental_violations
+            .iter()
+            .filter(|v| v.severity == DrcSeverity::Error)
+            .count();
+        let warnings = incremental_violations
+            .iter()
+            .filter(|v| v.severity == DrcSeverity::Warning)
+            .count();
+
+        DrcReport {
+            violations: incremental_violations,
+            checked_rules: full_report.checked_rules,
+            error_count: errors,
+            warning_count: warnings,
+            passed: errors == 0,
         }
     }
 
@@ -1141,6 +1298,128 @@ mod tests {
     }
 
     #[test]
+    fn incremental_drc_filters_by_region() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "cell_a");
+        let b = netlist.add_node(NodeKind::CellInstance, "cell_b");
+        let c = netlist.add_node(NodeKind::CellInstance, "cell_c");
+
+        let placement = Placement {
+            nodes: vec![
+                PlacedNode {
+                    node: a,
+                    level: 0,
+                    slot: 0,
+                    point: Point {
+                        x_um: 10.0,
+                        y_um: 10.0,
+                    },
+                },
+                PlacedNode {
+                    node: b,
+                    level: 0,
+                    slot: 1,
+                    point: Point {
+                        x_um: 12.0,
+                        y_um: 10.0,
+                    },
+                },
+                PlacedNode {
+                    node: c,
+                    level: 0,
+                    slot: 2,
+                    point: Point {
+                        x_um: 80.0,
+                        y_um: 80.0,
+                    },
+                },
+            ],
+            width_um: 100.0,
+            height_um: 100.0,
+        };
+
+        let routing = RoutingReport {
+            routes: Vec::new(),
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+        };
+
+        let pdk = Pdk::minimal("test");
+        let rules = DrcRuleSet::from_pdk(&pdk, placement.width_um, placement.height_um);
+        let checker = DrcChecker::new(rules);
+
+        let full_report = checker.check(&placement, &routing, &netlist);
+        assert!(
+            !full_report.violations.is_empty(),
+            "full check should detect JJ spacing violation"
+        );
+
+        let config = IncrementalConfig {
+            enable: true,
+            changed_regions: vec![ChangedRegion {
+                min_x_um: 5.0,
+                max_x_um: 20.0,
+                min_y_um: 5.0,
+                max_y_um: 20.0,
+            }],
+        };
+        let incremental_report = checker.check_incremental(&placement, &routing, &netlist, &config);
+        assert!(
+            !incremental_report.violations.is_empty(),
+            "incremental should report violations inside changed region"
+        );
+        assert!(
+            incremental_report
+                .violations
+                .iter()
+                .all(|v| v.location.is_some()),
+            "all incremental violations should have locations"
+        );
+
+        let other_config = IncrementalConfig {
+            enable: true,
+            changed_regions: vec![ChangedRegion {
+                min_x_um: 70.0,
+                max_x_um: 90.0,
+                min_y_um: 70.0,
+                max_y_um: 90.0,
+            }],
+        };
+        let other_report = checker.check_incremental(&placement, &routing, &netlist, &other_config);
+        assert!(
+            other_report.violations.is_empty(),
+            "incremental should not report violations outside changed region"
+        );
+
+        let disabled_config = IncrementalConfig {
+            enable: false,
+            changed_regions: vec![ChangedRegion {
+                min_x_um: 70.0,
+                max_x_um: 90.0,
+                min_y_um: 70.0,
+                max_y_um: 90.0,
+            }],
+        };
+        let disabled_report =
+            checker.check_incremental(&placement, &routing, &netlist, &disabled_config);
+        assert_eq!(
+            disabled_report.violations.len(),
+            full_report.violations.len(),
+            "disabled incremental should return full report"
+        );
+    }
+
+    #[test]
+    fn incremental_config_default() {
+        let config = IncrementalConfig::default();
+        assert!(!config.enable);
+        assert!(config.changed_regions.is_empty());
+    }
+
+    #[test]
     fn drc_report_to_svg_empty() {
         let report = DrcReport {
             violations: vec![],
@@ -1152,5 +1431,122 @@ mod tests {
         let svg = report.to_svg(&DrcSvgConfig::default());
         assert!(svg.contains("<svg"));
         assert!(!svg.contains("circle"));
+    }
+
+    #[test]
+    fn timing_driven_drc_filters_by_region() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "cell_a");
+        let b = netlist.add_node(NodeKind::CellInstance, "cell_b");
+        let c = netlist.add_node(NodeKind::CellInstance, "cell_c");
+        let d = netlist.add_node(NodeKind::CellInstance, "cell_d");
+
+        let from_ab = PinRef { node: a, port: 0 };
+        let to_ab = PinRef { node: b, port: 0 };
+        let from_cd = PinRef { node: c, port: 0 };
+        let to_cd = PinRef { node: d, port: 0 };
+        netlist.connect(from_ab, to_ab).unwrap();
+        netlist.connect(from_cd, to_cd).unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                PlacedNode {
+                    node: a,
+                    level: 0,
+                    slot: 0,
+                    point: Point {
+                        x_um: 10.0,
+                        y_um: 10.0,
+                    },
+                },
+                PlacedNode {
+                    node: b,
+                    level: 0,
+                    slot: 1,
+                    point: Point {
+                        x_um: 12.0,
+                        y_um: 10.0,
+                    },
+                },
+                PlacedNode {
+                    node: c,
+                    level: 0,
+                    slot: 2,
+                    point: Point {
+                        x_um: 500.0,
+                        y_um: 500.0,
+                    },
+                },
+                PlacedNode {
+                    node: d,
+                    level: 0,
+                    slot: 3,
+                    point: Point {
+                        x_um: 502.0,
+                        y_um: 500.0,
+                    },
+                },
+            ],
+            width_um: 1000.0,
+            height_um: 1000.0,
+        };
+
+        let routing = RoutingReport {
+            routes: Vec::new(),
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+        };
+
+        let pdk = Pdk::minimal("test");
+        let rules = DrcRuleSet::from_pdk(&pdk, 1000.0, 1000.0);
+        let checker = DrcChecker::new(rules);
+
+        let full_report = checker.check(&placement, &routing, &netlist);
+        assert!(
+            full_report.error_count >= 2,
+            "full check should find JJ violations in both regions"
+        );
+
+        let config = TimingDrivenDrcConfig {
+            enable: true,
+            critical_margin_um: 20.0,
+        };
+        let critical_pins = vec![(from_ab, to_ab)];
+        let td_report =
+            checker.check_timing_driven(&placement, &routing, &netlist, &critical_pins, &config);
+
+        assert!(
+            td_report.error_count < full_report.error_count,
+            "timing-driven report should filter out distant violations"
+        );
+        for v in &td_report.violations {
+            if let Some(loc) = v.location {
+                assert!(
+                    loc.x_um <= 32.0 && loc.y_um <= 30.0,
+                    "remaining violation should be in critical region"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timing_driven_drc_disabled_runs_full() {
+        let (placement, routing, netlist) = make_clean_placement_and_routing();
+        let pdk = Pdk::minimal("test");
+        let rules = DrcRuleSet::from_pdk(&pdk, placement.width_um, placement.height_um);
+        let checker = DrcChecker::new(rules);
+
+        let config = TimingDrivenDrcConfig {
+            enable: false,
+            critical_margin_um: 50.0,
+        };
+        let critical_pins = vec![];
+        let report =
+            checker.check_timing_driven(&placement, &routing, &netlist, &critical_pins, &config);
+
+        assert!(report.passed, "disabled timing-driven should behave like full check");
     }
 }
