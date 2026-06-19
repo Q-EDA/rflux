@@ -70,6 +70,8 @@ pub struct FlowConfig {
     pub enable_noise_margin: bool,
     pub noise_temperature_k: f64,
     pub enable_drc: bool,
+    pub cskew_target_ps: f64,
+    pub enable_clock_gating: bool,
 }
 
 impl Default for FlowConfig {
@@ -89,6 +91,8 @@ impl Default for FlowConfig {
             enable_noise_margin: false,
             noise_temperature_k: 4.2,
             enable_drc: false,
+            cskew_target_ps: 2.0,
+            enable_clock_gating: false,
         }
     }
 }
@@ -1645,6 +1649,10 @@ impl FlowRunner {
                     estimated_skew_ps: 0.0,
                     phase_count: config.clock_phase_count,
                     phases: Vec::new(),
+                    skew_target_ps: config.cskew_target_ps,
+                    skew_optimized: false,
+                    buffer_sizing_levels: 0,
+                    clock_gated: false,
                 }
             }
         };
@@ -1655,6 +1663,8 @@ impl FlowRunner {
             &placement,
             &clock_tree::ClockTreeConfig {
                 phase_count: config.clock_phase_count,
+                skew_target_ps: config.cskew_target_ps,
+                enable_clock_gating: config.enable_clock_gating,
                 ..clock_tree::ClockTreeConfig::default()
             },
         )
