@@ -15,6 +15,7 @@ members = [
 	"crates/place",
 	"crates/route",
 	"crates/extract",
+	"crates/drc",
 	"crates/py",
 	"crates/verilog",
 ]

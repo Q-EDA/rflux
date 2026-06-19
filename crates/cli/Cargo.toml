@@ -27,3 +27,4 @@ rflux-margin = { path = "../margin" }
 rflux-route = { path = "../route" }
 rflux-verify = { path = "../verify" }
 rflux-verilog = { path = "../verilog" }
+rflux-drc = { path = "../drc" }

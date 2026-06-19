@@ -62,6 +62,7 @@ enum Commands {
     Dse(DseArgs),
     AnalyzeMargin(AnalyzeMarginArgs),
     ExtractParasitics(ExtractParasiticsArgs),
+    CheckDrc(CheckDrcArgs),
 }
 
 #[derive(Debug, Args)]
@@ -380,6 +381,18 @@ struct AnalyzeMarginArgs {
 
 #[derive(Debug, Args)]
 struct ExtractParasiticsArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
+    input_format: CliNetlistInputFormat,
+    #[arg(long)]
+    pdk: Option<PathBuf>,
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CheckDrcArgs {
     #[arg(long)]
     input: PathBuf,
     #[arg(long, value_enum, default_value_t = CliNetlistInputFormat::Auto)]
@@ -1080,6 +1093,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Dse(args) => run_dse(args),
         Commands::AnalyzeMargin(args) => run_analyze_margin(args),
         Commands::ExtractParasitics(args) => run_extract_parasitics(args),
+        Commands::CheckDrc(args) => run_check_drc(args),
     }
 }
 
@@ -3743,6 +3757,48 @@ fn run_extract_parasitics(args: ExtractParasiticsArgs) -> Result<()> {
         println!("No extraction report available");
     }
     Ok(())
+}
+
+fn run_check_drc(args: CheckDrcArgs) -> Result<()> {
+    let (mut netlist, pdk) = load_cli_netlist_and_pdk(&args.input, args.input_format, args.pdk.clone())?;
+    let config = FlowConfig {
+        enable_drc: true,
+        ..Default::default()
+    };
+    let report = with_flow_runner(|flow| {
+        flow.compile_layout(&mut netlist, &pdk, &config)
+            .context("check-drc failed")
+    })?;
+
+    if let Some(ref drc) = report.drc_report {
+        let output_json = drc_report_to_json(drc);
+        emit_json(&with_schema_version(output_json), args.output.as_deref())?;
+    } else {
+        println!("DRC not enabled");
+    }
+    Ok(())
+}
+
+fn drc_report_to_json(report: &rflux_drc::DrcReport) -> Value {
+    json!({
+        "kind": "drc_report",
+        "passed": report.passed,
+        "error_count": report.error_count,
+        "warning_count": report.warning_count,
+        "checked_rules": report.checked_rules,
+        "violations": report.violations.iter().map(|v| json!({
+            "rule": v.rule,
+            "severity": match v.severity {
+                rflux_drc::DrcSeverity::Error => "error",
+                rflux_drc::DrcSeverity::Warning => "warning",
+            },
+            "location": v.location.map(|p| json!({
+                "x_um": p.x_um,
+                "y_um": p.y_um,
+            })),
+            "detail": v.detail,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn run_verify_layout(args: VerifyLayoutArgs) -> Result<()> {

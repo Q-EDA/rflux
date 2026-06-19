@@ -69,6 +69,7 @@ pub struct FlowConfig {
     pub ocv_wire_late_factor: f64,
     pub enable_noise_margin: bool,
     pub noise_temperature_k: f64,
+    pub enable_drc: bool,
 }
 
 impl Default for FlowConfig {
@@ -87,6 +88,7 @@ impl Default for FlowConfig {
             ocv_wire_late_factor: 1.05,
             enable_noise_margin: false,
             noise_temperature_k: 4.2,
+            enable_drc: false,
         }
     }
 }
@@ -494,6 +496,8 @@ pub struct LayoutReport {
     pub initial_total_detour_overhead_um: f64,
     pub detour_feedback_applied: bool,
     pub extraction_report: Option<rflux_extract::ExtractionReport>,
+    pub drc_report: Option<rflux_drc::DrcReport>,
+    pub lvs_report: Option<rflux_drc::LvsReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +626,18 @@ impl FlowRunner {
             None
         };
 
+        let drc_report = if config.enable_drc {
+            let rules = rflux_drc::DrcRuleSet::from_pdk(
+                pdk,
+                artifacts.placement.width_um,
+                artifacts.placement.height_um,
+            );
+            let checker = rflux_drc::DrcChecker::new(rules);
+            Some(checker.check(&artifacts.placement, &artifacts.routing, netlist))
+        } else {
+            None
+        };
+
         Ok(LayoutReport {
             synthesis: artifacts.synthesis,
             placement: PlacementReport {
@@ -662,6 +678,8 @@ impl FlowRunner {
             initial_total_detour_overhead_um: artifacts.initial_total_detour_overhead_um,
             detour_feedback_applied: artifacts.detour_feedback_applied,
             extraction_report,
+            drc_report,
+            lvs_report: None,
         })
     }
 

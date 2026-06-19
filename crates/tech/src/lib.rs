@@ -315,6 +315,25 @@ pub struct LengthRange {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SfqDrcRules {
+    pub min_trace_width_um: f64,
+    pub min_trace_spacing_um: f64,
+    pub min_jj_spacing_um: f64,
+    pub cell_boundary_margin_um: f64,
+}
+
+impl Default for SfqDrcRules {
+    fn default() -> Self {
+        Self {
+            min_trace_width_um: 0.5,
+            min_trace_spacing_um: 1.0,
+            min_jj_spacing_um: 5.0,
+            cell_boundary_margin_um: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SfqMaterialParams {
     pub london_depth_nm: f64,
     pub trace_thickness_um: f64,
@@ -360,6 +379,8 @@ pub struct Pdk {
     pub interconnect_timing: Vec<InterconnectTimingModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<SfqMaterialParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drc_rules: Option<SfqDrcRules>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,6 +497,7 @@ impl Pdk {
                 },
             ],
             material: Some(SfqMaterialParams::default_sfq5ee()),
+            drc_rules: Some(SfqDrcRules::default()),
         }
     }
 

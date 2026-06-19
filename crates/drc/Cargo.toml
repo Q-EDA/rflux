@@ -1,0 +1,14 @@
+[package]
+name = "rflux-drc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rflux-ir = { path = "../ir" }
+rflux-place = { path = "../place" }
+rflux-route = { path = "../route" }
+rflux-tech = { path = "../tech" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true

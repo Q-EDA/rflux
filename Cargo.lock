@@ -1026,6 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rflux-drc",
  "rflux-extract",
  "rflux-flow",
  "rflux-io",
@@ -1042,6 +1043,19 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "rflux-drc"
+version = "0.1.0"
+dependencies = [
+ "rflux-ir",
+ "rflux-place",
+ "rflux-route",
+ "rflux-tech",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1062,6 +1076,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "rayon",
+ "rflux-drc",
  "rflux-extract",
  "rflux-io",
  "rflux-ir",
