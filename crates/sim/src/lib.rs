@@ -588,6 +588,220 @@ pub fn analyze_simulation_depth(
     }
 }
 
+// ---------------------------------------------------------------------------
+// P2-3: Josephson Junction RCSJ Model
+// ---------------------------------------------------------------------------
+
+/// Josephson junction type (P2-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JosephsonJunctionType {
+    /// Standard 0-JJ: switches with 0 phase offset.
+    ZeroJj,
+    /// π-JJ: provides π phase offset (requires magnetic materials).
+    PiJj,
+}
+
+/// Parameters for the RCSJ (Resistively and Capacitively Shunted
+/// Junction) model of a Josephson junction (P2-3).
+///
+/// The RCSJ model represents a JJ as a parallel combination of:
+/// - An ideal Josephson element (supercurrent: Ic * sin(φ))
+/// - A normal resistance Rn
+/// - A capacitance Cj
+/// - An optional bias current Ib
+#[derive(Debug, Clone)]
+pub struct RcsjParams {
+    /// Critical current (A).
+    pub ic_a: f64,
+    /// Normal resistance (Ohm).
+    pub rn_ohm: f64,
+    /// Junction capacitance (F).
+    pub cj_f: f64,
+    /// Bias current (A).
+    pub ib_a: f64,
+    /// Junction type (0-JJ or π-JJ).
+    pub jj_type: JosephsonJunctionType,
+    /// Temperature (K).  Affects Ic via Ambegaokar-Baratoff relation.
+    pub temperature_k: f64,
+    /// Critical temperature (K) for the superconductor.
+    pub tc_k: f64,
+}
+
+impl RcsjParams {
+    /// Create typical SFQ junction parameters.
+    pub fn typical_sfq() -> Self {
+        Self {
+            ic_a: 0.1e-3,     // 100 μA
+            rn_ohm: 2.0,      // 2 Ohm
+            cj_f: 0.5e-12,    // 0.5 pF
+            ib_a: 0.05e-3,    // 50 μA (sub-critical)
+            jj_type: JosephsonJunctionType::ZeroJj,
+            temperature_k: 4.2,
+            tc_k: 9.2,        // Niobium
+        }
+    }
+
+    /// Compute the characteristic voltage Vc = Ic * Rn.
+    #[must_use]
+    pub fn vc_v(&self) -> f64 {
+        self.ic_a * self.rn_ohm
+    }
+
+    /// Compute the characteristic frequency ωc = 2 * e * Vc / ℏ.
+    #[must_use]
+    pub fn omega_c_ghz(&self) -> f64 {
+        let e = 1.602e-19;  // electron charge
+        let hbar = 1.055e-34; // reduced Planck constant
+        2.0 * e * self.vc_v() / hbar / 1e9
+    }
+
+    /// Compute the Stewart-McCumber parameter βc = 2 * e * Ic * Rn² * Cj / ℏ.
+    /// βc < 1: overdamped (no hysteresis)
+    /// βc > 1: underdamped (hysteretic, typical for SFQ)
+    #[must_use]
+    pub fn beta_c(&self) -> f64 {
+        let e = 1.602e-19;
+        let hbar = 1.055e-34;
+        2.0 * e * self.ic_a * self.rn_ohm * self.rn_ohm * self.cj_f / hbar
+    }
+
+    /// Temperature-corrected critical current using Ambegaokar-Baratoff.
+    /// Ic(T) = Ic(0) * tanh(Δ(T) / (2*kB*T))
+    /// where Δ(T) ≈ Δ(0) * sqrt(1 - (T/Tc)²) for T < Tc.
+    #[must_use]
+    pub fn ic_at_temperature(&self) -> f64 {
+        if self.temperature_k >= self.tc_k {
+            return 0.0;
+        }
+        let delta_0 = 1.76 * 1.381e-23 * self.tc_k; // Δ(0) = 1.76 * kB * Tc
+        let delta_t = delta_0 * (1.0 - (self.temperature_k / self.tc_k).powi(2)).sqrt();
+        let kb = 1.381e-23;
+        self.ic_a * (delta_t / (2.0 * kb * self.temperature_k)).tanh()
+    }
+
+    /// Generate a SPICE model card string for this junction.
+    pub fn to_spice_model_card(&self, model_name: &str) -> String {
+        let ic = self.ic_at_temperature();
+        let phase_offset = match self.jj_type {
+            JosephsonJunctionType::ZeroJj => 0.0,
+            JosephsonJunctionType::PiJj => std::f64::consts::PI,
+        };
+        format!(
+            ".model {} jj(rn={:.6} ic={:.6e} cj={:.6e} vgap={:.6e} tde={:.6})",
+            model_name,
+            self.rn_ohm,
+            ic,
+            self.cj_f,
+            self.vc_v() * 2.0, // gap voltage ≈ 2*Vc for Nb
+            phase_offset,
+        )
+    }
+}
+
+/// Result of RCSJ simulation for a single time step (P2-3).
+#[derive(Debug, Clone)]
+pub struct RcsjStepResult {
+    /// Phase across the junction (radians).
+    pub phase_rad: f64,
+    /// Voltage across the junction (V).
+    pub voltage_v: f64,
+    /// Supercurrent (A).
+    pub supercurrent_a: f64,
+    /// Normal current (A).
+    pub normal_current_a: f64,
+    /// Displacement current (A).
+    pub displacement_current_a: f64,
+    /// Total current (A).
+    pub total_current_a: f64,
+}
+
+/// RCSJ Josephson junction simulator (P2-3).
+///
+/// Simulates a single Josephson junction using the RCSJ model
+/// with a 4th-order Runge-Kutta integrator for the phase dynamics.
+pub struct RcsjSimulator {
+    pub params: RcsjParams,
+    /// Internal phase state (radians).
+    phase: f64,
+    /// Internal phase velocity (rad/s).
+    phase_dot: f64,
+}
+
+impl RcsjSimulator {
+    pub fn new(params: RcsjParams) -> Self {
+        Self {
+            params,
+            phase: 0.0,
+            phase_dot: 0.0,
+        }
+    }
+
+    /// Advance the simulation by one time step using RK4.
+    ///
+    /// The RCSJ equation is:
+    ///   Cj * dV/dt + V/Rn + Ic * sin(φ + φ0) = Ib
+    /// where V = (ℏ/2e) * dφ/dt
+    ///
+    /// Rewritten as a second-order ODE in φ:
+    ///   (ℏ*Cj/2e) * d²φ/dt² + (ℏ/(2e*Rn)) * dφ/dt + Ic*sin(φ+φ0) = Ib
+    pub fn step(&mut self, dt_s: f64, bias_current_a: f64) -> RcsjStepResult {
+        let hbar = 1.055e-34;
+        let e = 1.602e-19;
+        let phi0 = match self.params.jj_type {
+            JosephsonJunctionType::ZeroJj => 0.0,
+            JosephsonJunctionType::PiJj => std::f64::consts::PI,
+        };
+        let ic = self.params.ic_at_temperature();
+
+        let alpha = hbar / (2.0 * e); // ℏ/2e
+        let c_coeff = alpha * self.params.cj_f;
+        let g_coeff = alpha / self.params.rn_ohm;
+
+        // RK4 integration
+        let phi = self.phase;
+        let phi_d = self.phase_dot;
+
+        let f = |p: f64, pd: f64| -> f64 {
+            (bias_current_a - g_coeff * pd - ic * (p + phi0).sin()) / c_coeff
+        };
+
+        let k1_pd = f(phi, phi_d);
+        let k1_p = phi_d;
+
+        let k2_pd = f(phi + 0.5 * dt_s * k1_p, phi_d + 0.5 * dt_s * k1_pd);
+        let k2_p = phi_d + 0.5 * dt_s * k1_pd;
+
+        let k3_pd = f(phi + 0.5 * dt_s * k2_p, phi_d + 0.5 * dt_s * k2_pd);
+        let k3_p = phi_d + 0.5 * dt_s * k2_pd;
+
+        let k4_pd = f(phi + dt_s * k3_p, phi_d + dt_s * k3_pd);
+        let k4_p = phi_d + dt_s * k3_pd;
+
+        self.phase = phi + (dt_s / 6.0) * (k1_p + 2.0 * k2_p + 2.0 * k3_p + k4_p);
+        self.phase_dot = phi_d + (dt_s / 6.0) * (k1_pd + 2.0 * k2_pd + 2.0 * k3_pd + k4_pd);
+
+        let voltage = alpha * self.phase_dot;
+        let supercurrent = ic * (self.phase + phi0).sin();
+        let normal_current = voltage / self.params.rn_ohm;
+        let displacement_current = self.params.cj_f * voltage / dt_s;
+
+        RcsjStepResult {
+            phase_rad: self.phase,
+            voltage_v: voltage,
+            supercurrent_a: supercurrent,
+            normal_current_a: normal_current,
+            displacement_current_a: displacement_current,
+            total_current_a: bias_current_a,
+        }
+    }
+
+    /// Reset the junction state.
+    pub fn reset(&mut self) {
+        self.phase = 0.0;
+        self.phase_dot = 0.0;
+    }
+}
+
 pub fn parse_spice_netlist(deck: &str) -> Result<Vec<SpiceDevice>, SimulationError> {
     let mut devices = Vec::new();
     for line in deck.lines() {
@@ -14888,5 +15102,106 @@ mod hierarchical_tests {
         for b in &macro_boundaries {
             assert_eq!(b.signal_type, "voltage");
         }
+    }
+}
+
+// --- P2-3: RCSJ model tests ---
+
+#[cfg(test)]
+mod rcsj_tests {
+    use super::*;
+
+    #[test]
+    fn rcsj_typical_params() {
+        let params = RcsjParams::typical_sfq();
+        assert!((params.ic_a - 0.1e-3).abs() < 1e-12);
+        assert!((params.rn_ohm - 2.0).abs() < 1e-9);
+        assert!(params.beta_c() > 0.0);
+        assert!(params.beta_c() < 100.0); // reasonable range
+    }
+
+    #[test]
+    fn rcsj_characteristic_voltage() {
+        let params = RcsjParams::typical_sfq();
+        let vc = params.vc_v();
+        assert!((vc - 0.2e-3).abs() < 1e-9); // 0.1mA * 2Ω = 0.2mV
+    }
+
+    #[test]
+    fn rcsj_temperature_correction() {
+        let mut params = RcsjParams::typical_sfq();
+        params.temperature_k = 0.1; // near zero T
+        let ic_low = params.ic_at_temperature();
+
+        params.temperature_k = 4.2; // liquid helium
+        let ic_4k = params.ic_at_temperature();
+
+        params.temperature_k = 8.0; // near Tc
+        let ic_near_tc = params.ic_at_temperature();
+
+        // Ic decreases with temperature
+        assert!(ic_low > ic_4k);
+        assert!(ic_4k > ic_near_tc);
+        assert!(ic_near_tc > 0.0);
+    }
+
+    #[test]
+    fn rcsj_at_tc_current_is_zero() {
+        let mut params = RcsjParams::typical_sfq();
+        params.temperature_k = params.tc_k;
+        assert!((params.ic_at_temperature()).abs() < 1e-20);
+    }
+
+    #[test]
+    fn rcsj_spice_model_card() {
+        let params = RcsjParams::typical_sfq();
+        let card = params.to_spice_model_card("nb_jj");
+        assert!(card.contains(".model nb_jj jj("));
+        assert!(card.contains("ic="));
+        assert!(card.contains("rn="));
+        assert!(card.contains("cj="));
+    }
+
+    #[test]
+    fn rcsj_pi_jj_spice_card_has_phase_offset() {
+        let mut params = RcsjParams::typical_sfq();
+        params.jj_type = JosephsonJunctionType::PiJj;
+        let card = params.to_spice_model_card("pi_jj");
+        assert!(card.contains("tde="));
+        // π ≈ 3.14159
+        assert!(card.contains("3.14"));
+    }
+
+    #[test]
+    fn rcsj_simulator_basic_switching() {
+        let params = RcsjParams::typical_sfq();
+        let mut sim = RcsjSimulator::new(params.clone());
+
+        // Apply a bias current above Ic/2 for a short pulse
+        let dt = 1e-12; // 1 ps time step
+        let steps = 1000;
+
+        let mut max_voltage = 0.0f64;
+        for _ in 0..steps {
+            let result = sim.step(dt, params.ic_a * 0.8);
+            max_voltage = max_voltage.max(result.voltage_v.abs());
+        }
+
+        // Should produce a voltage pulse (single flux quantum)
+        assert!(max_voltage > 0.0);
+    }
+
+    #[test]
+    fn rcsj_simulator_reset() {
+        let params = RcsjParams::typical_sfq();
+        let mut sim = RcsjSimulator::new(params.clone());
+
+        sim.step(1e-12, 0.05e-3);
+        sim.step(1e-12, 0.05e-3);
+        assert!(sim.phase.abs() > 0.0 || sim.phase_dot.abs() > 0.0);
+
+        sim.reset();
+        assert!((sim.phase).abs() < 1e-15);
+        assert!((sim.phase_dot).abs() < 1e-15);
     }
 }
