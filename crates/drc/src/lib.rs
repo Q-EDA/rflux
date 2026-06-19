@@ -26,6 +26,9 @@ impl DrcViolation {
             "ptl_length" => "RFLOW-DRC-002",
             "jj_spacing" => "RFLOW-DRC-003",
             "cell_boundary" => "RFLOW-DRC-004",
+            "max_metal_density" => "RFLOW-DRC-005",
+            "antenna_ratio" => "RFLOW-DRC-006",
+            "via_spacing" => "RFLOW-DRC-007",
             _ => "RFLOW-DRC-000",
         }
     }
@@ -66,6 +69,10 @@ pub struct DrcRuleSet {
     pub cell_boundary_margin_um: f64,
     pub layout_width_um: f64,
     pub layout_height_um: f64,
+    pub max_metal_density: f64,
+    pub min_metal_density: f64,
+    pub max_antenna_ratio: f64,
+    pub min_via_spacing_um: f64,
 }
 
 impl DrcRuleSet {
@@ -86,6 +93,10 @@ impl DrcRuleSet {
             cell_boundary_margin_um: boundary_margin,
             layout_width_um: width_um,
             layout_height_um: height_um,
+            max_metal_density: 0.8,
+            min_metal_density: 0.2,
+            max_antenna_ratio: 100.0,
+            min_via_spacing_um: 2.0,
         }
     }
 }
@@ -120,6 +131,12 @@ impl DrcChecker {
 
         checked_rules.push("cell_boundary".to_string());
         self.check_cell_boundary(placement, netlist, &mut violations);
+
+        checked_rules.push("max_metal_density".to_string());
+        violations.extend(self.check_metal_density(placement));
+
+        checked_rules.push("antenna_ratio".to_string());
+        violations.extend(self.check_antenna_effect(netlist, placement));
 
         let error_count = violations
             .iter()
@@ -271,6 +288,87 @@ impl DrcChecker {
                 });
             }
         }
+    }
+
+    fn check_metal_density(&self, placement: &Placement) -> Vec<DrcViolation> {
+        let mut violations = Vec::new();
+        let grid_size = 100.0;
+        let cols = (self.rules.layout_width_um / grid_size).ceil() as usize;
+        let rows = (self.rules.layout_height_um / grid_size).ceil() as usize;
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let x_min = col as f64 * grid_size;
+                let y_min = row as f64 * grid_size;
+                let x_max = (x_min + grid_size).min(self.rules.layout_width_um);
+                let y_max = (y_min + grid_size).min(self.rules.layout_height_um);
+                let cell_area = (x_max - x_min) * (y_max - y_min);
+
+                let cell_count = placement
+                    .nodes
+                    .iter()
+                    .filter(|n| {
+                        n.point.x_um >= x_min
+                            && n.point.x_um < x_max
+                            && n.point.y_um >= y_min
+                            && n.point.y_um < y_max
+                    })
+                    .count();
+
+                let metal_area = cell_count as f64 * 20.0 * 12.0;
+                let density = metal_area / cell_area;
+
+                if density > self.rules.max_metal_density {
+                    violations.push(DrcViolation {
+                        rule: "max_metal_density".to_string(),
+                        severity: DrcSeverity::Warning,
+                        location: Some(Point {
+                            x_um: (x_min + x_max) / 2.0,
+                            y_um: (y_min + y_max) / 2.0,
+                        }),
+                        detail: format!(
+                            "density {:.2} > max {:.2}",
+                            density, self.rules.max_metal_density
+                        ),
+                    });
+                }
+            }
+        }
+        violations
+    }
+
+    fn check_antenna_effect(
+        &self,
+        netlist: &Netlist,
+        placement: &Placement,
+    ) -> Vec<DrcViolation> {
+        let mut violations = Vec::new();
+        for edge in netlist.edge_pairs() {
+            if let (Some(p_from), Some(p_to)) = (
+                placement.point_of(edge.0.node),
+                placement.point_of(edge.1.node),
+            ) {
+                let wire_length =
+                    (p_from.x_um - p_to.x_um).abs() + (p_from.y_um - p_to.y_um).abs();
+                let wire_area = wire_length * 1.0;
+                let gate_area = 20.0 * 12.0;
+                if wire_area > 0.0 {
+                    let ratio = gate_area / wire_area;
+                    if ratio > self.rules.max_antenna_ratio {
+                        violations.push(DrcViolation {
+                            rule: "antenna_ratio".to_string(),
+                            severity: DrcSeverity::Warning,
+                            location: Some(p_from),
+                            detail: format!(
+                                "ratio {:.1} > max {:.1}",
+                                ratio, self.rules.max_antenna_ratio
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        violations
     }
 }
 
@@ -648,5 +746,105 @@ mod tests {
         );
         assert!(!report.device_count_mismatch);
         assert!(!report.connectivity_mismatch);
+    }
+
+    #[test]
+    fn drc_detects_high_metal_density() {
+        let mut netlist = Netlist::new();
+        let mut nodes = Vec::new();
+        for i in 0..50 {
+            let n = netlist.add_node(NodeKind::CellInstance, &format!("cell_{}", i));
+            nodes.push(PlacedNode {
+                node: n,
+                level: 0,
+                slot: i,
+                point: Point {
+                    x_um: 10.0 + (i % 10) as f64 * 2.0,
+                    y_um: 10.0 + (i / 10) as f64 * 2.0,
+                },
+            });
+        }
+
+        let placement = Placement {
+            nodes,
+            width_um: 100.0,
+            height_um: 100.0,
+        };
+
+        let routing = RoutingReport {
+            routes: Vec::new(),
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+        };
+
+        let pdk = Pdk::minimal("test");
+        let mut rules = DrcRuleSet::from_pdk(&pdk, 100.0, 100.0);
+        rules.max_metal_density = 0.1;
+        let checker = DrcChecker::new(rules);
+        let report = checker.check(&placement, &routing, &netlist);
+
+        assert!(
+            report.violations.iter().any(|v| v.rule == "max_metal_density"),
+            "should detect high metal density: {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn drc_antenna_ratio_ok_for_short_wire() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::CellInstance, "cell_a");
+        let b = netlist.add_node(NodeKind::CellInstance, "cell_b");
+        let from = PinRef { node: a, port: 0 };
+        let to = PinRef { node: b, port: 0 };
+        netlist.connect(from, to).unwrap();
+
+        let placement = Placement {
+            nodes: vec![
+                PlacedNode {
+                    node: a,
+                    level: 0,
+                    slot: 0,
+                    point: Point {
+                        x_um: 10.0,
+                        y_um: 10.0,
+                    },
+                },
+                PlacedNode {
+                    node: b,
+                    level: 0,
+                    slot: 1,
+                    point: Point {
+                        x_um: 50.0,
+                        y_um: 10.0,
+                    },
+                },
+            ],
+            width_um: 100.0,
+            height_um: 100.0,
+        };
+
+        let routing = RoutingReport {
+            routes: Vec::new(),
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+        };
+
+        let pdk = Pdk::minimal("test");
+        let rules = DrcRuleSet::from_pdk(&pdk, 100.0, 100.0);
+        let checker = DrcChecker::new(rules);
+        let report = checker.check(&placement, &routing, &netlist);
+
+        assert!(
+            !report.violations.iter().any(|v| v.rule == "antenna_ratio"),
+            "short wire should not trigger antenna violation: {:?}",
+            report.violations
+        );
     }
 }

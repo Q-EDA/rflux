@@ -184,6 +184,25 @@ pub struct PathReport {
     pub found_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CornerTimingResult {
+    pub corner_name: String,
+    pub worst_setup_slack_ps: f64,
+    pub worst_hold_slack_ps: f64,
+    pub critical_path_delay_ps: f64,
+    pub setup_violations: usize,
+    pub hold_violations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MultiCornerReport {
+    pub corners: Vec<CornerTimingResult>,
+    pub worst_corner_setup: Option<String>,
+    pub worst_corner_hold: Option<String>,
+    pub all_corners_pass: bool,
+    pub corner_count: usize,
+}
+
 impl TimingReport {
     /// Compute hold fix recommendations for all violating arcs.
     ///
@@ -874,6 +893,71 @@ impl StaticTimingAnalyzer {
             noise_margin,
             path_report: None,
         })
+    }
+
+    pub fn analyze_multi_corner(
+        &self,
+        netlist: &Netlist,
+        routing: &RoutingReport,
+        pdk: &Pdk,
+        config: &TimingConfig,
+        coupling_map: Option<&CouplingMap>,
+    ) -> MultiCornerReport {
+        let mut corners = Vec::new();
+
+        if let Ok(report) = self.analyze(netlist, routing, pdk, config, coupling_map) {
+            corners.push(CornerTimingResult {
+                corner_name: "baseline".to_string(),
+                worst_setup_slack_ps: report.worst_setup_slack_ps,
+                worst_hold_slack_ps: report.worst_hold_slack_ps,
+                critical_path_delay_ps: report.critical_path_delay_ps,
+                setup_violations: report.setup_violations,
+                hold_violations: report.hold_violations,
+            });
+        }
+
+        for corner in &pdk.timing_corners {
+            let mut corner_pdk = pdk.clone();
+            corner_pdk.active_timing_corner = Some(corner.name.clone());
+            if let Ok(report) = self.analyze(netlist, routing, &corner_pdk, config, coupling_map) {
+                corners.push(CornerTimingResult {
+                    corner_name: corner.name.clone(),
+                    worst_setup_slack_ps: report.worst_setup_slack_ps,
+                    worst_hold_slack_ps: report.worst_hold_slack_ps,
+                    critical_path_delay_ps: report.critical_path_delay_ps,
+                    setup_violations: report.setup_violations,
+                    hold_violations: report.hold_violations,
+                });
+            }
+        }
+
+        let worst_corner_setup = corners
+            .iter()
+            .min_by(|a, b| {
+                a.worst_setup_slack_ps
+                    .partial_cmp(&b.worst_setup_slack_ps)
+                    .unwrap()
+            })
+            .map(|c| c.corner_name.clone());
+        let worst_corner_hold = corners
+            .iter()
+            .min_by(|a, b| {
+                a.worst_hold_slack_ps
+                    .partial_cmp(&b.worst_hold_slack_ps)
+                    .unwrap()
+            })
+            .map(|c| c.corner_name.clone());
+        let all_pass = corners
+            .iter()
+            .all(|c| c.setup_violations == 0 && c.hold_violations == 0);
+
+        MultiCornerReport {
+            corner_count: corners.len(),
+            corners,
+            worst_corner_setup,
+            worst_corner_hold,
+            all_corners_pass: all_pass,
+        }
     }
 
     pub fn analyze_statistical(
@@ -4566,5 +4650,192 @@ mod tests {
         assert!(!path_report.paths.is_empty());
         assert!(path_report.paths[0].is_setup_violation);
         assert!(path_report.paths[0].total_slack_ps < 0.0);
+    }
+
+    fn make_simple_netlist_routing() -> (Netlist, RoutingReport, NodeId, NodeId) {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink");
+
+        let routing = RoutingReport {
+            routes: vec![NetRoute {
+                from: PinRef {
+                    node: source,
+                    port: 0,
+                },
+                to: PinRef {
+                    node: sink,
+                    port: 0,
+                },
+                mode: RouteMode::Jtl,
+                segments: Vec::new(),
+                direct_length_um: 40.0,
+                length_um: 40.0,
+            }],
+            total_length_um: 40.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 1,
+            ptl_routes: 0,
+        };
+
+        (netlist, routing, source, sink)
+    }
+
+    #[test]
+    fn multi_corner_single_baseline_when_no_corners() {
+        let (netlist, routing, _source, _sink) = make_simple_netlist_routing();
+        let pdk = Pdk::minimal("test");
+        let report = StaticTimingAnalyzer::new().analyze_multi_corner(
+            &netlist,
+            &routing,
+            &pdk,
+            &TimingConfig::default(),
+            None,
+        );
+
+        assert_eq!(report.corner_count, 1);
+        assert_eq!(report.corners.len(), 1);
+        assert_eq!(report.corners[0].corner_name, "baseline");
+        assert!(report.worst_corner_setup.is_some());
+        assert!(report.worst_corner_hold.is_some());
+    }
+
+    #[test]
+    fn multi_corner_includes_slow_and_fast_corners() {
+        let (netlist, routing, _source, _sink) = make_simple_netlist_routing();
+        let mut pdk = Pdk::minimal("test");
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "slow".to_string(),
+            process: Some("ss".to_string()),
+            voltage_v: Some(2.4),
+            temperature_k: Some(4.2),
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 28.0,
+                setup_ps: 8.0,
+                hold_ps: 4.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 8.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 24.0,
+                    },
+                ],
+            }],
+        });
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "fast".to_string(),
+            process: Some("ff".to_string()),
+            voltage_v: Some(2.6),
+            temperature_k: Some(4.2),
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 5.0,
+                setup_ps: 3.0,
+                hold_ps: 2.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 3.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 10.0,
+                    },
+                ],
+            }],
+        });
+
+        let report = StaticTimingAnalyzer::new().analyze_multi_corner(
+            &netlist,
+            &routing,
+            &pdk,
+            &TimingConfig::default(),
+            None,
+        );
+
+        assert_eq!(report.corner_count, 3);
+        assert_eq!(report.corners.len(), 3);
+        assert_eq!(report.corners[0].corner_name, "baseline");
+        assert_eq!(report.corners[1].corner_name, "slow");
+        assert_eq!(report.corners[2].corner_name, "fast");
+
+        let slow = report.corners.iter().find(|c| c.corner_name == "slow").unwrap();
+        let fast = report.corners.iter().find(|c| c.corner_name == "fast").unwrap();
+        assert!(slow.critical_path_delay_ps > fast.critical_path_delay_ps);
+        assert!(slow.worst_setup_slack_ps < fast.worst_setup_slack_ps);
+
+        assert_eq!(report.worst_corner_setup.as_deref(), Some("slow"));
+        assert_eq!(report.worst_corner_hold.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn multi_corner_all_pass_when_no_violations() {
+        let (netlist, routing, _source, _sink) = make_simple_netlist_routing();
+        let mut pdk = Pdk::minimal("test");
+        pdk.timing_corners.push(PdkTimingCorner {
+            name: "typical".to_string(),
+            process: None,
+            voltage_v: None,
+            temperature_k: None,
+            cell_timing: vec![CellTimingModel {
+                kind: SfCellKind::GenericGate,
+                intrinsic_delay_ps: 8.0,
+                setup_ps: 5.0,
+                hold_ps: 3.0,
+            }],
+            named_cell_timing: Vec::new(),
+            interconnect_timing: vec![InterconnectTimingModel {
+                kind: InterconnectKind::Jtl,
+                points: vec![
+                    TimingPoint {
+                        length_um: 0.0,
+                        delay_ps: 5.0,
+                    },
+                    TimingPoint {
+                        length_um: 40.0,
+                        delay_ps: 18.0,
+                    },
+                ],
+            }],
+        });
+
+        let report = StaticTimingAnalyzer::new().analyze_multi_corner(
+            &netlist,
+            &routing,
+            &pdk,
+            &TimingConfig::default(),
+            None,
+        );
+
+        assert!(report.all_corners_pass);
+        for corner in &report.corners {
+            assert_eq!(corner.setup_violations, 0);
+            assert_eq!(corner.hold_violations, 0);
+        }
     }
 }
