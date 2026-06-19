@@ -19,6 +19,18 @@ pub struct DrcViolation {
     pub detail: String,
 }
 
+impl DrcViolation {
+    pub fn error_code(&self) -> &'static str {
+        match self.rule.as_str() {
+            "trace_spacing" => "RFLOW-DRC-001",
+            "ptl_length" => "RFLOW-DRC-002",
+            "jj_spacing" => "RFLOW-DRC-003",
+            "cell_boundary" => "RFLOW-DRC-004",
+            _ => "RFLOW-DRC-000",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrcReport {
     pub violations: Vec<DrcViolation>,
@@ -487,6 +499,17 @@ mod tests {
         };
 
         (placement, routing, netlist)
+    }
+
+    #[test]
+    fn drc_error_codes_are_stable() {
+        let v = DrcViolation {
+            rule: "trace_spacing".to_string(),
+            severity: DrcSeverity::Error,
+            location: None,
+            detail: "".to_string(),
+        };
+        assert_eq!(v.error_code(), "RFLOW-DRC-001");
     }
 
     #[test]

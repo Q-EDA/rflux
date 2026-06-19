@@ -226,6 +226,167 @@ impl ParsedDeck {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpiceDevice {
+    pub name: String,
+    pub kind: SpiceDeviceKind,
+    pub connections: Vec<String>,
+    pub params: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpiceDeviceKind {
+    SubcktInstance(String),
+    Jj,
+    Resistor,
+    Inductor,
+    Capacitor,
+    TransmissionLine,
+    MutualInductance,
+    VoltageSource,
+    CurrentSource,
+}
+
+pub fn parse_spice_netlist(deck: &str) -> Result<Vec<SpiceDevice>, SimulationError> {
+    let mut devices = Vec::new();
+    for line in deck.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('.') {
+            continue;
+        }
+        if let Some(device) = parse_spice_element_line(trimmed)? {
+            devices.push(device);
+        }
+    }
+    Ok(devices)
+}
+
+fn parse_spice_element_line(line: &str) -> Result<Option<SpiceDevice>, SimulationError> {
+    let first = line.chars().next().unwrap_or(' ');
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 3 {
+        return Ok(None);
+    }
+
+    match first {
+        'X' | 'x' => {
+            let subckt = parts.last().unwrap().to_string();
+            let connections = parts[1..parts.len() - 1]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            Ok(Some(SpiceDevice {
+                name: parts[0].to_string(),
+                kind: SpiceDeviceKind::SubcktInstance(subckt),
+                connections,
+                params: BTreeMap::new(),
+            }))
+        }
+        'J' | 'j' => {
+            if parts.len() >= 4 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::Jj,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'R' | 'r' => {
+            if parts.len() >= 4 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::Resistor,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'L' | 'l' => {
+            if parts.len() >= 4 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::Inductor,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'C' | 'c' => {
+            if parts.len() >= 4 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::Capacitor,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'T' | 't' => {
+            if parts.len() >= 5 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::TransmissionLine,
+                    connections: vec![
+                        parts[1].to_string(),
+                        parts[2].to_string(),
+                        parts[3].to_string(),
+                        parts[4].to_string(),
+                    ],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'K' | 'k' => {
+            if parts.len() >= 4 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::MutualInductance,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'V' | 'v' => {
+            if parts.len() >= 3 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::VoltageSource,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        'I' | 'i' => {
+            if parts.len() >= 3 {
+                Ok(Some(SpiceDevice {
+                    name: parts[0].to_string(),
+                    kind: SpiceDeviceKind::CurrentSource,
+                    connections: vec![parts[1].to_string(), parts[2].to_string()],
+                    params: BTreeMap::new(),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SubcktDef {
     pins: Vec<String>,
@@ -13897,6 +14058,61 @@ mod tests {
         assert_eq!(analysis.recommended_strategy, SimulationStrategy::EventDriven);
         assert!(analysis.event_driven_speedup > 10.0);
         assert_eq!(analysis.violation_count, 5);
+    }
+
+    #[test]
+    fn parse_spice_simple() {
+        let deck = "X1 in1 in2 out and_gate\nX2 out in3 out2 or_gate\n";
+        let devices = super::parse_spice_netlist(deck).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name, "X1");
+        assert_eq!(
+            devices[0].kind,
+            super::SpiceDeviceKind::SubcktInstance("and_gate".to_string())
+        );
+        assert_eq!(devices[0].connections, vec!["in1", "in2", "out"]);
+    }
+
+    #[test]
+    fn parse_spice_skips_comments_and_controls() {
+        let deck = "* comment\n.title test\n.tran 1p 10p\nX1 a b c sub\n";
+        let devices = super::parse_spice_netlist(deck).unwrap();
+        assert_eq!(devices.len(), 1);
+    }
+
+    #[test]
+    fn parse_spice_jj_device() {
+        let deck = "J1 n1 n2 jjmod\n";
+        let devices = super::parse_spice_netlist(deck).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].kind, super::SpiceDeviceKind::Jj);
+        assert_eq!(devices[0].connections, vec!["n1", "n2"]);
+    }
+
+    #[test]
+    fn parse_spice_resistor() {
+        let deck = "R1 in out 50\n";
+        let devices = super::parse_spice_netlist(deck).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].kind, super::SpiceDeviceKind::Resistor);
+    }
+
+    #[test]
+    fn parse_spice_transmission_line() {
+        let deck = "T1 n1 n2 n3 n4 tmod\n";
+        let devices = super::parse_spice_netlist(deck).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(
+            devices[0].kind,
+            super::SpiceDeviceKind::TransmissionLine
+        );
+        assert_eq!(devices[0].connections.len(), 4);
+    }
+
+    #[test]
+    fn parse_spice_empty_deck() {
+        let devices = super::parse_spice_netlist("").unwrap();
+        assert!(devices.is_empty());
     }
 }
 

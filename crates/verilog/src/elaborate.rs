@@ -27,6 +27,12 @@ impl std::fmt::Display for ElabError {
 
 impl std::error::Error for ElabError {}
 
+impl ElabError {
+    pub fn code(&self) -> &'static str {
+        "RFLOW-VERILOG-002"
+    }
+}
+
 fn gate_name_to_logic_op(name: &str) -> Option<LogicOp> {
     match name.to_lowercase().as_str() {
         "and" => Some(LogicOp::And),
@@ -315,6 +321,12 @@ fn elaborate_expr(
 mod tests {
     use super::*;
     use crate::parser::parse_verilog;
+
+    #[test]
+    fn elab_error_codes_are_stable() {
+        let err = ElabError::Msg("test".to_string());
+        assert_eq!(err.code(), "RFLOW-VERILOG-002");
+    }
 
     #[test]
     fn elaborate_simple_and_gate() {

@@ -36,6 +36,7 @@ pub enum NetlistInputFormat {
     IrJson,
     Bench,
     Verilog,
+    Spice,
 }
 
 #[derive(Debug, Error)]
@@ -53,6 +54,8 @@ pub enum IoError {
     TopCellNotFound,
     #[error("bench parse error: {0}")]
     BenchParse(String),
+    #[error("spice parse error: {0}")]
+    SpiceParse(String),
     #[error("lef writing is not supported by libreda-lefdef")]
     LefWriteUnsupported,
     #[error("unsupported {kind} schema version {version}")]
@@ -115,6 +118,7 @@ impl IoError {
             IoError::LefDef(_) => "RFLOW-INPUT-002",
             IoError::TopCellNotFound => "RFLOW-INPUT-002",
             IoError::BenchParse(_) => "RFLOW-INPUT-002",
+            IoError::SpiceParse(_) => "RFLOW-INPUT-002",
             IoError::LefWriteUnsupported => "RFLOW-LIMIT-001",
             IoError::UnsupportedSchemaVersion { .. } => "RFLOW-SCHEMA-001",
             IoError::InvalidJsonEnvelope { .. } => "RFLOW-SCHEMA-002",
@@ -133,6 +137,9 @@ impl IoError {
             }
             IoError::BenchParse(_) => {
                 "Keep the file within the supported bench subset and ensure signals are declared before use."
+            }
+            IoError::SpiceParse(_) => {
+                "Check the SPICE netlist syntax. Supported elements: X (subckt), J (jj), R, L, C, T (tline), K (mutual), V (voltage source), I (current source)."
             }
             IoError::LefWriteUnsupported => {
                 "Use DEF export for now; LEF writing is not part of the supported output surface yet."
@@ -185,6 +192,8 @@ pub fn detect_netlist_input_format(path: impl AsRef<Path>) -> NetlistInputFormat
         NetlistInputFormat::Bench
     } else if ext.eq_ignore_ascii_case("v") {
         NetlistInputFormat::Verilog
+    } else if ext.eq_ignore_ascii_case("cir") || ext.eq_ignore_ascii_case("sp") || ext.eq_ignore_ascii_case("spice") {
+        NetlistInputFormat::Spice
     } else {
         NetlistInputFormat::IrJson
     }
@@ -209,7 +218,82 @@ pub fn read_netlist_as(
             rflux_verilog::elaborate_to_ir(&src, "top")
                 .map_err(|e| IoError::BenchParse(e.to_string()))
         }
+        NetlistInputFormat::Spice => {
+            let content = fs::read_to_string(path)?;
+            let devices = rflux_sim::parse_spice_netlist(&content)
+                .map_err(|e| IoError::SpiceParse(e.to_string()))?;
+            spice_to_ir(&devices)
+        }
     }
+}
+
+pub fn spice_to_ir(devices: &[rflux_sim::SpiceDevice]) -> Result<Netlist, IoError> {
+    use std::collections::HashMap;
+    let mut netlist = Netlist::new();
+    let mut node_map: HashMap<String, rflux_ir::NodeId> = HashMap::new();
+
+    for device in devices {
+        match &device.kind {
+            rflux_sim::SpiceDeviceKind::SubcktInstance(subckt) => {
+                let logic_op = match subckt.as_str() {
+                    "and" => Some(LogicOp::And),
+                    "or" => Some(LogicOp::Or),
+                    "not" | "buf" => Some(LogicOp::Not),
+                    "xor" => Some(LogicOp::Xor),
+                    "nand" => Some(LogicOp::And),
+                    "nor" => Some(LogicOp::Or),
+                    "xnor" => Some(LogicOp::Xor),
+                    "mux" => Some(LogicOp::Mux2),
+                    "dff" => Some(LogicOp::DffEnable),
+                    _ => None,
+                };
+                let kind = if subckt == "dff" {
+                    NodeKind::Dff
+                } else {
+                    NodeKind::CellInstance
+                };
+                let node = netlist.add_node_with_logic(kind, &device.name, logic_op);
+                node_map.insert(device.name.clone(), node);
+            }
+            rflux_sim::SpiceDeviceKind::Jj => {
+                let node = netlist.add_node(NodeKind::CellInstance, &device.name);
+                node_map.insert(device.name.clone(), node);
+            }
+            _ => {}
+        }
+    }
+
+    let mut net_devices: HashMap<String, Vec<(rflux_ir::NodeId, usize)>> = HashMap::new();
+    for device in devices {
+        if let Some(&node_id) = node_map.get(&device.name) {
+            for (i, net_name) in device.connections.iter().enumerate() {
+                net_devices
+                    .entry(net_name.clone())
+                    .or_default()
+                    .push((node_id, i));
+            }
+        }
+    }
+
+    for (_net, devs) in &net_devices {
+        if devs.len() >= 2 {
+            let (src_node, src_port) = devs[0];
+            for &(dst_node, dst_port) in &devs[1..] {
+                let _ = netlist.connect(
+                    PinRef {
+                        node: src_node,
+                        port: src_port as u16,
+                    },
+                    PinRef {
+                        node: dst_node,
+                        port: dst_port as u16,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(netlist)
 }
 
 pub fn write_pdk_json(path: impl AsRef<Path>, pdk: &Pdk) -> Result<(), IoError> {

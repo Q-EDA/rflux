@@ -17,6 +17,12 @@ pub enum ParseError {
     LexError(#[from] LexError),
 }
 
+impl ParseError {
+    pub fn code(&self) -> &'static str {
+        "RFLOW-VERILOG-001"
+    }
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -455,6 +461,14 @@ pub fn parse_verilog(input: &str) -> Result<VerilogSource, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verilog_error_codes_are_stable() {
+        let err = ParseError::UnexpectedEof {
+            expected: "test".to_string(),
+        };
+        assert_eq!(err.code(), "RFLOW-VERILOG-001");
+    }
 
     #[test]
     fn parse_simple_module() {

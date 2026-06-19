@@ -4610,6 +4610,8 @@ mod tests {
                 tech_map: TechMapReport {
                     mapped_nodes: 2,
                     total_area_um2: 48.0,
+                    unmapped_nodes: 0,
+                    coverage_ratio: 1.0,
                 },
                 path_balance: Default::default(),
                 bool_opt_compatibility: Default::default(),
@@ -4771,6 +4773,8 @@ mod tests {
                 tech_map: TechMapReport {
                     mapped_nodes: 2,
                     total_area_um2: 48.0,
+                    unmapped_nodes: 0,
+                    coverage_ratio: 1.0,
                 },
                 path_balance: Default::default(),
                 bool_opt_compatibility: Default::default(),

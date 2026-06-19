@@ -353,6 +353,8 @@ pub struct TechMappedNode<'a> {
 pub struct TechMapReport {
     pub mapped_nodes: usize,
     pub total_area_um2: f64,
+    pub unmapped_nodes: usize,
+    pub coverage_ratio: f64,
 }
 
 pub struct TechMapper<'a> {
@@ -398,11 +400,46 @@ impl<'a> TechMapper<'a> {
     }
 
     #[must_use]
+    pub fn map_netlist_area_optimized(&self, netlist: &'a Netlist) -> Vec<TechMappedNode<'a>> {
+        netlist
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let kind = Self::map_kind(&node.kind);
+                let best_cell = self
+                    .pdk
+                    .cell_library
+                    .cells
+                    .iter()
+                    .filter(|c| c.kind == kind)
+                    .min_by(|a, b| {
+                        a.area_um2
+                            .partial_cmp(&b.area_um2)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .or_else(|| self.pdk.cell_library.find_by_kind(kind));
+                best_cell.map(|cell| TechMappedNode {
+                    node_name: &node.name,
+                    cell,
+                })
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn map_report(&self, netlist: &'a Netlist) -> TechMapReport {
         let mapped = self.map_netlist(netlist);
+        let total = netlist.nodes().len();
+        let mapped_count = mapped.len();
         TechMapReport {
-            mapped_nodes: mapped.len(),
+            mapped_nodes: mapped_count,
             total_area_um2: mapped.iter().map(|entry| entry.cell.area_um2).sum(),
+            unmapped_nodes: total - mapped_count,
+            coverage_ratio: if total > 0 {
+                mapped_count as f64 / total as f64
+            } else {
+                0.0
+            },
         }
     }
 
@@ -2023,6 +2060,22 @@ mod tests {
         let report = mapper.map_report(&netlist);
         assert_eq!(report.mapped_nodes, 2);
         assert!(report.total_area_um2 > 0.0);
+        assert_eq!(report.unmapped_nodes, 0);
+        assert_eq!(report.coverage_ratio, 1.0);
+    }
+
+    #[test]
+    fn area_optimized_mapping_selects_smallest() {
+        let pdk = Pdk::minimal("test-pdk");
+        let mapper = TechMapper::new(&pdk);
+        let mut netlist = Netlist::new();
+        netlist.add_node(NodeKind::CellInstance, "gate");
+        netlist.add_node(NodeKind::Dff, "dff");
+
+        let mapped = mapper.map_netlist_area_optimized(&netlist);
+        assert_eq!(mapped.len(), 2);
+        assert!(mapped[0].cell.area_um2 > 0.0);
+        assert!(mapped[1].cell.area_um2 > 0.0);
     }
 
     #[test]
