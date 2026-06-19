@@ -43,11 +43,13 @@ impl Lit {
     }
 
     /// Evaluate this literal against an optional boolean assignment of `var`.
+    #[allow(dead_code)]
     fn eval(self, assignment: Option<bool>) -> Option<bool> {
         assignment.map(|value| if self.negated { !value } else { value })
     }
 
     /// The value `var` must take for this literal to be true.
+    #[allow(dead_code)]
     fn required_value(self) -> bool {
         !self.negated
     }

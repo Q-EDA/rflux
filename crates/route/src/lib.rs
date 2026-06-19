@@ -258,7 +258,7 @@ impl Default for RoutingConfig {
 }
 
 #[derive(Debug, Default, Clone)]
-struct CongestionMap {
+pub struct CongestionMap {
     edge_usage: HashMap<(i64, i64, i64, i64), usize>,
 }
 

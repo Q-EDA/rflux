@@ -2304,7 +2304,7 @@ impl TLineDelayModel {
 
         // Reflection-induced extra delay: proportional to Γ² and
         // the round-trip propagation time.
-        let reflection_extra = 2.0 * gamma * gamma * base_delay;
+        // (computed below as part of total_extra)
 
         // PTL resonance: reflection peaks at multiples of half-wavelength.
         // Use the same sinusoidal model as the tech crate.

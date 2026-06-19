@@ -6749,7 +6749,7 @@ mod tests {
         let a = netlist.add_node(NodeKind::Port, "in");
         let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
         let out = netlist.add_node(NodeKind::Port, "out");
-        let orphan = netlist.add_node(NodeKind::CellInstance, "orphan");
+        let _orphan = netlist.add_node(NodeKind::CellInstance, "orphan");
         netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
         netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
 
