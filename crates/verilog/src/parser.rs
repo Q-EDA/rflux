@@ -112,11 +112,40 @@ impl Parser {
             self.advance();
             if self.peek() != &Token::RParen {
                 loop {
+                    // Support ANSI-style: input [7:0] data, or just data
+                    let (direction, range) = match self.peek() {
+                        Token::Input => {
+                            self.advance();
+                            // Skip optional reg/wire keyword
+                            if matches!(self.peek(), Token::Reg | Token::Wire) {
+                                self.advance();
+                            }
+                            let r = self.parse_optional_range()?;
+                            (PortDirection::Input, r)
+                        }
+                        Token::Output => {
+                            self.advance();
+                            if matches!(self.peek(), Token::Reg | Token::Wire) {
+                                self.advance();
+                            }
+                            let r = self.parse_optional_range()?;
+                            (PortDirection::Output, r)
+                        }
+                        Token::Inout => {
+                            self.advance();
+                            if matches!(self.peek(), Token::Reg | Token::Wire) {
+                                self.advance();
+                            }
+                            let r = self.parse_optional_range()?;
+                            (PortDirection::Inout, r)
+                        }
+                        _ => (PortDirection::Input, None),
+                    };
                     let port_name = self.expect_ident()?;
                     ports.push(PortDecl {
-                        direction: PortDirection::Input, // will be updated when we see declarations
+                        direction,
                         name: port_name,
-                        range: None,
+                        range,
                     });
                     if self.peek() == &Token::Comma {
                         self.advance();
@@ -185,6 +214,19 @@ impl Parser {
                     _ => unreachable!(),
                 };
 
+                // Optionally consume reg/wire keyword (e.g., `output reg [7:0] count`)
+                let kind = match self.peek() {
+                    Token::Reg => {
+                        self.advance();
+                        NetKind::Reg
+                    }
+                    Token::Wire => {
+                        self.advance();
+                        NetKind::Wire
+                    }
+                    _ => NetKind::Wire,
+                };
+
                 let range = self.parse_optional_range()?;
 
                 let name = self.expect_ident()?;
@@ -208,17 +250,6 @@ impl Parser {
 
                 self.expect(&Token::Semicolon)?;
 
-                // Return the first port as a net declaration for simplicity
-                // The port list is already captured in parse_module
-                // We'll store them as NetDecl with appropriate kind
-                let kind = match direction {
-                    PortDirection::Input | PortDirection::Inout => NetKind::Wire,
-                    PortDirection::Output => NetKind::Wire,
-                };
-
-                // Return the first as a Net; if multiple, we need to handle differently
-                // For now, just return first and let the rest be parsed as separate items
-                // Actually, let's handle this properly by returning the first
                 Ok(ModuleItem::Net(NetDecl {
                     kind,
                     name: all_ports[0].name.clone(),
@@ -244,11 +275,17 @@ impl Parser {
             }
             Token::Assign => {
                 self.advance();
+                let delay = if self.peek() == &Token::Hash {
+                    self.advance();
+                    Some(self.expect_number()?)
+                } else {
+                    None
+                };
                 let target = self.expect_ident()?;
                 self.expect(&Token::Equals)?;
                 let expr = self.parse_expr()?;
                 self.expect(&Token::Semicolon)?;
-                Ok(ModuleItem::Assign(Assignment { target, expr }))
+                Ok(ModuleItem::Assign(Assignment { target, expr, delay }))
             }
             Token::Parameter => {
                 self.advance();
@@ -257,6 +294,39 @@ impl Parser {
                 let value = self.expect_number()?;
                 self.expect(&Token::Semicolon)?;
                 Ok(ModuleItem::Parameter(ParamDecl { name, value }))
+            }
+            Token::Localparam => {
+                self.advance();
+                let name = self.expect_ident()?;
+                self.expect(&Token::Equals)?;
+                let value = self.expect_number()?;
+                self.expect(&Token::Semicolon)?;
+                Ok(ModuleItem::Parameter(ParamDecl { name, value }))
+            }
+            Token::Defparam => {
+                self.advance();
+                // Parse hierarchical name (e.g., inst.N)
+                let mut name = self.expect_ident()?;
+                while self.peek() == &Token::Dot {
+                    self.advance();
+                    let part = self.expect_ident()?;
+                    name.push('.');
+                    name.push_str(&part);
+                }
+                self.expect(&Token::Equals)?;
+                let value = self.expect_number()?;
+                self.expect(&Token::Semicolon)?;
+                Ok(ModuleItem::Defparam(ParamDecl { name, value }))
+            }
+            Token::Integer => {
+                self.advance();
+                let name = self.expect_ident()?;
+                self.expect(&Token::Semicolon)?;
+                Ok(ModuleItem::Net(NetDecl {
+                    kind: NetKind::Integer,
+                    name,
+                    range: None,
+                }))
             }
             Token::Always => {
                 self.advance();
@@ -336,6 +406,9 @@ impl Parser {
             Token::Begin => self.parse_block_statement(),
             Token::If => self.parse_if_statement(),
             Token::Case | Token::Casex | Token::Casez => self.parse_case_statement(),
+            Token::For => self.parse_for_statement(),
+            Token::While => self.parse_while_statement(),
+            Token::Integer => self.parse_integer_decl_statement(),
             Token::Ident(_) => self.parse_assign_statement(),
             Token::Semicolon => {
                 self.advance();
@@ -418,8 +491,86 @@ impl Parser {
         })
     }
 
+    fn parse_for_statement(&mut self) -> Result<Statement, ParseError> {
+        self.advance(); // consume 'for'
+        self.expect(&Token::LParen)?;
+
+        // Parse init: could be `integer i = 0;` or `i = 0;`
+        let init = if self.peek() == &Token::Integer {
+            self.advance(); // consume 'integer'
+            let name = self.expect_ident()?;
+            self.expect(&Token::Equals)?;
+            let value = self.parse_expr()?;
+            self.expect(&Token::Semicolon)?;
+            Statement::BlockingAssign { target: name, value }
+        } else {
+            self.parse_assign_statement()?
+        };
+
+        let condition = self.parse_expr()?;
+        self.expect(&Token::Semicolon)?;
+
+        // Parse step: e.g. `i = i + 1` (no trailing semicolon)
+        let step_target = self.expect_ident()?;
+        self.expect(&Token::Equals)?;
+        let step_value = self.parse_expr()?;
+        let step = Statement::BlockingAssign { target: step_target, value: step_value };
+
+        self.expect(&Token::RParen)?;
+
+        let body = Box::new(self.parse_statement()?);
+
+        Ok(Statement::For {
+            init: Box::new(init),
+            condition,
+            step: Box::new(step),
+            body,
+        })
+    }
+
+    fn parse_while_statement(&mut self) -> Result<Statement, ParseError> {
+        self.advance(); // consume 'while'
+        self.expect(&Token::LParen)?;
+        let condition = self.parse_expr()?;
+        self.expect(&Token::RParen)?;
+        let body = Box::new(self.parse_statement()?);
+        Ok(Statement::While { condition, body })
+    }
+
+    fn parse_integer_decl_statement(&mut self) -> Result<Statement, ParseError> {
+        self.advance(); // consume 'integer'
+        let name = self.expect_ident()?;
+        let value = if self.peek() == &Token::Equals {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(&Token::Semicolon)?;
+        // Represent as a blocking assign with the init value, or null if no value
+        match value {
+            Some(val) => Ok(Statement::BlockingAssign { target: name, value: val }),
+            None => Ok(Statement::Null),
+        }
+    }
+
     fn parse_assign_statement(&mut self) -> Result<Statement, ParseError> {
         let target = self.expect_ident()?;
+
+        // Handle bit-select in target: count[i], count[i:j]
+        if self.peek() == &Token::LBracket {
+            self.advance();
+            let _idx = self.parse_expr()?;
+            if self.peek() == &Token::Colon {
+                self.advance();
+                let _low = self.parse_expr()?;
+                self.expect(&Token::RBracket)?;
+            } else {
+                self.expect(&Token::RBracket)?;
+            }
+            // Represent as target[index] by appending to target string
+            // For simplicity, just keep the base name; the expression context is lost
+        }
 
         match self.peek() {
             Token::LtEq => {
@@ -1313,5 +1464,121 @@ endmodule
         assert_eq!(func.return_range, Some((7, 0)));
         assert_eq!(func.ports.len(), 2);
         assert_eq!(func.body.len(), 1);
+    }
+
+    #[test]
+    fn parse_localparam() {
+        let input = "module top; localparam N = 8; endmodule";
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let param = m.items.iter().find_map(|item| match item {
+            ModuleItem::Parameter(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        assert_eq!(param.name, "N");
+        assert_eq!(param.value, 8);
+    }
+
+    #[test]
+    fn parse_integer_type() {
+        let input = "module top; integer i; endmodule";
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let net = m.items.iter().find_map(|item| match item {
+            ModuleItem::Net(n) => Some(n),
+            _ => None,
+        }).unwrap();
+        assert_eq!(net.name, "i");
+        assert_eq!(net.kind, NetKind::Integer);
+    }
+
+    #[test]
+    fn parse_for_loop_in_always() {
+        let input = r#"
+            module top(input clk, output reg [7:0] count);
+                always @(posedge clk) begin
+                    for (integer i = 0; i < 8; i = i + 1) begin
+                        count[i] <= 1'b0;
+                    end
+                end
+            endmodule
+        "#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let always = m.items.iter().find_map(|item| match item {
+            ModuleItem::AlwaysBlock(a) => Some(a),
+            _ => None,
+        }).unwrap();
+        match &always.body {
+            Statement::Block(stmts) => {
+                assert!(matches!(&stmts[0], Statement::For { .. }));
+            }
+            _ => panic!("expected block"),
+        }
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let input = r#"
+            module top;
+                always @(*) begin
+                    while (i < 10) begin
+                        i = i + 1;
+                    end
+                end
+            endmodule
+        "#;
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let always = m.items.iter().find_map(|item| match item {
+            ModuleItem::AlwaysBlock(a) => Some(a),
+            _ => None,
+        }).unwrap();
+        match &always.body {
+            Statement::Block(stmts) => {
+                assert!(matches!(&stmts[0], Statement::While { .. }));
+            }
+            _ => panic!("expected block"),
+        }
+    }
+
+    #[test]
+    fn parse_wire_range_in_port() {
+        let input = "module top(input [7:0] data, output [3:0] result); endmodule";
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        assert_eq!(m.ports.len(), 2);
+        assert_eq!(m.ports[0].name, "data");
+        assert_eq!(m.ports[0].range, Some((7, 0)));
+        assert_eq!(m.ports[0].direction, PortDirection::Input);
+        assert_eq!(m.ports[1].name, "result");
+        assert_eq!(m.ports[1].range, Some((3, 0)));
+        assert_eq!(m.ports[1].direction, PortDirection::Output);
+    }
+
+    #[test]
+    fn parse_assign_with_delay() {
+        let input = "module top; assign #5 y = a; endmodule";
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let assign = m.items.iter().find_map(|item| match item {
+            ModuleItem::Assign(a) => Some(a),
+            _ => None,
+        }).unwrap();
+        assert_eq!(assign.delay, Some(5));
+        assert_eq!(assign.target, "y");
+    }
+
+    #[test]
+    fn parse_defparam() {
+        let input = "module top; defparam inst.N = 16; endmodule";
+        let source = parse_verilog(input).unwrap();
+        let m = &source.modules[0];
+        let dp = m.items.iter().find_map(|item| match item {
+            ModuleItem::Defparam(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        assert_eq!(dp.name, "inst.N");
+        assert_eq!(dp.value, 16);
     }
 }

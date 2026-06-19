@@ -12,3 +12,7 @@ rflux-extract = { path = "../extract" }
 serde = { workspace = true }
 thiserror.workspace = true
 rand.workspace = true
+rayon = { workspace = true, optional = true }
+
+[features]
+parallel = ["rayon"]

@@ -32,6 +32,7 @@ pub enum ModuleItem {
     Instance(InstanceDecl),
     Assign(Assignment),
     Parameter(ParamDecl),
+    Defparam(ParamDecl),
     AlwaysBlock(AlwaysBlock),
     GenerateBlock(GenerateBlock),
     TaskDecl(TaskDecl),
@@ -49,6 +50,7 @@ pub struct NetDecl {
 pub enum NetKind {
     Wire,
     Reg,
+    Integer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ pub struct PortConnection {
 pub struct Assignment {
     pub target: String,
     pub expr: Expr,
+    pub delay: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +117,16 @@ pub enum Statement {
     NonBlockingAssign {
         target: String,
         value: Expr,
+    },
+    For {
+        init: Box<Statement>,
+        condition: Expr,
+        step: Box<Statement>,
+        body: Box<Statement>,
+    },
+    While {
+        condition: Expr,
+        body: Box<Statement>,
     },
     Null,
 }

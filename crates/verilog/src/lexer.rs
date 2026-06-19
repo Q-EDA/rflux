@@ -45,6 +45,9 @@ pub enum Token {
     Function,
     Endfunction,
     For,
+    While,
+    Localparam,
+    Integer,
     // Symbols
     LParen,
     RParen,
@@ -466,6 +469,9 @@ impl Lexer {
                         "function" => Token::Function,
                         "endfunction" => Token::Endfunction,
                         "for" => Token::For,
+                        "while" => Token::While,
+                        "localparam" => Token::Localparam,
+                        "integer" => Token::Integer,
                         _ => Token::Ident(ident),
                     };
                     tokens.push(keyword);

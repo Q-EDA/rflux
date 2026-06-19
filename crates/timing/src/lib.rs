@@ -928,6 +928,278 @@ impl StaticTimingAnalyzer {
         })
     }
 
+    #[cfg(feature = "parallel")]
+    pub fn parallel_analyze(
+        &self,
+        netlist: &Netlist,
+        routing: &RoutingReport,
+        pdk: &Pdk,
+        config: &TimingConfig,
+        coupling_map: Option<&CouplingMap>,
+    ) -> Result<TimingReport, TimingError> {
+        use rayon::prelude::*;
+
+        let node_count = netlist.node_count();
+        let mut adjacency = vec![Vec::<usize>::new(); node_count];
+        let mut incoming = vec![Vec::<usize>::new(); node_count];
+        let mut indegree = vec![0usize; node_count];
+        let mut outdegree = vec![0usize; node_count];
+        let edges = netlist.edge_pairs();
+
+        let extracted_wire_delays: Option<std::collections::HashMap<(PinRef, PinRef), f64>> =
+            if config.use_parasitic_extraction {
+                let extractor = rflux_extract::ParasiticExtractor::from_pdk(pdk);
+                let mut map = std::collections::HashMap::new();
+                for route in &routing.routes {
+                    let net_p = extractor.extract_net(route);
+                    map.insert((route.from, route.to), net_p.parasitics.total_delay_ps);
+                }
+                Some(map)
+            } else {
+                None
+            };
+
+        for (edge_index, (from, to)) in edges.iter().enumerate() {
+            adjacency[from.node.0].push(edge_index);
+            incoming[to.node.0].push(edge_index);
+            indegree[to.node.0] += 1;
+            outdegree[from.node.0] += 1;
+        }
+
+        let mut queue = VecDeque::new();
+        for (node_index, degree) in indegree.iter().enumerate() {
+            if *degree == 0 {
+                queue.push_back(node_index);
+            }
+        }
+
+        let mut topo = Vec::<usize>::with_capacity(node_count);
+        while let Some(node_index) = queue.pop_front() {
+            topo.push(node_index);
+            for &edge_index in &adjacency[node_index] {
+                let (_, to) = edges[edge_index];
+                indegree[to.node.0] -= 1;
+                if indegree[to.node.0] == 0 {
+                    queue.push_back(to.node.0);
+                }
+            }
+        }
+
+        if topo.len() != node_count {
+            return Err(TimingError::CyclicNetlist);
+        }
+
+        let arc_delays: Vec<(f64, f64)> = edges
+            .par_iter()
+            .map(|&(from, to)| {
+                arc_components_with_extraction(
+                    netlist,
+                    routing,
+                    pdk,
+                    from,
+                    to,
+                    coupling_map,
+                    extracted_wire_delays.as_ref(),
+                )
+                .unwrap_or((0.0, 0.0))
+            })
+            .collect();
+
+        let mut arrival = vec![config.input_arrival_ps; node_count];
+        for constraint in &config.node_constraints {
+            if let Some(input_arrival_ps) = constraint.input_arrival_ps {
+                arrival[constraint.node.0] = input_arrival_ps;
+            }
+        }
+        for constraint in &config.pin_constraints {
+            if let Some(input_arrival_ps) = constraint.input_arrival_ps {
+                arrival[constraint.pin.node.0] = input_arrival_ps;
+            }
+        }
+        for &node_index in &topo {
+            for &edge_index in &adjacency[node_index] {
+                let (from, to) = edges[edge_index];
+                let (cell_delay, wire_delay) = arc_delays[edge_index];
+                let arc_delay = cell_delay + wire_delay;
+                let candidate = arrival[from.node.0] + arc_delay;
+                if candidate > arrival[to.node.0] {
+                    arrival[to.node.0] = candidate;
+                }
+            }
+        }
+
+        let mut required = vec![f64::INFINITY; node_count];
+        for node_index in 0..node_count {
+            if outdegree[node_index] == 0 {
+                required[node_index] = endpoint_required_ps(config, None, NodeId(node_index));
+            }
+        }
+        for constraint in &config.node_constraints {
+            if let Some(required_ps) = constraint.required_ps {
+                required[constraint.node.0] = required[constraint.node.0].min(required_ps);
+            }
+        }
+        for &node_index in topo.iter().rev() {
+            for &edge_index in &adjacency[node_index] {
+                let (from, to) = edges[edge_index];
+                if matches!(
+                    crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind),
+                    Some(CrossingConstraintKind::FalsePath)
+                ) {
+                    continue;
+                }
+                let (cell_delay, wire_delay) = arc_delays[edge_index];
+                let arc_delay = cell_delay + wire_delay;
+                let candidate = required[to.node.0] - arc_delay;
+                if candidate < required[from.node.0] {
+                    required[from.node.0] = candidate;
+                }
+            }
+            if !required[node_index].is_finite() {
+                required[node_index] = config.clock_period_ps;
+            }
+        }
+
+        let mut arcs = Vec::<TimingArcReport>::with_capacity(edges.len());
+        let mut worst_setup_slack_ps = f64::INFINITY;
+        let mut worst_hold_slack_ps = f64::INFINITY;
+        let mut setup_violations = 0usize;
+        let mut hold_violations = 0usize;
+        let mut capture_window_violations = 0usize;
+        let mut false_path_arcs = 0usize;
+
+        for (edge_index, &(from, to)) in edges.iter().enumerate() {
+            let (cell_delay_ps, wire_delay_ps) = arc_delays[edge_index];
+            let sink_arrival = arrival[from.node.0] + cell_delay_ps + wire_delay_ps;
+            let setup_requirement = setup_time_ps(netlist, pdk, to.node.0)?;
+            let base_required_ps =
+                required[to.node.0].min(endpoint_required_ps(config, Some(to), to.node));
+            let is_false_path = matches!(
+                crossing_constraint_for_arc(config, from, to).map(|constraint| constraint.kind),
+                Some(CrossingConstraintKind::FalsePath)
+            );
+            let (arc_required_ps, setup_slack_ps) = apply_crossing_constraint(
+                config,
+                from,
+                to,
+                arrival[from.node.0],
+                base_required_ps,
+                setup_requirement,
+                cell_delay_ps + wire_delay_ps,
+                sink_arrival,
+            );
+            let hold_slack_ps = wire_delay_ps - hold_time_ps(netlist, pdk, to.node.0)?;
+            let launch_phase = sfq_phase_for_pin(config, from);
+            let capture_phase = sfq_phase_for_pin(config, to);
+            let (launch_window_start_ps, launch_window_end_ps) =
+                sfq_phase_window_ps(config, from, launch_phase);
+            let (capture_window_start_ps, capture_window_end_ps) =
+                sfq_phase_window_ps(config, to, capture_phase);
+            let arrival_phase_offset_ps = sfq_phase_offset_ps(config, to, sink_arrival);
+            let capture_window_slack_ps = capture_window_end_ps - arrival_phase_offset_ps;
+            let capture_window_violation = !is_false_path
+                && (arrival_phase_offset_ps < capture_window_start_ps
+                    || arrival_phase_offset_ps > capture_window_end_ps);
+            if is_false_path {
+                false_path_arcs += 1;
+            }
+            if setup_slack_ps < 0.0 {
+                setup_violations += 1;
+            }
+            if hold_slack_ps < 0.0 {
+                hold_violations += 1;
+            }
+            if capture_window_violation {
+                capture_window_violations += 1;
+            }
+            worst_setup_slack_ps = worst_setup_slack_ps.min(setup_slack_ps);
+            worst_hold_slack_ps = worst_hold_slack_ps.min(hold_slack_ps);
+            arcs.push(TimingArcReport {
+                from,
+                to,
+                is_false_path,
+                driver_kind: sf_cell_kind(&netlist.nodes()[from.node.0].kind),
+                route_mode: route_mode_for_arc(routing, from, to)?,
+                route_length_um: route_length_um(routing, from, to)?,
+                cell_delay_ps,
+                wire_delay_ps,
+                launch_phase,
+                capture_phase,
+                launch_window_start_ps,
+                launch_window_end_ps,
+                capture_window_start_ps,
+                capture_window_end_ps,
+                arrival_phase_offset_ps,
+                capture_window_slack_ps,
+                capture_window_violation,
+                arrival_ps: sink_arrival,
+                required_ps: arc_required_ps,
+                setup_slack_ps,
+                hold_slack_ps,
+                pulse_envelope: None,
+                pulse_degradation_violation: false,
+                ocv_early_arrival_ps: None,
+                ocv_late_arrival_ps: None,
+                ocv_early_slack_ps: None,
+                ocv_late_slack_ps: None,
+            });
+        }
+
+        let total_negative_setup_slack_ps: f64 = arcs
+            .iter()
+            .filter(|arc| arc.setup_slack_ps < 0.0 && !arc.is_false_path)
+            .map(|arc| arc.setup_slack_ps)
+            .sum();
+        let total_negative_hold_slack_ps: f64 = arcs
+            .iter()
+            .filter(|arc| arc.hold_slack_ps < 0.0 && !arc.is_false_path)
+            .map(|arc| arc.hold_slack_ps)
+            .sum();
+
+        let extraction_report = extracted_wire_delays.as_ref().map(|delays| {
+            let extractor = rflux_extract::ParasiticExtractor::from_pdk(pdk);
+            let mut report = extractor.extract_report(routing);
+            report.nets.retain(|n| delays.contains_key(&(n.from, n.to)));
+            report
+        });
+
+        let noise_margin_config = &config.noise_margin;
+        let noise_margin = if noise_margin_config.enable_thermal
+            || noise_margin_config.enable_crosstalk
+            || noise_margin_config.enable_process_spread
+        {
+            let analyzer = NoiseMarginAnalyzer::new(*noise_margin_config);
+            Some(analyzer.analyze(&arcs, coupling_map, &config.ocv))
+        } else {
+            None
+        };
+
+        Ok(TimingReport {
+            arcs,
+            worst_setup_slack_ps: if worst_setup_slack_ps.is_finite() {
+                worst_setup_slack_ps
+            } else {
+                config.clock_period_ps
+            },
+            worst_hold_slack_ps: if worst_hold_slack_ps.is_finite() {
+                worst_hold_slack_ps
+            } else {
+                0.0
+            },
+            total_negative_setup_slack_ps,
+            total_negative_hold_slack_ps,
+            critical_path_delay_ps: arrival.into_iter().fold(0.0, f64::max),
+            setup_violations,
+            hold_violations,
+            capture_window_violations,
+            analyzed_arcs: netlist.edge_count(),
+            false_path_arcs,
+            extraction_report,
+            noise_margin,
+            path_report: None,
+        })
+    }
+
     pub fn analyze_multi_corner(
         &self,
         netlist: &Netlist,
@@ -5039,5 +5311,98 @@ mod tests {
         assert!(report.std_hold_slack_ps >= 0.0);
         assert!(report.worst_setup_slack_ps <= report.mean_setup_slack_ps);
         assert!(report.worst_hold_slack_ps <= report.mean_hold_slack_ps);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_analyze_matches_sequential() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let gate = netlist.add_node(NodeKind::CellInstance, "gate");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef { node: a, port: 0 },
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+            )
+            .expect("a to gate");
+        netlist
+            .connect(
+                PinRef {
+                    node: gate,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("gate to sink");
+
+        let routing = RoutingReport {
+            routes: vec![
+                NetRoute {
+                    from: PinRef { node: a, port: 0 },
+                    to: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                    mode: RouteMode::Jtl,
+                    segments: Vec::new(),
+                    direct_length_um: 40.0,
+                    length_um: 40.0,
+                },
+                NetRoute {
+                    from: PinRef {
+                        node: gate,
+                        port: 0,
+                    },
+                    to: PinRef {
+                        node: sink,
+                        port: 0,
+                    },
+                    mode: RouteMode::Ptl,
+                    segments: Vec::new(),
+                    direct_length_um: 80.0,
+                    length_um: 80.0,
+                },
+            ],
+            total_length_um: 120.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 1,
+            ptl_routes: 1,
+        };
+
+        let pdk = Pdk::minimal("test");
+        let config = TimingConfig::default();
+        let analyzer = StaticTimingAnalyzer::new();
+
+        let seq = analyzer
+            .analyze(&netlist, &routing, &pdk, &config, None)
+            .expect("sequential should succeed");
+        let par = analyzer
+            .parallel_analyze(&netlist, &routing, &pdk, &config, None)
+            .expect("parallel should succeed");
+
+        assert_eq!(seq.analyzed_arcs, par.analyzed_arcs);
+        assert_eq!(seq.arcs.len(), par.arcs.len());
+        for (s, p) in seq.arcs.iter().zip(par.arcs.iter()) {
+            assert_eq!(s.from, p.from);
+            assert_eq!(s.to, p.to);
+            assert!((s.cell_delay_ps - p.cell_delay_ps).abs() < 1e-9);
+            assert!((s.wire_delay_ps - p.wire_delay_ps).abs() < 1e-9);
+            assert!((s.arrival_ps - p.arrival_ps).abs() < 1e-9);
+            assert!((s.setup_slack_ps - p.setup_slack_ps).abs() < 1e-9);
+            assert!((s.hold_slack_ps - p.hold_slack_ps).abs() < 1e-9);
+        }
+        assert!((seq.worst_setup_slack_ps - par.worst_setup_slack_ps).abs() < 1e-9);
+        assert!((seq.worst_hold_slack_ps - par.worst_hold_slack_ps).abs() < 1e-9);
+        assert!((seq.critical_path_delay_ps - par.critical_path_delay_ps).abs() < 1e-9);
+        assert_eq!(seq.setup_violations, par.setup_violations);
+        assert_eq!(seq.hold_violations, par.hold_violations);
     }
 }

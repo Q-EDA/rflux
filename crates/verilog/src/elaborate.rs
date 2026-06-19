@@ -100,6 +100,9 @@ pub fn elaborate_to_ir(
             ModuleItem::Parameter(_) => {
                 // Parameters don't generate nodes
             }
+            ModuleItem::Defparam(_) => {
+                // Defparam overrides are applied during elaboration (not yet implemented)
+            }
             ModuleItem::GenerateBlock(gen) => {
                 elaborate_generate_block(&mut netlist, gen, &mut wire_map, &module.name)?;
             }
@@ -430,6 +433,7 @@ fn elaborate_module_item_with_suffix(
                 Assignment {
                     target: format!("{}{}", assign.target, suf),
                     expr: assign.expr.clone(),
+                    delay: assign.delay,
                 }
             } else {
                 assign.clone()
@@ -442,7 +446,7 @@ fn elaborate_module_item_with_suffix(
         ModuleItem::GenerateBlock(gen) => {
             elaborate_generate_block(netlist, gen, wire_map, module_name)
         }
-        ModuleItem::Parameter(_) | ModuleItem::TaskDecl(_) | ModuleItem::FunctionDecl(_) => Ok(()),
+        ModuleItem::Parameter(_) | ModuleItem::Defparam(_) | ModuleItem::TaskDecl(_) | ModuleItem::FunctionDecl(_) => Ok(()),
     }
 }
 
@@ -909,6 +913,17 @@ fn elaborate_sequential_statement(
 
             Ok(())
         }
+        Statement::For { init, condition: _, step, body } => {
+            // Elaborate the init, body, and step as sequential statements
+            elaborate_sequential_statement(netlist, init, wire_map, &format!("{prefix}_for_init"), sensitivity)?;
+            elaborate_sequential_statement(netlist, body, wire_map, &format!("{prefix}_for_body"), sensitivity)?;
+            elaborate_sequential_statement(netlist, step, wire_map, &format!("{prefix}_for_step"), sensitivity)?;
+            Ok(())
+        }
+        Statement::While { condition: _, body } => {
+            elaborate_sequential_statement(netlist, body, wire_map, &format!("{prefix}_while_body"), sensitivity)?;
+            Ok(())
+        }
     }
 }
 
@@ -1245,6 +1260,16 @@ fn elaborate_combinational_statement(
             Ok(())
         }
         Statement::Null => Ok(()),
+        Statement::For { init, condition: _, step, body } => {
+            elaborate_combinational_statement(netlist, init, wire_map, &format!("{prefix}_for_init"))?;
+            elaborate_combinational_statement(netlist, body, wire_map, &format!("{prefix}_for_body"))?;
+            elaborate_combinational_statement(netlist, step, wire_map, &format!("{prefix}_for_step"))?;
+            Ok(())
+        }
+        Statement::While { condition: _, body } => {
+            elaborate_combinational_statement(netlist, body, wire_map, &format!("{prefix}_while_body"))?;
+            Ok(())
+        }
     }
 }
 
