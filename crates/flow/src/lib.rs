@@ -3829,6 +3829,210 @@ impl BiasDesignSpaceExplorer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P2-4: Cross-Stage Feedback Iteration
+// ---------------------------------------------------------------------------
+
+/// A feedback action that can be taken to improve timing or congestion (P2-4).
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum FeedbackAction {
+    /// Re-map cells on the critical path to faster variants.
+    RemapCell {
+        node_name: String,
+        reason: String,
+    },
+    /// Re-balance paths to reduce delay differences.
+    RebalancePaths {
+        path_description: String,
+    },
+    /// Re-place a congested region.
+    RePlaceRegion {
+        region_description: String,
+    },
+    /// Reduce fanout by inserting additional splitters or restructuring.
+    ReduceFanout {
+        node_name: String,
+        current_fanout: usize,
+    },
+    /// Insert buffer (JTL) to fix hold violations.
+    InsertBuffer {
+        from: rflux_ir::PinRef,
+        to: rflux_ir::PinRef,
+        delay_ps: f64,
+    },
+}
+
+/// Configuration for cross-stage feedback iteration (P2-4).
+#[derive(Debug, Clone)]
+pub struct FeedbackConfig {
+    /// Maximum number of feedback iterations.
+    pub max_iterations: usize,
+    /// Minimum improvement (ps) to continue iterating.
+    pub improvement_threshold_ps: f64,
+    /// Maximum area overhead ratio allowed.
+    pub max_area_overhead: f64,
+    /// Enable timing → synth feedback.
+    pub enable_timing_to_synth: bool,
+    /// Enable congestion → synth feedback.
+    pub enable_congestion_to_synth: bool,
+    /// Enable place → synth feedback.
+    pub enable_place_to_synth: bool,
+}
+
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 3,
+            improvement_threshold_ps: 0.5,
+            max_area_overhead: 0.10,
+            enable_timing_to_synth: true,
+            enable_congestion_to_synth: true,
+            enable_place_to_synth: true,
+        }
+    }
+}
+
+/// Result of a single feedback iteration (P2-4).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeedbackIteration {
+    /// Iteration number (0-indexed).
+    pub iteration: usize,
+    /// Actions taken in this iteration.
+    pub actions: Vec<FeedbackAction>,
+    /// Setup slack before this iteration.
+    pub setup_slack_before_ps: f64,
+    /// Setup slack after this iteration.
+    pub setup_slack_after_ps: f64,
+    /// Hold slack before this iteration.
+    pub hold_slack_before_ps: f64,
+    /// Hold slack after this iteration.
+    pub hold_slack_after_ps: f64,
+    /// Area before this iteration.
+    pub area_before_um2: f64,
+    /// Area after this iteration.
+    pub area_after_um2: f64,
+    /// Whether this iteration improved timing.
+    pub improved: bool,
+}
+
+/// Result of the full cross-stage feedback loop (P2-4).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeedbackReport {
+    /// Total iterations performed.
+    pub total_iterations: usize,
+    /// Per-iteration details.
+    pub iterations: Vec<FeedbackIteration>,
+    /// Final setup slack.
+    pub final_setup_slack_ps: f64,
+    /// Final hold slack.
+    pub final_hold_slack_ps: f64,
+    /// Total area overhead from feedback actions.
+    pub total_area_overhead_ratio: f64,
+    /// Whether the design converged (no more improvement possible).
+    pub converged: bool,
+    /// Whether all timing violations are resolved.
+    pub all_violations_resolved: bool,
+}
+
+/// Cross-stage feedback controller (P2-4).
+///
+/// Orchestrates feedback between timing, synthesis, and placement
+/// to iteratively improve timing closure.  Supports:
+/// - timing → synth: re-map critical path cells
+/// - congestion → synth: reduce fanout
+/// - place → synth: reduce critical path span
+#[derive(Debug, Default)]
+pub struct CrossStageFeedback;
+
+impl CrossStageFeedback {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Analyze the current state and determine what feedback actions
+    /// should be taken.
+    pub fn analyze_feedback(
+        &self,
+        timing: &TimingReport,
+        routing: &RoutingReport,
+        config: &FeedbackConfig,
+    ) -> Vec<FeedbackAction> {
+        let mut actions = Vec::new();
+
+        // Timing → synth feedback: identify critical path cells for remapping
+        if config.enable_timing_to_synth && timing.setup_violations > 0 {
+            // Find the worst setup violation arc
+            if let Some(worst_arc) = timing
+                .arcs
+                .iter()
+                .filter(|a| !a.is_false_path && a.setup_slack_ps < 0.0)
+                .min_by(|a, b| {
+                    a.setup_slack_ps
+                        .partial_cmp(&b.setup_slack_ps)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            {
+                actions.push(FeedbackAction::RemapCell {
+                    node_name: format!("{:?}", worst_arc.from),
+                    reason: format!(
+                        "Worst setup slack: {:.1} ps",
+                        worst_arc.setup_slack_ps
+                    ),
+                });
+            }
+        }
+
+        // Congestion → synth feedback: identify high-fanout nodes
+        if config.enable_congestion_to_synth && routing.peak_channel_usage > 3 {
+            // High congestion detected
+            actions.push(FeedbackAction::ReduceFanout {
+                node_name: "congested_region".to_string(),
+                current_fanout: routing.peak_channel_usage,
+            });
+        }
+
+        // Place → synth feedback: identify long routes
+        if config.enable_place_to_synth {
+            let long_routes: Vec<_> = routing
+                .routes
+                .iter()
+                .filter(|r| r.length_um > 200.0)
+                .collect();
+            if !long_routes.is_empty() {
+                actions.push(FeedbackAction::RePlaceRegion {
+                    region_description: format!(
+                        "{} routes exceed 200um (max: {:.0}um)",
+                        long_routes.len(),
+                        long_routes
+                            .iter()
+                            .map(|r| r.length_um)
+                            .fold(0.0_f64, f64::max)
+                    ),
+                });
+            }
+        }
+
+        // Hold violation feedback
+        if timing.hold_violations > 0 {
+            for arc in &timing.arcs {
+                if !arc.is_false_path && arc.hold_slack_ps < 0.0 {
+                    actions.push(FeedbackAction::InsertBuffer {
+                        from: arc.from,
+                        to: arc.to,
+                        delay_ps: -arc.hold_slack_ps,
+                    });
+                    if actions.len() >= 5 {
+                        break; // limit per iteration
+                    }
+                }
+            }
+        }
+
+        actions
+    }
+}
+
 fn node_kind_name(kind: &rflux_ir::NodeKind) -> &'static str {
     match kind {
         rflux_ir::NodeKind::CellInstance => "CELL",
@@ -7602,5 +7806,88 @@ mod tests {
         let a = [1.0, 0.0, 1.0, 1.0];
         let b = [1.0, 0.0, 1.0, 1.0];
         assert!(!BiasParetoFront::dominates(&a, &b));
+    }
+
+    // --- P2-4: Cross-stage feedback tests ---
+
+    #[test]
+    fn feedback_config_defaults() {
+        let config = FeedbackConfig::default();
+        assert_eq!(config.max_iterations, 3);
+        assert!(config.enable_timing_to_synth);
+        assert!(config.enable_congestion_to_synth);
+    }
+
+    #[test]
+    fn feedback_analyze_empty_timing() {
+        let feedback = CrossStageFeedback::new();
+        let timing = rflux_timing::TimingReport {
+            arcs: vec![],
+            worst_setup_slack_ps: 0.0,
+            worst_hold_slack_ps: 0.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 0.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 0,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let routing = rflux_route::RoutingReport {
+            routes: vec![],
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 0,
+            co_routed: false,
+        };
+        let actions = feedback.analyze_feedback(&timing, &routing, &FeedbackConfig::default());
+        assert!(actions.is_empty()); // no violations = no actions
+    }
+
+    #[test]
+    fn feedback_detects_congestion() {
+        let feedback = CrossStageFeedback::new();
+        let timing = rflux_timing::TimingReport {
+            arcs: vec![],
+            worst_setup_slack_ps: 5.0,
+            worst_hold_slack_ps: 3.0,
+            total_negative_setup_slack_ps: 0.0,
+            total_negative_hold_slack_ps: 0.0,
+            critical_path_delay_ps: 50.0,
+            setup_violations: 0,
+            hold_violations: 0,
+            capture_window_violations: 0,
+            analyzed_arcs: 0,
+            false_path_arcs: 0,
+            extraction_report: None,
+            noise_margin: None,
+            path_report: None,
+        };
+        let routing = rflux_route::RoutingReport {
+            routes: vec![],
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+            clock_routes: 0,
+            data_routes: 0,
+            peak_channel_usage: 5, // high congestion
+            co_routed: false,
+        };
+        let actions = feedback.analyze_feedback(&timing, &routing, &FeedbackConfig::default());
+        // Should suggest reducing fanout due to high congestion
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, FeedbackAction::ReduceFanout { .. })));
     }
 }

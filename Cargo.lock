@@ -1086,6 +1086,7 @@ dependencies = [
  "rflux-synth",
  "rflux-tech",
  "rflux-timing",
+ "serde",
  "serde_json",
  "thiserror",
 ]
