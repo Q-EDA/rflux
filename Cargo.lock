@@ -1199,6 +1199,7 @@ dependencies = [
  "rflux-sat",
  "rflux-tech",
  "rflux-verify",
+ "serde",
  "thiserror",
 ]
 

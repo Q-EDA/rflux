@@ -8,6 +8,7 @@ license.workspace = true
 rflux-ir = { path = "../ir" }
 rflux-sat = { path = "../sat" }
 rflux-tech = { path = "../tech" }
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -810,6 +810,71 @@ fn extract_subgraph(netlist: &Netlist, nodes: &[NodeId]) -> Netlist {
     sub
 }
 
+// ---------------------------------------------------------------------------
+// P1-5: Quick layout estimation
+// ---------------------------------------------------------------------------
+
+/// Result of quick layout estimation (P1-5).
+#[derive(Debug, Clone)]
+pub struct LayoutEstimate {
+    /// Estimated total width (um).
+    pub width_um: f64,
+    /// Estimated total height (um).
+    pub height_um: f64,
+    /// Estimated total area (um²).
+    pub area_um2: f64,
+    /// Estimated average wire length (um) based on HPWL.
+    pub estimated_avg_wire_length_um: f64,
+    /// Number of nodes placed.
+    pub placed_nodes: usize,
+}
+
+/// Quick layout estimation without full simulated annealing (P1-5).
+///
+/// Uses levelized placement with a fixed pitch to estimate area
+/// and wire length.  Runs in O(n) time, suitable for synthesis-
+/// stage feasibility checks.
+pub fn estimate_layout(netlist: &Netlist) -> LayoutEstimate {
+    let placer = LevelizedPlacer::new();
+    let config = PlacementConfig::default();
+    let placement = placer.place(netlist, &config).unwrap_or(Placement {
+        nodes: Vec::new(),
+        width_um: 0.0,
+        height_um: 0.0,
+    });
+
+    let width = placement.width_um;
+    let height = placement.height_um;
+    let area = width * height;
+
+    // Estimate average wire length from HPWL of edges
+    let mut total_wire = 0.0f64;
+    let mut edge_count = 0usize;
+    for (from, to) in netlist.edge_pairs() {
+        if let (Some(p_from), Some(p_to)) = (
+            placement.point_of(from.node),
+            placement.point_of(to.node),
+        ) {
+            let hpwl = (p_from.x_um - p_to.x_um).abs() + (p_from.y_um - p_to.y_um).abs();
+            total_wire += hpwl;
+            edge_count += 1;
+        }
+    }
+    let avg_wire = if edge_count > 0 {
+        total_wire / edge_count as f64
+    } else {
+        0.0
+    };
+
+    LayoutEstimate {
+        width_um: width,
+        height_um: height,
+        area_um2: area,
+        estimated_avg_wire_length_um: avg_wire,
+        placed_nodes: placement.nodes.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1567,5 +1632,31 @@ mod tests {
         assert!(lines[0].starts_with("0 "));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- P1-5: estimate_layout tests ---
+
+    #[test]
+    fn estimate_layout_empty_netlist() {
+        let netlist = Netlist::new();
+        let est = estimate_layout(&netlist);
+        assert_eq!(est.placed_nodes, 0);
+        assert_eq!(est.width_um, 0.0);
+    }
+
+    #[test]
+    fn estimate_layout_simple_netlist() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "a");
+        let b = netlist.add_node(NodeKind::CellInstance, "b");
+        let c = netlist.add_node(NodeKind::CellInstance, "c");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: b, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: b, port: 0 }, PinRef { node: c, port: 0 }).unwrap();
+
+        let est = estimate_layout(&netlist);
+        assert!(est.width_um > 0.0);
+        assert!(est.height_um > 0.0);
+        assert!(est.area_um2 > 0.0);
+        assert_eq!(est.placed_nodes, 3);
     }
 }

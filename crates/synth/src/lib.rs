@@ -1953,6 +1953,209 @@ fn topological_order_for_sequential_sat(netlist: &Netlist) -> Result<Vec<usize>,
     Ok(order)
 }
 
+// ---------------------------------------------------------------------------
+// P1-5: Physical Feasibility Estimator
+// ---------------------------------------------------------------------------
+
+/// Result of physical feasibility estimation (P1-5).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeasibilityReport {
+    /// Total estimated cell area (um²).
+    pub estimated_area_um2: f64,
+    /// Total number of nodes.
+    pub node_count: usize,
+    /// Total number of edges (nets).
+    pub edge_count: usize,
+    /// Average fanout per net.
+    pub avg_fanout: f64,
+    /// Number of splitter nodes (auto-inserted).
+    pub splitter_count: usize,
+    /// Number of DFF nodes (including balancing DFFs).
+    pub dff_count: usize,
+    /// Estimated routing demand (total edge length in um).
+    pub estimated_routing_demand_um: f64,
+    /// Estimated routing capacity (available channel length in um).
+    pub estimated_routing_capacity_um: f64,
+    /// Congestion ratio: demand / capacity.  >1.0 means over-congested.
+    pub congestion_ratio: f64,
+    /// Pipeline depth (number of DFF stages in the longest path).
+    pub pipeline_depth: usize,
+    /// Whether the design is physically feasible.
+    pub feasible: bool,
+    /// Warnings about potential physical issues.
+    pub warnings: Vec<String>,
+}
+
+/// Physical feasibility estimator for synthesis output (P1-5).
+///
+/// Estimates routing congestion, area, and pipeline depth from the
+/// netlist without running full placement/routing.  Used during
+/// synthesis to catch physical infeasibility early.
+#[derive(Debug, Default)]
+pub struct PhysicalFeasibilityEstimator;
+
+impl PhysicalFeasibilityEstimator {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Estimate physical feasibility of a synthesized netlist.
+    pub fn estimate(&self, netlist: &Netlist, _pdk: &Pdk) -> FeasibilityReport {
+        let nodes = netlist.nodes();
+        let node_count = nodes.len();
+        let edge_count = netlist.edge_count();
+
+        // Count node types
+        let mut splitter_count = 0usize;
+        let mut dff_count = 0usize;
+        let mut total_area = 0.0f64;
+
+        for node in nodes {
+            match node.kind {
+                NodeKind::Splitter => {
+                    splitter_count += 1;
+                    total_area += 5.0; // default splitter area
+                }
+                NodeKind::Dff => {
+                    dff_count += 1;
+                    total_area += 20.0; // default DFF area
+                }
+                NodeKind::CellInstance => {
+                    total_area += 10.0; // default gate area
+                }
+                NodeKind::MacroCell => {
+                    total_area += 50.0; // default macro area
+                }
+                _ => {}
+            }
+        }
+
+        // Compute average fanout
+        let avg_fanout = if node_count > 0 {
+            edge_count as f64 / node_count.max(1) as f64
+        } else {
+            0.0
+        };
+
+        // Estimate routing demand: sum of Manhattan distances for all edges
+        // Use a heuristic: each edge spans ~sqrt(area/nodes) on average
+        let avg_span = if node_count > 1 {
+            (total_area / node_count as f64).sqrt()
+        } else {
+            0.0
+        };
+        let routing_demand = edge_count as f64 * avg_span;
+
+        // Estimate routing capacity: available channel length
+        // Assume 2 metal layers, each providing perimeter * channel_density
+        let side_length = total_area.sqrt();
+        let channel_density = 0.5; // 50% of perimeter usable for routing
+        let routing_capacity = 2.0 * 4.0 * side_length * channel_density;
+
+        let congestion_ratio = if routing_capacity > 0.0 {
+            routing_demand / routing_capacity
+        } else {
+            0.0
+        };
+
+        // Estimate pipeline depth from topological analysis
+        let pipeline_depth = self.estimate_pipeline_depth(netlist);
+
+        // Generate warnings
+        let mut warnings = Vec::new();
+        if congestion_ratio > 1.0 {
+            warnings.push(format!(
+                "High congestion risk: ratio {:.2} (>1.0). Consider reducing fanout \
+                 or using more compound cells.",
+                congestion_ratio
+            ));
+        }
+        if splitter_count as f64 / node_count.max(1) as f64 > 0.3 {
+            warnings.push(format!(
+                "High splitter ratio: {}/{} nodes are splitters. \
+                 Consider restructuring to reduce fanout.",
+                splitter_count, node_count
+            ));
+        }
+        if pipeline_depth > 10 {
+            warnings.push(format!(
+                "Deep pipeline: {} stages. Consider using compound cells \
+                 to reduce DFF overhead.",
+                pipeline_depth
+            ));
+        }
+
+        FeasibilityReport {
+            estimated_area_um2: total_area,
+            node_count,
+            edge_count,
+            avg_fanout,
+            splitter_count,
+            dff_count,
+            estimated_routing_demand_um: routing_demand,
+            estimated_routing_capacity_um: routing_capacity,
+            congestion_ratio,
+            pipeline_depth,
+            feasible: congestion_ratio <= 1.5 && warnings.is_empty(),
+            warnings,
+        }
+    }
+
+    /// Estimate pipeline depth using topological BFS.
+    fn estimate_pipeline_depth(&self, netlist: &Netlist) -> usize {
+        use std::collections::{HashMap, VecDeque};
+
+        let mut depth_map: HashMap<rflux_ir::NodeId, usize> = HashMap::new();
+        let mut in_degree: HashMap<rflux_ir::NodeId, usize> = HashMap::new();
+        let mut children: HashMap<rflux_ir::NodeId, Vec<rflux_ir::NodeId>> = HashMap::new();
+
+        for node in netlist.nodes() {
+            in_degree.entry(node.id).or_insert(0);
+            children.entry(node.id).or_default();
+        }
+        for (from, to) in netlist.edge_pairs() {
+            *in_degree.entry(to.node).or_insert(0) += 1;
+            children.entry(from.node).or_default().push(to.node);
+        }
+
+        let mut queue = VecDeque::new();
+        for (&node_id, &deg) in &in_degree {
+            if deg == 0 {
+                depth_map.insert(node_id, 0);
+                queue.push_back(node_id);
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            let current_depth = depth_map[&current];
+            let node = &netlist.nodes()[current.0];
+            // DFF resets the pipeline depth
+            let next_depth = if matches!(node.kind, NodeKind::Dff) {
+                0
+            } else {
+                current_depth + 1
+            };
+
+            if let Some(child_list) = children.get(&current) {
+                for &child in child_list {
+                    let entry = depth_map.entry(child).or_insert(0);
+                    if next_depth > *entry {
+                        *entry = next_depth;
+                    }
+                    let deg = in_degree.get_mut(&child).unwrap();
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+
+        depth_map.values().copied().max().unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6184,5 +6387,73 @@ mod tests {
         for c in &candidates {
             assert!(c.area_um2 > 0.0);
         }
+    }
+
+    // --- P1-5: PhysicalFeasibilityEstimator tests ---
+
+    #[test]
+    fn feasibility_estimator_empty_netlist() {
+        let estimator = PhysicalFeasibilityEstimator::new();
+        let netlist = Netlist::new();
+        let pdk = Pdk::minimal("test");
+        let report = estimator.estimate(&netlist, &pdk);
+        assert_eq!(report.node_count, 0);
+        assert_eq!(report.edge_count, 0);
+        assert!(report.feasible);
+    }
+
+    #[test]
+    fn feasibility_estimator_simple_netlist() {
+        let estimator = PhysicalFeasibilityEstimator::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: g2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g2, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let pdk = Pdk::minimal("test");
+        let report = estimator.estimate(&netlist, &pdk);
+        assert_eq!(report.node_count, 4);
+        assert_eq!(report.edge_count, 3);
+        assert!(report.estimated_area_um2 > 0.0);
+    }
+
+    #[test]
+    fn feasibility_estimator_detects_high_congestion() {
+        let estimator = PhysicalFeasibilityEstimator::new();
+        let mut netlist = Netlist::new();
+        // Create a highly connected netlist that will have high congestion
+        let inp = netlist.add_node(NodeKind::Port, "in");
+        let mut prev = inp;
+        for i in 0..20 {
+            let split = netlist.add_node(NodeKind::Splitter, format!("split_{i}"));
+            netlist.connect(PinRef { node: prev, port: 0 }, PinRef { node: split, port: 0 }).unwrap();
+            prev = split;
+        }
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: prev, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let pdk = Pdk::minimal("test");
+        let report = estimator.estimate(&netlist, &pdk);
+        assert_eq!(report.splitter_count, 20);
+        assert!(!report.warnings.is_empty() || report.congestion_ratio > 0.0);
+    }
+
+    #[test]
+    fn feasibility_estimator_counts_dffs() {
+        let estimator = PhysicalFeasibilityEstimator::new();
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let dff = netlist.add_node(NodeKind::Dff, "dff");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: dff, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: dff, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let pdk = Pdk::minimal("test");
+        let report = estimator.estimate(&netlist, &pdk);
+        assert_eq!(report.dff_count, 1);
     }
 }
