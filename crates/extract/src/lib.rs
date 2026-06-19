@@ -2,6 +2,21 @@ use rflux_ir::PinRef;
 use rflux_route::{NetRoute, RouteMode, RoutingReport};
 use rflux_tech::Pdk;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ExtractError {
+    #[error("invalid extraction parameters: {0}")]
+    InvalidParams(String),
+}
+
+impl ExtractError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            ExtractError::InvalidParams(_) => "RFLOW-EXTRACT-001",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParasiticConfig {
@@ -187,6 +202,14 @@ mod tests {
             direct_length_um: length_um,
             length_um,
         }
+    }
+
+    #[test]
+    fn error_codes_are_stable() {
+        assert_eq!(
+            ExtractError::InvalidParams("".to_string()).code(),
+            "RFLOW-EXTRACT-001"
+        );
     }
 
     #[test]

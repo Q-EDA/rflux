@@ -6,6 +6,24 @@ use rflux_route::RoutingReport;
 use rflux_tech::Pdk;
 use rflux_timing::{StaticTimingAnalyzer, TimingConfig};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MarginError {
+    #[error("invalid margin configuration: {0}")]
+    InvalidConfig(String),
+    #[error("margin analysis failed: {0}")]
+    AnalysisFailed(String),
+}
+
+impl MarginError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            MarginError::InvalidConfig(_) => "RFLOW-MARGIN-001",
+            MarginError::AnalysisFailed(_) => "RFLOW-MARGIN-002",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MarginMethod {
@@ -544,6 +562,18 @@ mod tests {
         assert_eq!(report.total_samples, 10);
         assert!(report.yield_estimate >= 0.0 && report.yield_estimate <= 1.0);
         assert_eq!(report.sensitivity.len(), 1);
+    }
+
+    #[test]
+    fn error_codes_are_stable() {
+        assert_eq!(
+            MarginError::InvalidConfig("".to_string()).code(),
+            "RFLOW-MARGIN-001"
+        );
+        assert_eq!(
+            MarginError::AnalysisFailed("".to_string()).code(),
+            "RFLOW-MARGIN-002"
+        );
     }
 
     #[test]

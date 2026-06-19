@@ -5,6 +5,21 @@ use rflux_route::{CouplingMap, RouteMode, RoutingReport};
 use rflux_tech::{CharacterizationArtifactMetadata, InterconnectKind, Pdk, SfCell, SfCellKind};
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IncrementalTimingConfig {
+    pub enable: bool,
+    pub changed_pins: Vec<PinRef>,
+}
+
+impl Default for IncrementalTimingConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            changed_pins: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Timing constraint attached to a specific node.
 pub struct NodeTimingConstraint {
@@ -926,6 +941,48 @@ impl StaticTimingAnalyzer {
             noise_margin,
             path_report: None,
         })
+    }
+
+    pub fn incremental_analyze(
+        &self,
+        netlist: &Netlist,
+        routing: &RoutingReport,
+        pdk: &Pdk,
+        config: &TimingConfig,
+        previous: &TimingReport,
+        incremental_config: &IncrementalTimingConfig,
+    ) -> Result<TimingReport, TimingError> {
+        if !incremental_config.enable || incremental_config.changed_pins.is_empty() {
+            return self.analyze(netlist, routing, pdk, config, None);
+        }
+
+        let affected_arcs: Vec<usize> = previous
+            .arcs
+            .iter()
+            .enumerate()
+            .filter(|(_, arc)| {
+                incremental_config.changed_pins.contains(&arc.from)
+                    || incremental_config.changed_pins.contains(&arc.to)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if affected_arcs.is_empty() {
+            return Ok(previous.clone());
+        }
+
+        let mut report = self.analyze(netlist, routing, pdk, config, None)?;
+
+        for (i, arc) in report.arcs.iter_mut().enumerate() {
+            if !affected_arcs.contains(&i) && i < previous.arcs.len() {
+                arc.arrival_ps = previous.arcs[i].arrival_ps;
+                arc.required_ps = previous.arcs[i].required_ps;
+                arc.setup_slack_ps = previous.arcs[i].setup_slack_ps;
+                arc.hold_slack_ps = previous.arcs[i].hold_slack_ps;
+            }
+        }
+
+        Ok(report)
     }
 
     #[cfg(feature = "parallel")]
@@ -5311,6 +5368,75 @@ mod tests {
         assert!(report.std_hold_slack_ps >= 0.0);
         assert!(report.worst_setup_slack_ps <= report.mean_setup_slack_ps);
         assert!(report.worst_hold_slack_ps <= report.mean_hold_slack_ps);
+    }
+
+    #[test]
+    fn incremental_analyze_no_changes() {
+        let (netlist, routing, _source, _sink) = make_simple_netlist_routing();
+        let pdk = Pdk::minimal("test");
+        let config = TimingConfig::default();
+        let analyzer = StaticTimingAnalyzer::new();
+
+        let full_report = analyzer
+            .analyze(&netlist, &routing, &pdk, &config, None)
+            .expect("full analysis should succeed");
+
+        let incremental_config = IncrementalTimingConfig {
+            enable: true,
+            changed_pins: Vec::new(),
+        };
+        let incremental_report = analyzer
+            .incremental_analyze(
+                &netlist,
+                &routing,
+                &pdk,
+                &config,
+                &full_report,
+                &incremental_config,
+            )
+            .expect("incremental should succeed");
+
+        assert_eq!(incremental_report.arcs.len(), full_report.arcs.len());
+        assert_eq!(
+            incremental_report.analyzed_arcs,
+            full_report.analyzed_arcs
+        );
+        for (inc, full) in incremental_report
+            .arcs
+            .iter()
+            .zip(full_report.arcs.iter())
+        {
+            assert!((inc.arrival_ps - full.arrival_ps).abs() < 1e-9);
+            assert!((inc.setup_slack_ps - full.setup_slack_ps).abs() < 1e-9);
+            assert!((inc.hold_slack_ps - full.hold_slack_ps).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn incremental_analyze_disabled_falls_back_to_full() {
+        let (netlist, routing, _source, _sink) = make_simple_netlist_routing();
+        let pdk = Pdk::minimal("test");
+        let config = TimingConfig::default();
+        let analyzer = StaticTimingAnalyzer::new();
+
+        let full_report = analyzer
+            .analyze(&netlist, &routing, &pdk, &config, None)
+            .expect("full analysis should succeed");
+
+        let incremental_config = IncrementalTimingConfig::default();
+        let result = analyzer
+            .incremental_analyze(
+                &netlist,
+                &routing,
+                &pdk,
+                &config,
+                &full_report,
+                &incremental_config,
+            )
+            .expect("incremental should succeed");
+
+        assert_eq!(result.arcs.len(), full_report.arcs.len());
+        assert_eq!(result.analyzed_arcs, full_report.analyzed_arcs);
     }
 
     #[cfg(feature = "parallel")]
