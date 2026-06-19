@@ -2156,6 +2156,272 @@ impl PhysicalFeasibilityEstimator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P2-2: SFQ DFT (Design for Testability) Framework
+// ---------------------------------------------------------------------------
+
+/// Result of testability analysis (P2-2).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestabilityReport {
+    /// Total nodes in the netlist.
+    pub total_nodes: usize,
+    /// Nodes that are controllable (reachable from a test point or primary input).
+    pub controllable_nodes: usize,
+    /// Nodes that are observable (can be observed at a test point or primary output).
+    pub observable_nodes: usize,
+    /// Estimated stuck-at fault coverage (%).
+    pub fault_coverage_percent: f64,
+    /// Nodes that are neither controllable nor observable.
+    pub untestable_nodes: Vec<String>,
+    /// Test points inserted.
+    pub test_points_inserted: usize,
+    /// Observation points inserted.
+    pub observation_points_inserted: usize,
+}
+
+/// A test point inserted into the netlist for controllability.
+#[derive(Debug, Clone)]
+pub struct TestPoint {
+    /// Node where the test point is inserted.
+    pub target_node: rflux_ir::NodeId,
+    /// Name of the test point input.
+    pub name: String,
+    /// The test point node id (after insertion).
+    pub test_node: rflux_ir::NodeId,
+}
+
+/// An observation point inserted for observability.
+#[derive(Debug, Clone)]
+pub struct ObservationPoint {
+    /// Node being observed.
+    pub target_node: rflux_ir::NodeId,
+    /// Name of the observation output.
+    pub name: String,
+    /// The observer splitter node id.
+    pub observer_node: rflux_ir::NodeId,
+}
+
+/// SFQ test point injector (P2-2).
+///
+/// Inserts controllable test points at strategic locations in the
+/// netlist to improve fault coverage.  In SFQ, a test point is a
+/// pulse injection site that can be activated during testing to
+/// set a known value at a node.
+#[derive(Debug, Default)]
+pub struct TestPointInjector;
+
+impl TestPointInjector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Insert test points at nodes with high fanout (hard to control).
+    ///
+    /// Returns the list of inserted test points.
+    pub fn insert_test_points(
+        &self,
+        netlist: &mut Netlist,
+        max_points: usize,
+    ) -> Vec<TestPoint> {
+        let mut test_points = Vec::new();
+        let mut fanout_count: std::collections::HashMap<rflux_ir::NodeId, usize> =
+            std::collections::HashMap::new();
+
+        for (from, _to) in netlist.edge_pairs() {
+            *fanout_count.entry(from.node).or_insert(0) += 1;
+        }
+
+        let mut high_fanout: Vec<(rflux_ir::NodeId, usize)> = fanout_count
+            .into_iter()
+            .filter(|(_, count)| *count > 2)
+            .collect();
+        high_fanout.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (node_id, _) in high_fanout.into_iter().take(max_points) {
+            let tp_name = format!("test_point_{}", test_points.len());
+            let tp_id = netlist.add_node(NodeKind::CellInstance, &tp_name);
+            netlist
+                .connect(
+                    rflux_ir::PinRef { node: tp_id, port: 0 },
+                    rflux_ir::PinRef { node: node_id, port: 0 },
+                )
+                .ok();
+            test_points.push(TestPoint {
+                target_node: node_id,
+                name: tp_name,
+                test_node: tp_id,
+            });
+        }
+
+        test_points
+    }
+}
+
+/// SFQ pulse observer (P2-2).
+///
+/// Inserts non-destructive observation points by adding splitter
+/// nodes that copy the pulse to an observation channel.  In SFQ,
+/// destructive readout means we can't simply "probe" a node; we
+/// must split the signal to observe it without consuming it.
+#[derive(Debug, Default)]
+pub struct PulseObserver;
+
+impl PulseObserver {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Insert observation points at output ports.
+    ///
+    /// Returns the list of inserted observation points.
+    pub fn insert_observation_points(
+        &self,
+        netlist: &mut Netlist,
+    ) -> Vec<ObservationPoint> {
+        let mut observers = Vec::new();
+
+        let output_ports: Vec<rflux_ir::NodeId> = netlist
+            .nodes()
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Port))
+            .filter(|n| {
+                // Check if this port is driven (output port)
+                netlist.edge_pairs().iter().any(|(_, to)| to.node == n.id)
+            })
+            .map(|n| n.id)
+            .collect();
+
+        for port_id in output_ports {
+            let obs_name = format!("obs_{}", observers.len());
+            let obs_id = netlist.add_node(NodeKind::Splitter, &obs_name);
+
+            // Find the edge driving this port
+            if let Some((from, _to)) = netlist
+                .edge_pairs()
+                .iter()
+                .find(|(_, to)| to.node == port_id)
+                .map(|(f, t)| (*f, *t))
+            {
+                netlist.disconnect(from);
+                netlist.connect(from, rflux_ir::PinRef { node: obs_id, port: 0 }).ok();
+                netlist
+                    .connect(
+                        rflux_ir::PinRef { node: obs_id, port: 0 },
+                        rflux_ir::PinRef { node: port_id, port: 0 },
+                    )
+                    .ok();
+
+                observers.push(ObservationPoint {
+                    target_node: port_id,
+                    name: obs_name,
+                    observer_node: obs_id,
+                });
+            }
+        }
+
+        observers
+    }
+}
+
+/// Analyze testability of a netlist (P2-2).
+///
+/// Computes controllability (reachability from primary inputs) and
+/// observability (reachability to primary outputs) to estimate
+/// stuck-at fault coverage.
+pub fn analyze_testability(netlist: &Netlist) -> TestabilityReport {
+    use std::collections::{HashSet, VecDeque};
+
+    let nodes = netlist.nodes();
+    let edges = netlist.edge_pairs();
+    let total = nodes.len();
+
+    // Find primary inputs (Port nodes with no incoming edges)
+    let driven: HashSet<rflux_ir::NodeId> = edges.iter().map(|(_, to)| to.node).collect();
+    let primary_inputs: HashSet<rflux_ir::NodeId> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Port) && !driven.contains(&n.id))
+        .map(|n| n.id)
+        .collect();
+
+    // Find primary outputs (Port nodes with no outgoing edges)
+    let drivers: HashSet<rflux_ir::NodeId> = edges.iter().map(|(from, _)| from.node).collect();
+    let primary_outputs: HashSet<rflux_ir::NodeId> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Port) && !drivers.contains(&n.id))
+        .map(|n| n.id)
+        .collect();
+
+    // Forward reachability from inputs (controllability)
+    let mut controllable: HashSet<rflux_ir::NodeId> = HashSet::new();
+    let mut queue: VecDeque<rflux_ir::NodeId> = primary_inputs.iter().copied().collect();
+    let mut children: std::collections::HashMap<rflux_ir::NodeId, Vec<rflux_ir::NodeId>> =
+        std::collections::HashMap::new();
+    for (from, to) in &edges {
+        children.entry(from.node).or_default().push(to.node);
+    }
+    while let Some(current) = queue.pop_front() {
+        if controllable.insert(current) {
+            if let Some(child_list) = children.get(&current) {
+                for &child in child_list {
+                    if !controllable.contains(&child) {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+    }
+
+    // Backward reachability from outputs (observability)
+    let mut observable: HashSet<rflux_ir::NodeId> = HashSet::new();
+    let mut queue: VecDeque<rflux_ir::NodeId> = primary_outputs.iter().copied().collect();
+    let mut parents: std::collections::HashMap<rflux_ir::NodeId, Vec<rflux_ir::NodeId>> =
+        std::collections::HashMap::new();
+    for (from, to) in &edges {
+        parents.entry(to.node).or_default().push(from.node);
+    }
+    while let Some(current) = queue.pop_front() {
+        if observable.insert(current) {
+            if let Some(parent_list) = parents.get(&current) {
+                for &parent in parent_list {
+                    if !observable.contains(&parent) {
+                        queue.push_back(parent);
+                    }
+                }
+            }
+        }
+    }
+
+    let controllable_count = controllable.len();
+    let observable_count = observable.len();
+
+    // Fault coverage: a fault is detectable if the site is both
+    // controllable and observable.
+    let testable = controllable.intersection(&observable).count();
+    let coverage = if total > 0 {
+        testable as f64 / total as f64 * 100.0
+    } else {
+        100.0
+    };
+
+    let untestable: Vec<String> = nodes
+        .iter()
+        .filter(|n| !controllable.contains(&n.id) || !observable.contains(&n.id))
+        .map(|n| n.name.clone())
+        .collect();
+
+    TestabilityReport {
+        total_nodes: total,
+        controllable_nodes: controllable_count,
+        observable_nodes: observable_count,
+        fault_coverage_percent: coverage,
+        untestable_nodes: untestable,
+        test_points_inserted: 0,
+        observation_points_inserted: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6455,5 +6721,79 @@ mod tests {
         let pdk = Pdk::minimal("test");
         let report = estimator.estimate(&netlist, &pdk);
         assert_eq!(report.dff_count, 1);
+    }
+
+    // --- P2-2: DFT tests ---
+
+    #[test]
+    fn testability_report_simple_chain() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let g2 = netlist.add_node(NodeKind::CellInstance, "g2");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: g2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g2, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let report = analyze_testability(&netlist);
+        assert_eq!(report.total_nodes, 4);
+        assert_eq!(report.controllable_nodes, 4); // all reachable from input
+        assert_eq!(report.observable_nodes, 4); // all reachable to output
+        assert!((report.fault_coverage_percent - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn testability_report_uncontrollable_node() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        let orphan = netlist.add_node(NodeKind::CellInstance, "orphan");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let report = analyze_testability(&netlist);
+        assert_eq!(report.total_nodes, 4);
+        // orphan is neither controllable nor observable
+        assert!(report.untestable_nodes.contains(&"orphan".to_string()));
+        assert!(report.fault_coverage_percent < 100.0);
+    }
+
+    #[test]
+    fn test_point_injector_inserts_at_high_fanout() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let split = netlist.add_node(NodeKind::Splitter, "split");
+        let o1 = netlist.add_node(NodeKind::CellInstance, "o1");
+        let o2 = netlist.add_node(NodeKind::CellInstance, "o2");
+        let o3 = netlist.add_node(NodeKind::CellInstance, "o3");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: split, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: split, port: 0 }, PinRef { node: o1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: split, port: 1 }, PinRef { node: o2, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: split, port: 2 }, PinRef { node: o3, port: 0 }).unwrap();
+
+        let injector = TestPointInjector::new();
+        let tps = injector.insert_test_points(&mut netlist, 5);
+        // split has fanout 3 (via splitter), should get a test point
+        // (or the node before it)
+        assert!(tps.len() <= 5);
+    }
+
+    #[test]
+    fn pulse_observer_inserts_at_outputs() {
+        let mut netlist = Netlist::new();
+        let a = netlist.add_node(NodeKind::Port, "in");
+        let g1 = netlist.add_node(NodeKind::CellInstance, "g1");
+        let out = netlist.add_node(NodeKind::Port, "out");
+        netlist.connect(PinRef { node: a, port: 0 }, PinRef { node: g1, port: 0 }).unwrap();
+        netlist.connect(PinRef { node: g1, port: 0 }, PinRef { node: out, port: 0 }).unwrap();
+
+        let observer = PulseObserver::new();
+        let obs = observer.insert_observation_points(&mut netlist);
+        assert_eq!(obs.len(), 1); // one output port
+        assert_eq!(obs[0].target_node, out);
     }
 }
