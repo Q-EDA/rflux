@@ -347,6 +347,24 @@ pub struct AcBiasReport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CellPowerReport {
+    pub cell_name: String,
+    pub cell_kind: String,
+    pub jj_count: usize,
+    pub dynamic_power_uw: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PowerReport {
+    pub total_dynamic_power_uw: f64,
+    pub total_jj_count: usize,
+    pub clock_frequency_ghz: f64,
+    pub cells: Vec<CellPowerReport>,
+    pub ac_bias_savings_uw: f64,
+    pub net_power_uw: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AcBiasOptimizationReport {
     pub baseline: AcBiasReport,
     pub optimized: AcBiasReport,
@@ -859,6 +877,48 @@ impl FlowRunner {
     ) -> Result<AcBiasReport, FlowError> {
         let artifacts = self.compile_artifacts(netlist, pdk, config)?;
         Ok(ac_bias_report_from_artifacts(&artifacts))
+    }
+
+    pub fn analyze_power(
+        &mut self,
+        netlist: &mut Netlist,
+        pdk: &Pdk,
+        config: &FlowConfig,
+    ) -> Result<PowerReport, FlowError> {
+        let artifacts = self.compile_artifacts(netlist, pdk, config)?;
+
+        let clock_freq_ghz = 1000.0 / config.timing.clock_period_ps;
+        let v_bias = 2.0e-3;
+        let i_c = 0.1e-3;
+
+        let mut cells = Vec::new();
+        let mut total_power = 0.0;
+        let mut total_jj = 0usize;
+
+        for node in netlist.nodes() {
+            let jj_count = estimate_jj_count(&node.kind, &node.name, pdk);
+            let power_uw = jj_count as f64 * i_c * v_bias * clock_freq_ghz * 1e6;
+            cells.push(CellPowerReport {
+                cell_name: node.name.clone(),
+                cell_kind: format!("{:?}", node.kind),
+                jj_count,
+                dynamic_power_uw: power_uw,
+            });
+            total_power += power_uw;
+            total_jj += jj_count;
+        }
+
+        let ac_report = ac_bias_report_from_artifacts(&artifacts);
+        let ac_savings = ac_report.estimated_static_power_savings_uw;
+
+        Ok(PowerReport {
+            total_dynamic_power_uw: total_power,
+            total_jj_count: total_jj,
+            clock_frequency_ghz: clock_freq_ghz,
+            cells,
+            ac_bias_savings_uw: ac_savings,
+            net_power_uw: total_power - ac_savings,
+        })
     }
 
     pub fn optimize_ac_bias(
@@ -2236,6 +2296,31 @@ fn flow_route_resistance_ohm(route: &rflux_route::NetRoute) -> f64 {
     match route.mode {
         RouteMode::Jtl => 20.0 + route.length_um.max(0.0) * 0.4,
         RouteMode::Ptl => 35.0 + route.length_um.max(0.0) * 0.6,
+    }
+}
+
+fn estimate_jj_count(kind: &NodeKind, name: &str, pdk: &Pdk) -> usize {
+    let sf_kind = match kind {
+        NodeKind::CellInstance => SfCellKind::GenericGate,
+        NodeKind::MacroCell => SfCellKind::Macro,
+        NodeKind::Splitter => SfCellKind::Splitter,
+        NodeKind::Dff => SfCellKind::Dff,
+        NodeKind::Jtl => SfCellKind::Jtl,
+        NodeKind::Ptl => SfCellKind::Ptl,
+        NodeKind::Port => return 0,
+    };
+    if let Some(cell) = pdk.cell_for_node(name, sf_kind) {
+        (cell.area_um2 * 10.0).max(1.0) as usize
+    } else {
+        match kind {
+            NodeKind::CellInstance => 5,
+            NodeKind::Dff => 8,
+            NodeKind::Splitter => 2,
+            NodeKind::Jtl => 1,
+            NodeKind::MacroCell => 20,
+            NodeKind::Ptl => 1,
+            NodeKind::Port => 0,
+        }
     }
 }
 
@@ -7107,5 +7192,72 @@ mod tests {
 
         assert!(!report.points.is_empty());
         assert!(report.recommended.is_some());
+    }
+
+    #[test]
+    fn analyze_power_reports_total() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink");
+
+        let report = FlowRunner::new()
+            .analyze_power(
+                &mut netlist,
+                &Pdk::minimal("test"),
+                &FlowConfig::default(),
+            )
+            .expect("power analysis should succeed");
+
+        assert!(report.total_dynamic_power_uw > 0.0);
+        assert!(!report.cells.is_empty());
+        assert!(report.total_jj_count > 0);
+        assert!(report.clock_frequency_ghz > 0.0);
+        assert!(report.net_power_uw >= 0.0);
+    }
+
+    #[test]
+    fn analyze_power_frequency_scales() {
+        let mut netlist = Netlist::new();
+        let source = netlist.add_node(NodeKind::Port, "source");
+        let sink = netlist.add_node(NodeKind::Dff, "sink");
+        netlist
+            .connect(
+                PinRef {
+                    node: source,
+                    port: 0,
+                },
+                PinRef {
+                    node: sink,
+                    port: 0,
+                },
+            )
+            .expect("source to sink");
+
+        let mut slow_config = FlowConfig::default();
+        slow_config.timing.clock_period_ps = 200.0;
+        let mut fast_config = FlowConfig::default();
+        fast_config.timing.clock_period_ps = 100.0;
+
+        let slow = FlowRunner::new()
+            .analyze_power(&mut netlist.clone(), &Pdk::minimal("test"), &slow_config)
+            .expect("slow power should succeed");
+        let fast = FlowRunner::new()
+            .analyze_power(&mut netlist, &Pdk::minimal("test"), &fast_config)
+            .expect("fast power should succeed");
+
+        assert!(fast.total_dynamic_power_uw > slow.total_dynamic_power_uw);
+        assert!(fast.clock_frequency_ghz > slow.clock_frequency_ghz);
     }
 }

@@ -153,6 +153,109 @@ fn generate_boundary_samples(config: &MarginConfig) -> Vec<Vec<(String, f64)>> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct YieldOptimizerConfig {
+    pub max_iterations: usize,
+    pub samples_per_iteration: usize,
+    pub improvement_threshold: f64,
+    pub seed: u64,
+}
+
+impl Default for YieldOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 50,
+            samples_per_iteration: 100,
+            improvement_threshold: 0.01,
+            seed: 42,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct YieldReport {
+    pub initial_yield: f64,
+    pub optimized_yield: f64,
+    pub iterations: usize,
+    pub optimal_parameters: Vec<(String, f64)>,
+    pub improvement: f64,
+}
+
+pub struct YieldOptimizer {
+    config: YieldOptimizerConfig,
+}
+
+impl YieldOptimizer {
+    pub fn new(config: YieldOptimizerConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn optimize(
+        &self,
+        netlist: &Netlist,
+        routing: &RoutingReport,
+        pdk: &Pdk,
+        margin_config: &MarginConfig,
+    ) -> YieldReport {
+        let mut rng = StdRng::seed_from_u64(self.config.seed);
+
+        let initial_report = analyze_margin(netlist, routing, pdk, margin_config);
+        let mut best_yield = initial_report.yield_estimate;
+        let mut best_params: Vec<(String, f64)> = margin_config
+            .parameters
+            .iter()
+            .map(|p| (p.name.clone(), p.nominal))
+            .collect();
+
+        for _iter in 0..self.config.max_iterations {
+            let candidate_params: Vec<MarginParameter> = margin_config
+                .parameters
+                .iter()
+                .map(|p| {
+                    let delta = (p.max - p.min) * 0.1;
+                    let new_nominal = p.nominal + rng.gen_range(-delta..delta);
+                    let clamped = new_nominal.clamp(p.min, p.max);
+                    MarginParameter {
+                        name: p.name.clone(),
+                        nominal: clamped,
+                        min: p.min,
+                        max: p.max,
+                        distribution: p.distribution,
+                    }
+                })
+                .collect();
+
+            let candidate_config = MarginConfig {
+                parameters: candidate_params,
+                method: MarginMethod::MonteCarlo {
+                    samples: self.config.samples_per_iteration,
+                },
+                seed: rng.gen(),
+                clock_period_ps: margin_config.clock_period_ps,
+            };
+
+            let candidate_report = analyze_margin(netlist, routing, pdk, &candidate_config);
+
+            if candidate_report.yield_estimate > best_yield + self.config.improvement_threshold {
+                best_yield = candidate_report.yield_estimate;
+                best_params = candidate_config
+                    .parameters
+                    .iter()
+                    .map(|p| (p.name.clone(), p.nominal))
+                    .collect();
+            }
+        }
+
+        YieldReport {
+            initial_yield: initial_report.yield_estimate,
+            optimized_yield: best_yield,
+            iterations: self.config.max_iterations,
+            optimal_parameters: best_params,
+            improvement: best_yield - initial_report.yield_estimate,
+        }
+    }
+}
+
 fn apply_parameters_to_pdk(base: &Pdk, params: &[(String, f64)]) -> Pdk {
     let mut pdk = base.clone();
     for (name, value) in params {
@@ -441,5 +544,35 @@ mod tests {
         assert_eq!(report.total_samples, 10);
         assert!(report.yield_estimate >= 0.0 && report.yield_estimate <= 1.0);
         assert_eq!(report.sensitivity.len(), 1);
+    }
+
+    #[test]
+    fn yield_optimizer_improves_or_maintains() {
+        let netlist = Netlist::new();
+        let routing = RoutingReport {
+            routes: Vec::new(),
+            total_length_um: 0.0,
+            total_detour_overhead_um: 0.0,
+            detoured_routes: 0,
+            jtl_routes: 0,
+            ptl_routes: 0,
+        };
+        let pdk = Pdk::minimal("test");
+        let margin_config = MarginConfig {
+            parameters: vec![MarginParameter {
+                name: "jtl_impedance_ohm".to_string(),
+                nominal: 2.0,
+                min: 1.8,
+                max: 2.2,
+                distribution: Distribution::Uniform,
+            }],
+            method: MarginMethod::MonteCarlo { samples: 50 },
+            seed: 42,
+            clock_period_ps: 120.0,
+        };
+        let optimizer = YieldOptimizer::new(YieldOptimizerConfig::default());
+        let report = optimizer.optimize(&netlist, &routing, &pdk, &margin_config);
+        assert!(report.optimized_yield >= report.initial_yield - 0.01);
+        assert!(!report.optimal_parameters.is_empty());
     }
 }
