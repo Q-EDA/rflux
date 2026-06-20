@@ -14,7 +14,7 @@ thiserror.workspace = true
 [dev-dependencies]
 rflux-io = { path = "../io" }
 rflux-verify = { path = "../verify" }
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "equivalence_bench"
