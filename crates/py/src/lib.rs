@@ -1584,6 +1584,130 @@ impl PyRouteSegment {
 }
 
 #[pyclass]
+#[derive(Clone, Default)]
+struct PyWaveformTimingConfig {
+    #[pyo3(get, set)]
+    enable_waveform: bool,
+    #[pyo3(get, set)]
+    amplitude_threshold: f64,
+    #[pyo3(get, set)]
+    max_pulse_width_ps: f64,
+    #[pyo3(get, set)]
+    initial_amplitude: f64,
+    #[pyo3(get, set)]
+    initial_width_ps: f64,
+    #[pyo3(get, set)]
+    initial_rise_time_ps: f64,
+}
+
+#[pymethods]
+impl PyWaveformTimingConfig {
+    #[new]
+    #[pyo3(signature = (enable_waveform=false, amplitude_threshold=0.3, max_pulse_width_ps=10.0, initial_amplitude=1.0, initial_width_ps=1.0, initial_rise_time_ps=0.1))]
+    fn new(
+        enable_waveform: bool,
+        amplitude_threshold: f64,
+        max_pulse_width_ps: f64,
+        initial_amplitude: f64,
+        initial_width_ps: f64,
+        initial_rise_time_ps: f64,
+    ) -> Self {
+        Self {
+            enable_waveform,
+            amplitude_threshold,
+            max_pulse_width_ps,
+            initial_amplitude,
+            initial_width_ps,
+            initial_rise_time_ps,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Default)]
+struct PyOcvConfig {
+    #[pyo3(get, set)]
+    cell_early_factor: f64,
+    #[pyo3(get, set)]
+    cell_late_factor: f64,
+    #[pyo3(get, set)]
+    wire_early_factor: f64,
+    #[pyo3(get, set)]
+    wire_late_factor: f64,
+    #[pyo3(get, set)]
+    path_based: bool,
+    #[pyo3(get, set)]
+    path_depth_factor: f64,
+}
+
+#[pymethods]
+impl PyOcvConfig {
+    #[new]
+    #[pyo3(signature = (cell_early_factor=0.95, cell_late_factor=1.05, wire_early_factor=0.95, wire_late_factor=1.05, path_based=false, path_depth_factor=0.02))]
+    fn new(
+        cell_early_factor: f64,
+        cell_late_factor: f64,
+        wire_early_factor: f64,
+        wire_late_factor: f64,
+        path_based: bool,
+        path_depth_factor: f64,
+    ) -> Self {
+        Self {
+            cell_early_factor,
+            cell_late_factor,
+            wire_early_factor,
+            wire_late_factor,
+            path_based,
+            path_depth_factor,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Default)]
+struct PyNoiseMarginConfig {
+    #[pyo3(get, set)]
+    temperature_k: f64,
+    #[pyo3(get, set)]
+    pulse_voltage_mv: f64,
+    #[pyo3(get, set)]
+    pulse_width_ps: f64,
+    #[pyo3(get, set)]
+    margin_threshold_db: f64,
+    #[pyo3(get, set)]
+    enable_thermal: bool,
+    #[pyo3(get, set)]
+    enable_crosstalk: bool,
+    #[pyo3(get, set)]
+    enable_process_spread: bool,
+}
+
+#[pymethods]
+impl PyNoiseMarginConfig {
+    #[new]
+    #[pyo3(signature = (temperature_k=4.2, pulse_voltage_mv=2.5, pulse_width_ps=1.0, margin_threshold_db=6.0, enable_thermal=true, enable_crosstalk=true, enable_process_spread=true))]
+    fn new(
+        temperature_k: f64,
+        pulse_voltage_mv: f64,
+        pulse_width_ps: f64,
+        margin_threshold_db: f64,
+        enable_thermal: bool,
+        enable_crosstalk: bool,
+        enable_process_spread: bool,
+    ) -> Self {
+        Self {
+            temperature_k,
+            pulse_voltage_mv,
+            pulse_width_ps,
+            margin_threshold_db,
+            enable_thermal,
+            enable_crosstalk,
+            enable_process_spread,
+        }
+    }
+}
+
+#[pyclass]
 #[derive(Clone)]
 struct PyNetRoute {
     #[pyo3(get, set)]
@@ -1602,11 +1726,16 @@ struct PyNetRoute {
     direct_length_um: f64,
     #[pyo3(get, set)]
     length_um: f64,
+    #[pyo3(get, set)]
+    is_clock_net: bool,
+    #[pyo3(get, set)]
+    clock_phase: Option<usize>,
 }
 
 #[pymethods]
 impl PyNetRoute {
     #[new]
+    #[pyo3(signature = (from_node, from_port, to_node, to_port, mode, segments, direct_length_um, length_um, is_clock_net=false, clock_phase=None))]
     fn new(
         from_node: usize,
         from_port: u16,
@@ -1616,6 +1745,8 @@ impl PyNetRoute {
         segments: Vec<PyRouteSegment>,
         direct_length_um: f64,
         length_um: f64,
+        is_clock_net: bool,
+        clock_phase: Option<usize>,
     ) -> Self {
         Self {
             from_node,
@@ -1626,6 +1757,8 @@ impl PyNetRoute {
             segments,
             direct_length_um,
             length_um,
+            is_clock_net,
+            clock_phase,
         }
     }
 }
@@ -1645,11 +1778,30 @@ struct PyRoutingReport {
     jtl_routes: usize,
     #[pyo3(get, set)]
     ptl_routes: usize,
+    #[pyo3(get, set)]
+    clock_routes: usize,
+    #[pyo3(get, set)]
+    data_routes: usize,
+    #[pyo3(get, set)]
+    peak_channel_usage: usize,
+    #[pyo3(get, set)]
+    co_routed: bool,
+    #[pyo3(get, set)]
+    effective_prefer_ptl_from_length_um: Option<f64>,
+    #[pyo3(get, set)]
+    effective_detour_margin_um: Option<f64>,
+    #[pyo3(get, set)]
+    reflection_risk_routes: usize,
+    #[pyo3(get, set)]
+    reflection_boundary_sites: usize,
+    #[pyo3(get, set)]
+    max_reflection_energy: f64,
 }
 
 #[pymethods]
 impl PyRoutingReport {
     #[new]
+    #[pyo3(signature = (routes, total_length_um, total_detour_overhead_um, detoured_routes, jtl_routes, ptl_routes, clock_routes=0, data_routes=0, peak_channel_usage=0, co_routed=false, effective_prefer_ptl_from_length_um=None, effective_detour_margin_um=None, reflection_risk_routes=0, reflection_boundary_sites=0, max_reflection_energy=0.0))]
     fn new(
         routes: Vec<PyNetRoute>,
         total_length_um: f64,
@@ -1657,6 +1809,15 @@ impl PyRoutingReport {
         detoured_routes: usize,
         jtl_routes: usize,
         ptl_routes: usize,
+        clock_routes: usize,
+        data_routes: usize,
+        peak_channel_usage: usize,
+        co_routed: bool,
+        effective_prefer_ptl_from_length_um: Option<f64>,
+        effective_detour_margin_um: Option<f64>,
+        reflection_risk_routes: usize,
+        reflection_boundary_sites: usize,
+        max_reflection_energy: f64,
     ) -> Self {
         Self {
             routes,
@@ -1665,6 +1826,15 @@ impl PyRoutingReport {
             detoured_routes,
             jtl_routes,
             ptl_routes,
+            clock_routes,
+            data_routes,
+            peak_channel_usage,
+            co_routed,
+            effective_prefer_ptl_from_length_um,
+            effective_detour_margin_um,
+            reflection_risk_routes,
+            reflection_boundary_sites,
+            max_reflection_energy,
         }
     }
 }
@@ -1705,6 +1875,8 @@ impl PyRoutingReport {
                         .collect(),
                     direct_length_um: r.direct_length_um,
                     length_um: r.length_um,
+                    is_clock_net: r.is_clock_net,
+                    clock_phase: r.clock_phase,
                 })
                 .collect(),
             total_length_um: self.total_length_um,
@@ -1712,6 +1884,10 @@ impl PyRoutingReport {
             detoured_routes: self.detoured_routes,
             jtl_routes: self.jtl_routes,
             ptl_routes: self.ptl_routes,
+            clock_routes: self.clock_routes,
+            data_routes: self.data_routes,
+            peak_channel_usage: self.peak_channel_usage,
+            co_routed: self.co_routed,
         }
     }
 }
@@ -2704,6 +2880,10 @@ fn to_flow_config(
                 .iter()
                 .map(to_crossing_constraint)
                 .collect::<PyResult<Vec<_>>>()?,
+            use_parasitic_extraction: false,
+            waveform: rflux_timing::WaveformTimingConfig::default(),
+            ocv: rflux_timing::OcvConfig::default(),
+            noise_margin: rflux_timing::NoiseMarginConfig::default(),
         },
         routing: rflux_route::RoutingConfig {
             blocked_regions: blocked.iter().map(to_blocked_region).collect(),

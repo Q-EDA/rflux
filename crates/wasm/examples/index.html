@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>rflux SFQ EDA - WebAssembly Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f7fa;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 30px;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #34495e;
+        }
+        input, textarea, select {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+        button.secondary {
+            background: #95a5a6;
+        }
+        button.secondary:hover {
+            background: #7f8c8d;
+        }
+        button.success {
+            background: #27ae60;
+        }
+        button.success:hover {
+            background: #219150;
+        }
+        button:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+        pre {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .status {
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 15px;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-top: 5px;
+        }
+        .hidden {
+            display: none;
+        }
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 15px;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+        }
+        .tab.active {
+            border-bottom-color: #3498db;
+            color: #3498db;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <h1>⚡ rflux SFQ EDA - WebAssembly Demo</h1>
+
+    <div class="container">
+        <div class="status info" id="init-status">
+            Loading rflux WebAssembly module...
+        </div>
+
+        <div class="form-group">
+            <label>Version</label>
+            <input type="text" id="version" readonly placeholder="Loading...">
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>Circuit Builder</h2>
+
+        <div class="form-group">
+            <label>Node Type</label>
+            <select id="node-type">
+                <option value="port">Port</option>
+                <option value="cell">Logic Cell</option>
+                <option value="splitter">Splitter</option>
+                <option value="dff">DFF</option>
+                <option value="jtl">JTL</option>
+                <option value="ptl">PTL</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>Node Name</label>
+            <input type="text" id="node-name" placeholder="e.g., input_a">
+        </div>
+
+        <div class="form-group" id="logic-op-group">
+            <label>Logic Operation (for cells)</label>
+            <select id="logic-op">
+                <option value="">None</option>
+                <option value="buf">Buf</option>
+                <option value="not">Not</option>
+                <option value="and">And</option>
+                <option value="or">Or</option>
+                <option value="xor">Xor</option>
+                <option value="mux2">Mux2</option>
+            </select>
+        </div>
+
+        <button id="add-node">Add Node</button>
+        <button id="load-example" class="secondary">Load Example Circuit</button>
+        <button id="clear-all" class="secondary">Clear All</button>
+
+        <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee;">
+            <h3>Connect Nodes</h3>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px;">
+                <div>
+                    <label>From Node</label>
+                    <input type="number" id="from-node" placeholder="0">
+                </div>
+                <div>
+                    <label>From Port</label>
+                    <input type="number" id="from-port" placeholder="0" value="0">
+                </div>
+                <div>
+                    <label>To Node</label>
+                    <input type="number" id="to-node" placeholder="1">
+                </div>
+                <div>
+                    <label>To Port</label>
+                    <input type="number" id="to-port" placeholder="0" value="0">
+                </div>
+            </div>
+            <button id="connect-nodes" style="margin-top: 10px;">Connect</button>
+        </div>
+
+        <div class="stats-grid" id="circuit-stats">
+            <div class="stat-card">
+                <div class="stat-label">Nodes</div>
+                <div class="stat-value" id="node-count">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Edges</div>
+                <div class="stat-value" id="edge-count">0</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="tabs">
+            <div class="tab active" data-tab="json">JSON</div>
+            <div class="tab" data-tab="compile">Compile</div>
+        </div>
+
+        <div class="tab-content active" id="tab-json">
+            <div class="form-group">
+                <label>Circuit JSON</label>
+                <textarea id="circuit-json" rows="15" readonly placeholder="Circuit will appear here..."></textarea>
+            </div>
+            <button id="refresh-json">Refresh JSON</button>
+            <button id="copy-json" class="secondary">Copy to Clipboard</button>
+        </div>
+
+        <div class="tab-content" id="tab-compile">
+            <div class="form-group">
+                <label>Clock Period (ps)</label>
+                <input type="number" id="clock-period" value="120" step="10">
+            </div>
+            <button id="compile-btn" class="success" disabled>Compile to Layout</button>
+
+            <div id="compile-status" class="status hidden"></div>
+
+            <div id="compile-result" class="hidden">
+                <h3>Compile Results</h3>
+
+                <div id="placement-stats" class="stats-grid hidden">
+                    <div class="stat-card">
+                        <div class="stat-label">Placed Nodes</div>
+                        <div class="stat-value" id="placed-nodes">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Width (μm)</div>
+                        <div class="stat-value" id="layout-width">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Height (μm)</div>
+                        <div class="stat-value" id="layout-height">-</div>
+                    </div>
+                </div>
+
+                <div id="routing-stats" class="stats-grid hidden">
+                    <div class="stat-card">
+                        <div class="stat-label">Routed Nets</div>
+                        <div class="stat-value" id="routed-nets">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Length (μm)</div>
+                        <div class="stat-value" id="route-length">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">JTL Routes</div>
+                        <div class="stat-value" id="jtl-count">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">PTL Routes</div>
+                        <div class="stat-value" id="ptl-count">-</div>
+                    </div>
+                </div>
+
+                <div id="timing-stats" class="stats-grid hidden">
+                    <div class="stat-card">
+                        <div class="stat-label">Setup Slack (ps)</div>
+                        <div class="stat-value" id="setup-slack">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Hold Slack (ps)</div>
+                        <div class="stat-value" id="hold-slack">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Critical Path (ps)</div>
+                        <div class="stat-value" id="critical-path">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Timing Closure</div>
+                        <div class="stat-value" id="timing-closure">-</div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <h4>Full Result JSON</h4>
+                    <pre id="result-json"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, {
+            version,
+            Circuit,
+            example_circuit_json,
+            compile_json
+        } from '../pkg/rflux_wasm.js';
+
+        let circuit = null;
+        let rfluxReady = false;
+
+        async function run() {
+            try {
+                await init();
+                rfluxReady = true;
+
+                document.getElementById('version').value = version();
+                document.getElementById('init-status').className = 'status success';
+                document.getElementById('init-status').textContent = 'rflux WebAssembly module loaded successfully!';
+                document.getElementById('compile-btn').disabled = false;
+
+                circuit = new Circuit();
+                updateStats();
+            } catch (err) {
+                document.getElementById('init-status').className = 'status error';
+                document.getElementById('init-status').textContent = 'Error loading rflux: ' + err;
+                console.error(err);
+            }
+        }
+
+        function updateStats() {
+            if (!circuit) return;
+            document.getElementById('node-count').textContent = circuit.node_count();
+            document.getElementById('edge-count').textContent = circuit.edge_count();
+            document.getElementById('circuit-json').value = circuit.to_json();
+        }
+
+        // Tab handling
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Add node
+        document.getElementById('add-node').addEventListener('click', () => {
+            if (!circuit) return;
+
+            const type = document.getElementById('node-type').value;
+            const name = document.getElementById('node-name').value || `node_${circuit.node_count()}`;
+            const logicOp = document.getElementById('logic-op').value || null;
+
+            try {
+                const id = circuit.add_node(type, name, logicOp);
+                document.getElementById('node-name').value = '';
+                updateStats();
+            } catch (err) {
+                alert('Error adding node: ' + err);
+            }
+        });
+
+        // Connect nodes
+        document.getElementById('connect-nodes').addEventListener('click', () => {
+            if (!circuit) return;
+
+            const fromNode = parseInt(document.getElementById('from-node').value);
+            const fromPort = parseInt(document.getElementById('from-port').value);
+            const toNode = parseInt(document.getElementById('to-node').value);
+            const toPort = parseInt(document.getElementById('to-port').value);
+
+            try {
+                circuit.connect(fromNode, fromPort, toNode, toPort);
+                updateStats();
+            } catch (err) {
+                alert('Error connecting nodes: ' + err);
+            }
+        });
+
+        // Load example
+        document.getElementById('load-example').addEventListener('click', () => {
+            const json = example_circuit_json();
+            circuit = Circuit.from_json(json);
+            updateStats();
+        });
+
+        // Clear all
+        document.getElementById('clear-all').addEventListener('click', () => {
+            circuit = new Circuit();
+            updateStats();
+        });
+
+        // Refresh JSON
+        document.getElementById('refresh-json').addEventListener('click', updateStats);
+
+        // Copy JSON
+        document.getElementById('copy-json').addEventListener('click', async () => {
+            const json = document.getElementById('circuit-json').value;
+            await navigator.clipboard.writeText(json);
+            alert('Copied to clipboard!');
+        });
+
+        // Compile
+        document.getElementById('compile-btn').addEventListener('click', async () => {
+            if (!circuit || !rfluxReady) return;
+
+            const status = document.getElementById('compile-status');
+            const resultDiv = document.getElementById('compile-result');
+
+            status.className = 'status info';
+            status.textContent = 'Compiling...';
+            status.classList.remove('hidden');
+            resultDiv.classList.add('hidden');
+
+            try {
+                const circuitJson = circuit.to_json();
+                const options = {
+                    clock_period_ps: parseFloat(document.getElementById('clock-period').value)
+                };
+
+                const resultJson = compile_json(circuitJson, JSON.stringify(options));
+                const result = JSON.parse(resultJson);
+
+                document.getElementById('result-json').textContent = JSON.stringify(result, null, 2);
+
+                if (result.success) {
+                    status.className = 'status success';
+                    status.textContent = 'Compilation successful!';
+
+                    if (result.placement) {
+                        document.getElementById('placement-stats').classList.remove('hidden'));
+                        document.getElementById('placed-nodes').textContent = result.placement.placed_nodes;
+                        document.getElementById('layout-width').textContent = result.placement.width_um.toFixed(2);
+                        document.getElementById('layout-height').textContent = result.placement.height_um.toFixed(2);
+                    }
+                    if (result.routing) {
+                        document.getElementById('routing-stats').classList.remove('hidden');
+                        document.getElementById('routed-nets').textContent = result.routing.routed_nets;
+                        document.getElementById('route-length').textContent = result.routing.total_length_um.toFixed(2);
+                        document.getElementById('jtl-count').textContent = result.routing.jtl_routes;
+                        document.getElementById('ptl-count').textContent = result.routing.ptl_routes;
+                    }
+                    if (result.timing) {
+                        document.getElementById('timing-stats').classList.remove('hidden');
+                        document.getElementById('setup-slack').textContent = result.timing.worst_setup_slack_ps.toFixed(2);
+                        document.getElementById('hold-slack').textContent = result.timing.worst_hold_slack_ps.toFixed(2);
+                        document.getElementById('critical-path').textContent = result.timing.critical_path_delay_ps.toFixed(2);
+                        document.getElementById('timing-closure').textContent = result.timing.timing_closed ? '✓ Yes' : '✗ No';
+                        document.getElementById('timing-closure').style.color = result.timing.timing_closed ? '#27ae60' : '#e74c3c';
+                    }
+                } else {
+                    status.className = 'status error';
+                    status.textContent = 'Compilation failed: ' + result.error;
+                }
+
+                resultDiv.classList.remove('hidden');
+            } catch (err) {
+                status.className = 'status error';
+                status.textContent = 'Error compiling: ' + err;
+                console.error(err);
+            }
+        });
+
+        // Initialize
+        run();
+    </script>
+</body>
+</html>

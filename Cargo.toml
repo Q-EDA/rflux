@@ -18,6 +18,7 @@ members = [
 	"crates/drc",
 	"crates/py",
 	"crates/verilog",
+	"crates/wasm",
 ]
 resolver = "2"
 
