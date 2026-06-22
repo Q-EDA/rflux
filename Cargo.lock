@@ -1147,7 +1147,7 @@ dependencies = [
 name = "rflux-margin"
 version = "0.1.0"
 dependencies = [
- "rand 0.8.6",
+ "rand 0.9.4",
  "rflux-ir",
  "rflux-route",
  "rflux-tech",
@@ -1238,7 +1238,7 @@ dependencies = [
 name = "rflux-timing"
 version = "0.1.0"
 dependencies = [
- "rand 0.8.6",
+ "rand 0.9.4",
  "rayon",
  "rflux-extract",
  "rflux-ir",
