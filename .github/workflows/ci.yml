@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -324,7 +324,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -345,7 +345,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -482,7 +482,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -606,7 +606,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -653,7 +653,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -680,7 +680,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -723,7 +723,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
@@ -766,7 +766,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup shared CI environment
         uses: ./.github/actions/setup-rflux-ci
