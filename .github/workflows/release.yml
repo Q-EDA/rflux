@@ -95,7 +95,7 @@ jobs:
         run: ls -lR release-assets
 
       - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Tag name: prefer the triggering git tag; fall back to the dispatch input.
           tag_name: ${{ github.ref_name || inputs.tag }}
